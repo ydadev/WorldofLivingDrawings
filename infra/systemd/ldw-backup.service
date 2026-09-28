@@ -1,0 +1,9 @@
+[Unit]
+Description=World of Living Drawings local recovery backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ldw/infra/backup-local.sh
+UMask=0077

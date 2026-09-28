@@ -1,0 +1,20 @@
+name: Repository policy
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Validate repository and commit metadata
+        run: node tools/check-repository.mjs --history
+      - name: Check shell syntax
+        run: |
+          bash -n infra/bootstrap-ubuntu.sh infra/backup-local.sh
+          sh -n infra/postgres/10-app.sh .githooks/pre-commit .githooks/commit-msg .githooks/pre-push
