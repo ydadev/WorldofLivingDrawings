@@ -7,7 +7,7 @@
 | ID | Статус | Задача и критерий готовности | Зависимости |
 |---|---|---|---|
 | PREP-01 | DONE | Согласовать MVP, события, оба пути раскраски, камеру и эксплуатационные правила; актуальное ТЗ записано | — |
-| PREP-02 | IN_PROGRESS | Правила, статусы, журнал, Git privacy hooks и CI; первая публикация проверена | PREP-01 |
+| PREP-02 | DONE | Правила, статусы, журнал, Git privacy hooks и CI; первая публикация 1ec6fc0 проверена, CI PASS | PREP-01 |
 | INFRA-01 | DONE | Обновлённая Ubuntu, Docker/Compose, nginx, NTP, firewall, автозапуск; проверено после reboot, см. журнал | — |
 | INFRA-02 | DONE | HTTPS 200 и двухсторонний WSS через NPM; БД без port binding, probe удалён | INFRA-01 |
 | INFRA-03 | DONE | PostgreSQL с постоянным volume, отдельной ролью, digest; контрольная строка пережила reboot | INFRA-01 |

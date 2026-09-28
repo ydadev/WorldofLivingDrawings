@@ -29,3 +29,9 @@ MemTotal после reboot 5173120 kB ≈ 4,9 GiB. В boot log ядро изна
 Локальные проверки правил Git — PASS: валидная дата принимается; невозможная дата, текст/тело сообщения, лишняя пустая строка и неподходящий author отклоняются. Проверка файлов/ссылок/identity перед коммитом — PASS. Первый запуск теста в песочнице не смог создать дочерний процесс; повтор с разрешённым запуском завершился успешно. GitHub CI проверяется после первой публикации; product/load/TV tests — NOT_RUN.
 
 Дополнительная проверка HTTP → HTTPS на NPM: PASS (301). В KVM обнаружено устройство virtio_balloon; точные значения minimum/ballooning проверяются на гипервизоре. Markdown hard breaks исходного ТЗ сохранены без изменения оригинала; для Markdown настроено исключение завершающих пробелов из проверки whitespace.
+
+## 2026-09-28 — публикация подготовки (PREP-02)
+
+Первый коммит `1ec6fc0e002b2c49a4a45a11a261e75e5755a1ba` опубликован в main. Author/committer — ydadev и служебный noreply; всё сообщение — `2026-09-28`. Проверка всей истории — PASS. [GitHub CI первого коммита](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36438957809) завершился success: policy/metadata и shell syntax — PASS. Ключи, инвентарь и backup не входят в tracked files.
+
+Подготовлены AGENTS, DEVELOPMENT, STATUS, TASKS, WORKLOG, DECISIONS, INFRASTRUCTURE, RUNBOOK и CONTINUE. Последний запрос о папке backup отражён в operating-rules и ADR-013. Добавлен безопасный образец runtime.env. PREP-01/02 и INFRA-01…04 завершены; следующий разрешённый шаг разработки — RISK-01. Открыты INFRA-05 (внешнее хранение позже), INFRA-06 (выделенная RAM), RISK-TV (реальное устройство). Продуктовая разработка в эту подготовительную поставку не включена.
