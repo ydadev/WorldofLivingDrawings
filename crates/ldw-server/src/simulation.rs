@@ -923,6 +923,133 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     #[tokio::test]
+    #[ignore = "run against a fresh PostgreSQL database to measure three real-time runners"]
+    async fn three_hundred_fish_progress_across_three_real_time_scenes() {
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO accounts (id, login, role, password_hash) \
+             VALUES ($1, $2, 'owner', 'test-hash')",
+        )
+        .bind(owner)
+        .bind(format!("three-scenes-{owner}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut scenes = Vec::new();
+        for scene_number in 0..3 {
+            let session = Uuid::new_v4();
+            let scene_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+                .bind(session)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO scenes (id, session_id, world_id, world_version) \
+                 VALUES ($1, $2, 'underwater', 1)",
+            )
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+                .bind(scene_id)
+                .bind(session)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let mut world = initial_world(scene_id).unwrap();
+            let mut entities = Vec::new();
+            for fish in 0..ldw_sim::MAX_FISH {
+                let fish_id = Uuid::new_v4();
+                let position = Point {
+                    x: -6.3 + (fish % 10) as f32 * 1.4,
+                    y: -3.3 + (fish / 10) as f32 * 0.73,
+                };
+                world.spawn_fish(fish_id.as_u128(), position, 1.2).unwrap();
+                entities.push(json!({
+                    "id": format!("fish-{:032x}", fish_id.as_u128()),
+                    "definitionId": if fish % 2 == 0 { "coral-fish" } else { "stream-fish" },
+                    "definitionVersion": 1,
+                    "paintBlobId": "paint-load-fixture",
+                    "position": position,
+                }));
+            }
+            let state = json!({
+                "entities": entities,
+                "simulation": world.checkpoint(),
+                "activeActions": [],
+                "pendingInteractions": [
+                    {
+                        "type": "interaction_requested",
+                        "commandId": Uuid::new_v4(),
+                        "interactionId": "feed",
+                        "point": {"x": 0.0, "y": 0.0},
+                    },
+                    {
+                        "type": "interaction_requested",
+                        "commandId": Uuid::new_v4(),
+                        "interactionId": "boat",
+                        "point": {"x": 1.0, "y": 2.0},
+                    },
+                ],
+            });
+            sqlx::query("UPDATE scenes SET state = $1::jsonb WHERE id = $2")
+                .bind(state)
+                .bind(scene_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            scenes.push((scene_number, scene_id));
+        }
+
+        let (stop, receiver) = watch::channel(false);
+        let hub = SimulationHub::default();
+        let mut frames = hub.subscribe();
+        let started = tokio::time::Instant::now();
+        let supervisor = tokio::spawn(run(pool.clone(), receiver, hub));
+        let deadline = started + Duration::from_secs(12);
+        let mut frame_counts = std::collections::HashMap::<Uuid, usize>::new();
+        let mut last_ticks = std::collections::HashMap::<Uuid, u64>::new();
+        while let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+            match timeout(remaining, frames.recv()).await {
+                Ok(Ok(frame)) => {
+                    assert_eq!(frame.positions.len(), ldw_sim::MAX_FISH);
+                    *frame_counts.entry(frame.scene_id).or_default() += 1;
+                    last_ticks.insert(frame.scene_id, frame.simulation_tick);
+                }
+                Ok(Err(error)) => panic!("lost a position frame: {error}"),
+                Err(_) => break,
+            }
+        }
+        stop.send(true).unwrap();
+        timeout(Duration::from_secs(5), supervisor)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        for (scene_number, scene_id) in scenes {
+            let count = frame_counts.get(&scene_id).copied().unwrap_or_default();
+            let last = last_ticks.get(&scene_id).copied().unwrap_or_default();
+            let restored = load_scene(&pool, scene_id).await.unwrap();
+            println!(
+                "scene={scene_number} frames={count} last_frame_tick={last} persisted_tick={} fish={}",
+                restored.persisted_tick,
+                restored.world.fish().len()
+            );
+            assert!(count >= 18, "scene {scene_number} stopped sending frames");
+            assert!(last >= 180, "scene {scene_number} fell behind real time");
+            assert!(restored.world.tick_number() >= last);
+            assert_eq!(restored.world.fish().len(), ldw_sim::MAX_FISH);
+            assert!(restored.revision >= 1, "feed and boat were not applied");
+        }
+    }
+
+    #[tokio::test]
     #[ignore = "run against a fresh database with LDW_TEST_SIMULATED_SESSION_LIMIT=3"]
     async fn simulated_session_limit_rejects_fourth_concurrent_start() {
         assert_eq!(
