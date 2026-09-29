@@ -11,21 +11,21 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
 
 #[cfg(test)]
 pub(crate) async fn test_pool() -> PgPool {
-    static POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
-    POOL.get_or_init(|| async {
-        let database_url = std::env::var("DATABASE_URL").expect("isolated test database");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(30)
-            .connect(&database_url)
-            .await
-            .expect("connect test PostgreSQL");
-        migrate(&pool)
-            .await
-            .expect("apply migrations once before parallel tests");
-        pool
-    })
-    .await
-    .clone()
+    static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    MIGRATED
+        .get_or_init(|| async {
+            let database_url = std::env::var("DATABASE_URL").expect("isolated test database");
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect test PostgreSQL");
+            migrate(&pool)
+                .await
+                .expect("apply migrations once before parallel tests");
+        })
+        .await;
+    PgPool::connect(&std::env::var("DATABASE_URL").expect("isolated test database"))
+        .await
+        .expect("connect test PostgreSQL")
 }
 
 #[cfg(test)]

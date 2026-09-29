@@ -631,7 +631,7 @@ mod tests {
             scene_id,
             receiver,
             hub,
-            Duration::from_millis(1),
+            Duration::from_millis(5),
         ));
         let initial = timeout(Duration::from_secs(5), frames.recv())
             .await
@@ -747,7 +747,7 @@ mod tests {
             scene_id,
             receiver,
             hub,
-            Duration::from_millis(1),
+            Duration::from_millis(5),
         ));
         let resumed = timeout(Duration::from_secs(5), async {
             loop {
