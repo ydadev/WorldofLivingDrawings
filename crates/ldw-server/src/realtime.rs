@@ -633,11 +633,15 @@ pub async fn process_command(
                 }
             };
             if code.is_none() && state.get("simulation").is_none() {
-                initial_checkpoint = Some(
-                    simulation::initial_world(access.scene.scene_id)
-                        .map_err(|_| AccessError::SceneState)?
-                        .checkpoint(),
-                );
+                if simulation::simulation_slot_available(&mut tx).await? {
+                    initial_checkpoint = Some(
+                        simulation::initial_world(access.scene.scene_id)
+                            .map_err(|_| AccessError::SceneState)?
+                            .checkpoint(),
+                    );
+                } else {
+                    code = Some("SIMULATED_SESSION_LIMIT");
+                }
             }
         }
     }

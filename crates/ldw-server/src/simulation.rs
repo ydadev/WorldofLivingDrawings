@@ -26,6 +26,37 @@ pub enum SimulationError {
     Checkpoint(#[from] serde_json::Error),
     #[error("invalid first fish publication")]
     InvalidPublication,
+    #[error("three simulated sessions are already running")]
+    SessionLimit,
+}
+
+#[cfg(not(test))]
+const MAX_SIMULATED_SESSIONS: i64 = 3;
+const ADMISSION_LOCK: i64 = i64::from_be_bytes(*b"LDWSIM03");
+
+/// Call only inside the transaction that creates a scene's first checkpoint.
+/// The transaction-level lock serializes the count and the subsequent write.
+pub(crate) async fn simulation_slot_available(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(ADMISSION_LOCK)
+        .execute(&mut **tx)
+        .await?;
+    let running: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sessions s JOIN scenes c ON c.id = s.active_scene_id \
+         WHERE s.status = 'running' AND c.state ? 'simulation'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    #[cfg(test)]
+    let limit = std::env::var("LDW_TEST_SIMULATED_SESSION_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(1_000);
+    #[cfg(not(test))]
+    let limit = MAX_SIMULATED_SESSIONS;
+    Ok(running < limit)
 }
 
 pub struct LoadedScene {
@@ -237,6 +268,9 @@ pub(crate) async fn publish_first_fish_tx(
             .is_some_and(|value| !matches!(value, Value::Array(entities) if entities.is_empty()))
     {
         return Err(SimulationError::InvalidScene);
+    }
+    if !simulation_slot_available(tx).await? {
+        return Err(SimulationError::SessionLimit);
     }
     let mut world = initial_world(scene_id)?;
     world
@@ -887,6 +921,174 @@ mod tests {
     use ldw_sim::Point;
     use sha2::{Digest, Sha256};
     use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    #[ignore = "run against a fresh database with LDW_TEST_SIMULATED_SESSION_LIMIT=3"]
+    async fn simulated_session_limit_rejects_fourth_concurrent_start() {
+        assert_eq!(
+            std::env::var("LDW_TEST_SIMULATED_SESSION_LIMIT").as_deref(),
+            Ok("3")
+        );
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO accounts (id, login, role, password_hash) \
+             VALUES ($1, $2, 'owner', 'test-hash')",
+        )
+        .bind(owner)
+        .bind(format!("capacity-{owner}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut sessions = Vec::new();
+        let mut scenes = Vec::new();
+        for _ in 0..4 {
+            let session = Uuid::new_v4();
+            let scene = Uuid::new_v4();
+            sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+                .bind(session)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO scenes (id, session_id, world_id, world_version) \
+                 VALUES ($1, $2, 'underwater', 1)",
+            )
+            .bind(scene)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+                .bind(scene)
+                .bind(session)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sessions.push(session);
+            scenes.push(scene);
+        }
+        let tasks = scenes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, scene)| {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    let result = publish_first_fish(
+                        &pool,
+                        scene,
+                        Uuid::new_v4(),
+                        "coral-fish",
+                        "paint-capacity",
+                        Point { x: 0.0, y: 0.0 },
+                    )
+                    .await;
+                    (index, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut winners = Vec::new();
+        let mut loser = None;
+        for task in tasks {
+            let (index, result) = task.await.unwrap();
+            match result {
+                Ok(_) => winners.push(index),
+                Err(SimulationError::SessionLimit) => {
+                    assert!(loser.replace(index).is_none());
+                }
+                Err(error) => panic!("unexpected publication error: {error}"),
+            }
+        }
+        assert_eq!(winners.len(), 3);
+        let loser = loser.unwrap();
+        let running: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sessions s JOIN scenes c ON c.id = s.active_scene_id \
+             WHERE s.status = 'running' AND c.state ? 'simulation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(running, 3);
+        let loser_state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scenes[loser])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(loser_state.get("simulation").is_none());
+
+        let token = Uuid::new_v4().to_string();
+        let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+             VALUES ($1, $2, $3, $3, now() + interval '1 day')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(token_hash.to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = AccessStore::new(pool.clone(), [5; 32]);
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 8_000;
+        let command = InteractionCommand {
+            kind: "command".into(),
+            command_id: Uuid::new_v4(),
+            session_id: sessions[loser],
+            scene_id: scenes[loser],
+            scene_epoch: 1,
+            interaction_id: "feed".into(),
+            point: realtime::Point { x: 0.0, y: 0.0 },
+            expires_at,
+        };
+        let rejected =
+            realtime::process_command(&store, GrantKind::Owner, &token, sessions[loser], &command)
+                .await
+                .unwrap();
+        assert_eq!(rejected["accepted"], false);
+        assert_eq!(rejected["code"], "SIMULATED_SESSION_LIMIT");
+        sqlx::query("UPDATE sessions SET status = 'paused' WHERE id = $1")
+            .bind(sessions[winners[0]])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let replay =
+            realtime::process_command(&store, GrantKind::Owner, &token, sessions[loser], &command)
+                .await
+                .unwrap();
+        assert_eq!(replay, rejected);
+        let mut next_command = command;
+        next_command.command_id = Uuid::new_v4();
+        let accepted = realtime::process_command(
+            &store,
+            GrantKind::Owner,
+            &token,
+            sessions[loser],
+            &next_command,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        let new_state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scenes[loser])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(new_state.get("simulation").is_some());
+        let running: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sessions s JOIN scenes c ON c.id = s.active_scene_id \
+             WHERE s.status = 'running' AND c.state ? 'simulation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(running, 3);
+    }
 
     #[tokio::test]
     async fn boat_command_moves_threat_and_finishes_durably() {

@@ -148,6 +148,9 @@ impl From<UploadError> for ApiError {
             UploadError::Simulation(crate::simulation::SimulationError::InvalidPublication) => {
                 Self(StatusCode::CONFLICT, "SCENE_FULL")
             }
+            UploadError::Simulation(crate::simulation::SimulationError::SessionLimit) => {
+                Self(StatusCode::CONFLICT, "SIMULATED_SESSION_LIMIT")
+            }
             UploadError::InvalidScene
             | UploadError::Database(_)
             | UploadError::Storage(_)

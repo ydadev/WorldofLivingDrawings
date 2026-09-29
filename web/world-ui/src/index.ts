@@ -42,6 +42,7 @@ const REASONS: Record<string, string> = {
   FEED_SCENE_COOLDOWN: 'Подождите перед следующим кормлением.',
   STALE_SCENE: 'Мир изменился. Дождитесь обновления сцены.',
   SCENE_NOT_RUNNING: 'Сцена сейчас остановлена.',
+  SIMULATED_SESSION_LIMIT: 'Уже работают три мира. Повторите, когда один из них остановится.',
   EXPIRED_COMMAND: 'Команда устарела. Выберите точку ещё раз.',
 };
 

@@ -67,6 +67,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check server crate and migration constraints
         run: cargo test -p ldw-server --locked
+      - name: Check concurrent simulation admission in a fresh database
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ldw_capacity'
+          DATABASE_URL=postgres://postgres@127.0.0.1:5432/ldw_capacity \
+          LDW_TEST_SIMULATED_SESSION_LIMIT=3 \
+          cargo test -p ldw-server --locked simulated_session_limit_rejects_fourth_concurrent_start -- --ignored
       - name: Build restored-scene verification probe
         run: cargo build -p ldw-server --example restore_probe --locked
       - name: Check blob GC maintenance command
