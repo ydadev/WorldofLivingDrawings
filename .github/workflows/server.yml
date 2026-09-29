@@ -7,6 +7,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/**'
+      - '.node-version'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'web/**'
+      - 'content/**'
+      - 'prototypes/wasm-webgl/**'
+      - 'tools/test-real-ui-browser.mjs'
   pull_request:
     paths:
       - '.github/workflows/server.yml'
@@ -14,6 +21,13 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'crates/**'
+      - '.node-version'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'web/**'
+      - 'content/**'
+      - 'prototypes/wasm-webgl/**'
+      - 'tools/test-real-ui-browser.mjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -49,3 +63,21 @@ jobs:
         run: cargo test -p ldw-sim --locked
       - name: Check browser WebAssembly target for simulation core
         run: rustup target add wasm32-unknown-unknown --toolchain 1.98.1 && cargo build -p ldw-sim --target wasm32-unknown-unknown --locked
+      - name: Install pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install minimal browser WebAssembly target
+        run: rustup target add wasm32v1-none --toolchain 1.98.1
+      - name: Install root workspace dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install browser dependencies
+        working-directory: prototypes/wasm-webgl
+        run: npm ci --no-audit --no-fund
+      - name: Build browser pages
+        working-directory: prototypes/wasm-webgl
+        run: npm run build
+      - name: Test browser pages with real server and PostgreSQL
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:real-ui
