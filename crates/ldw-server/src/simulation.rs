@@ -921,14 +921,19 @@ mod tests {
     use super::*;
     use crate::{
         access::{AccessStore, GrantKind},
+        blob_store::BlobStore,
+        http::{self, AppState},
         realtime::{self, InteractionCommand},
     };
+    use futures_util::{SinkExt, StreamExt};
     use ldw_sim::Point;
     use sha2::{Digest, Sha256};
+    use std::sync::Arc;
     use tokio::time::{sleep, timeout};
+    use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
 
     #[tokio::test]
-    #[ignore = "run against a fresh PostgreSQL database to measure three real-time runners"]
+    #[ignore = "run against a fresh PostgreSQL database to measure three runners and 30 Controllers"]
     async fn three_hundred_fish_progress_across_three_real_time_scenes() {
         let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
@@ -1009,12 +1014,132 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            scenes.push((scene_number, scene_id));
+            scenes.push((scene_number, session, scene_id));
         }
 
         let (stop, receiver) = watch::channel(false);
         let hub = SimulationHub::default();
         let mut frames = hub.subscribe();
+        let store = AccessStore::new(pool.clone(), [7u8; 32]);
+        let blob_root = std::env::temp_dir().join(format!("ldw-load-blobs-{}", Uuid::new_v4()));
+        let app = http::router(AppState {
+            access: store,
+            blob_store: BlobStore::create(blob_root).unwrap(),
+            public_origin: Arc::from("https://world.example.test"),
+            simulation_hub: hub.clone(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let mut controllers = tokio::task::JoinSet::new();
+        let client_start = Arc::new(tokio::sync::Barrier::new(31));
+        for &(scene_number, session_id, scene_id) in &scenes {
+            let url = format!("ws://{address}/api/sessions/{session_id}/ws");
+            for controller_number in 0..10 {
+                let token = format!("load-controller-{}", Uuid::new_v4());
+                let csrf = format!("load-csrf-{}", Uuid::new_v4());
+                sqlx::query(
+                    "INSERT INTO device_grants (id, session_id, participant_id, role, \
+                     token_hash, csrf_hash, expires_at, last_heartbeat_at) \
+                     VALUES ($1, $2, $3, 'controller', $4, $5, now() + interval '1 hour', now())",
+                )
+                .bind(Uuid::new_v4())
+                .bind(session_id)
+                .bind(Uuid::new_v4())
+                .bind(crate::access::hash_token(&token).to_vec())
+                .bind(crate::access::hash_token(&csrf).to_vec())
+                .execute(&pool)
+                .await
+                .unwrap();
+                let mut request = url.as_str().into_client_request().unwrap();
+                request
+                    .headers_mut()
+                    .insert("origin", "https://world.example.test".parse().unwrap());
+                request.headers_mut().insert(
+                    "cookie",
+                    format!("__Host-ldw-controller={token}").parse().unwrap(),
+                );
+                let (mut socket, _) = timeout(
+                    Duration::from_secs(3),
+                    tokio_tungstenite::connect_async(request),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                socket
+                    .send(ClientMessage::text(
+                        json!({"type":"hello","csrf":csrf}).to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                let snapshot: Value = serde_json::from_str(
+                    timeout(Duration::from_secs(3), socket.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap()
+                        .to_text()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(snapshot["type"], "snapshot");
+                assert_eq!(snapshot["sceneId"], scene_id.to_string());
+                assert_eq!(
+                    snapshot["entities"].as_array().unwrap().len(),
+                    ldw_sim::MAX_FISH
+                );
+                let client_start = client_start.clone();
+                controllers.spawn(async move {
+                    client_start.wait().await;
+                    let mut count = 0;
+                    let mut last_tick = 0;
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+                    while let Some(remaining) =
+                        deadline.checked_duration_since(tokio::time::Instant::now())
+                    {
+                        let message = match timeout(remaining, socket.next()).await {
+                            Ok(Some(Ok(message))) => message,
+                            Ok(other) => panic!(
+                                "scene {scene_number} Controller {controller_number} closed: {other:?}"
+                            ),
+                            Err(_) => break,
+                        };
+                        match message {
+                            ClientMessage::Text(text) => {
+                                let value: Value = serde_json::from_str(&text).unwrap();
+                                if value["type"] == "positions" {
+                                    assert_eq!(value["sceneId"], scene_id.to_string());
+                                    assert_eq!(
+                                        value["positions"].as_array().unwrap().len(),
+                                        ldw_sim::MAX_FISH
+                                    );
+                                    let tick = value["simulationTick"].as_u64().unwrap();
+                                    assert!(tick > last_tick);
+                                    last_tick = tick;
+                                    count += 1;
+                                }
+                            }
+                            ClientMessage::Ping(payload) => {
+                                socket.send(ClientMessage::Pong(payload)).await.unwrap();
+                            }
+                            ClientMessage::Close(_) => panic!(
+                                "scene {scene_number} Controller {controller_number} closed early"
+                            ),
+                            _ => {}
+                        }
+                    }
+                    (scene_number, controller_number, count, last_tick)
+                });
+            }
+        }
+        client_start.wait().await;
         let started = tokio::time::Instant::now();
         let supervisor = tokio::spawn(run(pool.clone(), receiver, hub));
         let deadline = started + Duration::from_secs(12);
@@ -1037,7 +1162,18 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        for (scene_number, scene_id) in scenes {
+        let mut client_frames = 0;
+        while let Some(result) = controllers.join_next().await {
+            let (scene_number, controller_number, count, last_tick) = result.unwrap();
+            assert!(
+                count >= 18 && last_tick >= 180,
+                "scene {scene_number} Controller {controller_number} received {count} frames, last tick {last_tick}"
+            );
+            client_frames += count;
+        }
+        server.abort();
+        println!("30 Controllers received {client_frames} position frames");
+        for (scene_number, _, scene_id) in scenes {
             let count = frame_counts.get(&scene_id).copied().unwrap_or_default();
             let last = last_ticks.get(&scene_id).copied().unwrap_or_default();
             let restored = load_scene(&pool, scene_id).await.unwrap();
