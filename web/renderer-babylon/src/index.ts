@@ -1,3 +1,5 @@
+import '@babylonjs/loaders/glTF';
+import type { AssetContainer, InstantiatedEntries } from '@babylonjs/core/assetContainer';
 import '@babylonjs/core/Culling/ray';
 import { Camera } from '@babylonjs/core/Cameras/camera';
 import { FreeCamera } from '@babylonjs/core/Cameras/freeCamera';
@@ -6,19 +8,31 @@ import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight';
 import { Color3, Color4 } from '@babylonjs/core/Maths/math.color';
 import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { Plane } from '@babylonjs/core/Maths/math.plane';
+import { LoadAssetContainerAsync } from '@babylonjs/core/Loading/sceneLoader';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { Scene } from '@babylonjs/core/scene';
 import type { Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
 
-/** Minimal WebGL 2 renderer for the empty synchronized scene in CORE-01. */
+const modelByDefinition: Record<string, string> = {
+  'coral-fish': 'coral.glb',
+  'stream-fish': 'stream.glb',
+};
+
+/** Fixed side-view renderer. Each Entity receives its own material and paint texture. */
 export class BabylonRendererAdapter implements RendererAdapter {
   readonly engine: Engine;
   readonly scene: Scene;
   private readonly camera: FreeCamera;
   private readonly markers = new Map<string, AbstractMesh>();
+  private readonly modelCache = new Map<string, Promise<AssetContainer>>();
+  private readonly modelEntries = new Map<string, InstantiatedEntries>();
+  private readonly paintTextures = new Map<string, Texture>();
+  private readonly entityVersions = new Map<string, string>();
   private readonly movement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
@@ -26,8 +40,11 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private sceneEpoch = 0;
   private revision = 0;
   private simulationTick = 0;
+  private disposed = false;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  constructor(private readonly canvas: HTMLCanvasElement,
+    private readonly assetBaseUrl = '/content/underwater/assets/',
+    private readonly paintUrl: (blobId: string) => string = id => `/api/paint/${encodeURIComponent(id)}`) {
     this.engine = new Engine(canvas, true);
     this.scene = new Scene(this.engine);
     this.scene.clearColor = new Color4(.03, .15, .23, 1);
@@ -103,12 +120,17 @@ export class BabylonRendererAdapter implements RendererAdapter {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.resizeObserver.disconnect();
+    for (const id of [...this.markers.keys()]) this.removeMarker(id);
     this.scene.dispose();
     this.engine.dispose();
   }
 
   private upsert(entity: SceneEntity): void {
+    const version = `${entity.definitionId}@${entity.definitionVersion}/${entity.paintBlobId ?? ''}`;
+    if (this.entityVersions.get(entity.id) !== version && this.markers.has(entity.id))
+      this.removeMarker(entity.id);
     this.movement.delete(entity.id);
     let marker = this.markers.get(entity.id);
     if (!marker) {
@@ -117,16 +139,59 @@ export class BabylonRendererAdapter implements RendererAdapter {
       material.diffuseColor = new Color3(.9, .72, .28);
       marker.material = material;
       this.markers.set(entity.id, marker);
+      this.entityVersions.set(entity.id, version);
+      if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])
+        throw new Error('UNSUPPORTED_ENTITY_DEFINITION');
+      void this.loadModel(entity, marker).catch(error => {
+        if (this.markers.get(entity.id) === marker)
+          console.error(`Model load failed for ${entity.definitionId}`, error);
+      });
     }
     marker.position.set(entity.position.x, entity.position.y, 0);
   }
 
   private removeMarker(id: string): void {
     this.movement.delete(id);
+    this.entityVersions.delete(id);
+    this.paintTextures.get(id)?.dispose();
+    this.paintTextures.delete(id);
+    this.modelEntries.get(id)?.dispose();
+    this.modelEntries.delete(id);
     const marker = this.markers.get(id);
     marker?.material?.dispose();
     marker?.dispose();
     this.markers.delete(id);
+  }
+
+  private async loadModel(entity: SceneEntity, marker: AbstractMesh): Promise<void> {
+    const file = modelByDefinition[entity.definitionId];
+    const url = new URL(file, new URL(this.assetBaseUrl, document.baseURI)).toString();
+    let pending = this.modelCache.get(file);
+    if (!pending) {
+      pending = LoadAssetContainerAsync(url, this.scene);
+      this.modelCache.set(file, pending);
+    }
+    const container = await pending;
+    if (this.disposed || this.markers.get(entity.id) !== marker) return;
+    const entries = container.instantiateModelsToScene(name => `${entity.id}/${name}`, true,
+      { doNotInstantiate: true });
+    if (this.disposed || this.markers.get(entity.id) !== marker) { entries.dispose(); return; }
+    for (const root of entries.rootNodes) root.parent = marker;
+    this.modelEntries.set(entity.id, entries);
+    if (entity.paintBlobId) {
+      const texture = new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true);
+      this.paintTextures.set(entity.id, texture);
+      for (const root of entries.rootNodes) {
+        for (const node of root.getDescendants(false)) {
+          if (node instanceof AbstractMesh && node.material instanceof PBRMaterial &&
+              (node.material.name === 'paint' || node.material.name.endsWith('/paint'))) {
+            node.material.albedoColor = Color3.White();
+            node.material.albedoTexture = texture;
+          }
+        }
+      }
+    }
+    marker.visibility = 0;
   }
 
   private interpolate(now = performance.now()): void {

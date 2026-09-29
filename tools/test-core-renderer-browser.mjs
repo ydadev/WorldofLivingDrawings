@@ -31,6 +31,10 @@ try {
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const errors = [];
+  const consoleErrors = [];
+  let coralRequests = 0;
+  desktop.on('request', request => { if (request.url().endsWith('/fish/coral.glb')) coralRequests++; });
+  desktop.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()); });
   for (const page of [desktop, mobile]) page.on('pageerror', error => errors.push(error.message));
   await Promise.all([desktop.goto('http://127.0.0.1:4188/core.html'),
     mobile.goto('http://127.0.0.1:4188/core.html')]);
@@ -62,13 +66,41 @@ try {
       simulationTick: 0, worldId: 'other', worldVersion: 1, entities: [] }); }
     catch { wrongWorldRejected = true; }
     adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 1,
-      simulationTick: 1, upsert: [{ id: 'fish-1', definitionId: 'coral-fish',
-        definitionVersion: 1, position: { x: 2, y: -1 } }], remove: [] });
+      simulationTick: 1, upsert: [
+        { id: 'fish-1', definitionId: 'coral-fish',
+          definitionVersion: 1, position: { x: 2, y: -1 }, paintBlobId: 'red' },
+        { id: 'fish-2', definitionId: 'coral-fish',
+          definitionVersion: 1, position: { x: -2, y: 1 }, paintBlobId: 'blue' },
+      ], remove: [] });
     const mesh = adapter.scene.getMeshByName('fish-1');
     return { gapRejected, wrongWorldRejected, inserted: mesh?.position.asArray() };
   });
   assert(result.gapRejected && result.wrongWorldRejected);
   assert.deepEqual(result.inserted, [2, -1, 0]);
+  try {
+    await desktop.waitForFunction(() => ['fish-1', 'fish-2'].every(id =>
+      window.coreAdapter.scene.meshes.some(mesh => mesh.name.startsWith(`${id}/`) &&
+        mesh.material?.name.endsWith('/paint') && mesh.material.albedoTexture?.isReady())),
+      null, { timeout: 10000 });
+  } catch (error) {
+    const meshes = await desktop.evaluate(() => window.coreAdapter.scene.meshes.map(mesh =>
+      ({ name: mesh.name, material: mesh.material?.name, visible: mesh.isVisible,
+        texture: mesh.material?.albedoTexture?.url, textureReady: mesh.material?.albedoTexture?.isReady() })));
+    throw new Error(`GLB instances missing: ${JSON.stringify({ meshes, coralRequests, consoleErrors, errors })}`, { cause: error });
+  }
+  const models = await desktop.evaluate(() => {
+    const meshes = window.coreAdapter.scene.meshes;
+    const paint = id => meshes.find(mesh => mesh.name.startsWith(`${id}/`) &&
+      mesh.material?.name.endsWith('/paint'))?.material;
+    return { distinctPaintMaterials: paint('fish-1') !== paint('fish-2'),
+      distinctPaintTextures: paint('fish-1')?.albedoTexture !== paint('fish-2')?.albedoTexture,
+      texturesReady: !!paint('fish-1')?.albedoTexture?.isReady() && !!paint('fish-2')?.albedoTexture?.isReady(),
+      firstVisible: meshes.some(mesh => mesh.name.startsWith('fish-1/') && mesh.isVisible),
+      secondVisible: meshes.some(mesh => mesh.name.startsWith('fish-2/') && mesh.isVisible) };
+  });
+  assert.deepEqual(models, { distinctPaintMaterials: true, distinctPaintTextures: true,
+    texturesReady: true, firstVisible: true, secondVisible: true });
+  assert.equal(coralRequests, 1, 'one model download serves two Entity instances');
   await desktop.evaluate(() => window.coreAdapter.applyPositions({
     type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
     revision: 1, simulationTick: 10,
@@ -89,12 +121,13 @@ try {
   const removed = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 2,
-      simulationTick: 2, upsert: [], remove: ['fish-1'] });
-    return !adapter.scene.getMeshByName('fish-1');
+      simulationTick: 2, upsert: [], remove: ['fish-1', 'fish-2'] });
+    return !adapter.scene.getMeshByName('fish-1') && !adapter.scene.getMeshByName('fish-2') &&
+      !adapter.scene.meshes.some(mesh => /^fish-[12]\//.test(mesh.name));
   });
   assert(removed);
   if (errors.length) throw new Error(`Browser errors: ${errors.join(' | ')}`);
-  console.log('CORE-01 Chrome: WebGL2, fixed view, same point on desktop/mobile, snapshot/delta/gap: PASS');
+  console.log('CORE-04 Chrome: fixed view, snapshot/delta, two painted GLB instances, interpolation and cleanup: PASS');
 } finally {
   await browser?.close();
   server.kill();
