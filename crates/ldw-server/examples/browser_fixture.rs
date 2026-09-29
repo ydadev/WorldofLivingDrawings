@@ -10,7 +10,6 @@ use ldw_server::{
 };
 use sqlx::PgPool;
 use tokio::sync::watch;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -18,14 +17,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let password = env::var("LDW_UI_FIXTURE_PASSWORD")?;
     let public_origin = env::var("LDW_UI_PUBLIC_ORIGIN")?;
     let bind_address: SocketAddr = env::var("LDW_UI_BIND_ADDR")?.parse()?;
-    let name = format!("ldw_ui_{}", Uuid::new_v4().simple());
+    // The CI PostgreSQL service is disposable; a literal identifier also keeps SQLx's
+    // dynamic-SQL protection active for this test fixture.
+    const DATABASE_NAME: &str = "ldw_ui_fixture";
     let (prefix, _) = base_url
         .rsplit_once('/')
         .ok_or("database URL needs a database name")?;
-    let database_url = format!("{prefix}/{name}");
+    let database_url = format!("{prefix}/{DATABASE_NAME}");
 
     let admin_pool = PgPool::connect(&base_url).await?;
-    sqlx::query(&format!("CREATE DATABASE {name}"))
+    sqlx::query("CREATE DATABASE ldw_ui_fixture")
         .execute(&admin_pool)
         .await?;
     admin_pool.close().await;
