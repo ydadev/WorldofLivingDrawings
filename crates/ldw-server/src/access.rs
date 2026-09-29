@@ -3,7 +3,7 @@ use argon2::{
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
