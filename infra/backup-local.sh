@@ -25,6 +25,5 @@ fi
 write_backup_manifest "$partial" "$stamp" "$postgres_version" "$app_revision"
 verify_backup_manifest "$partial"
 mv "$partial" "$target/$stamp"
-# Keep at least 14 days; these paths are generated solely inside the fixed backup root.
-find "$target" -mindepth 1 -maxdepth 1 -type d -name '20??????T??????Z' -mtime +14 -exec rm -rf -- {} +
+python3 /opt/ldw/infra/backup-retention.py --apply "$target"
 printf 'Local backup completed: %s\n' "$stamp"

@@ -15,6 +15,7 @@ on:
       - 'prototypes/wasm-webgl/**'
       - 'tools/test-real-ui-browser.mjs'
       - 'tools/test-backup-consistency.sh'
+      - 'tools/test-backup-retention.py'
       - 'infra/backup-*.sh'
   pull_request:
     paths:
@@ -31,6 +32,7 @@ on:
       - 'prototypes/wasm-webgl/**'
       - 'tools/test-real-ui-browser.mjs'
       - 'tools/test-backup-consistency.sh'
+      - 'tools/test-backup-retention.py'
       - 'infra/backup-*.sh'
   workflow_dispatch:
 permissions:
@@ -75,6 +77,8 @@ jobs:
         run: cargo test -p ldw-sim --locked
       - name: Check consistent DB and blob backup
         run: bash tools/test-backup-consistency.sh
+      - name: Check backup retention boundaries
+        run: python3 tools/test-backup-retention.py
       - name: Check browser WebAssembly target for simulation core
         run: rustup target add wasm32-unknown-unknown --toolchain 1.98.1 && cargo build -p ldw-sim --target wasm32-unknown-unknown --locked
       - name: Install pinned Node
