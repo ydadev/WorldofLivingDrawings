@@ -1243,13 +1243,11 @@ mod tests {
             let viewer_token = format!("load-viewer-{}", Uuid::new_v4());
             let viewer_csrf = format!("load-viewer-csrf-{}", Uuid::new_v4());
             sqlx::query(
-                "INSERT INTO device_grants (id, session_id, participant_id, role, \
-                 token_hash, csrf_hash, expires_at) \
-                 VALUES ($1, $2, $3, 'viewer', $4, $5, now() + interval '1 hour')",
+                "INSERT INTO device_grants (id, session_id, role, token_hash, csrf_hash, expires_at) \
+                 VALUES ($1, $2, 'viewer', $3, $4, now() + interval '1 hour')",
             )
             .bind(Uuid::new_v4())
             .bind(session_id)
-            .bind(Uuid::new_v4())
             .bind(crate::access::hash_token(&viewer_token).to_vec())
             .bind(crate::access::hash_token(&viewer_csrf).to_vec())
             .execute(&pool)

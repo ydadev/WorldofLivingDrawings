@@ -459,3 +459,5 @@ Owner и Controller получили встроенные страницы ци�
 ## 2026-09-29 — CORE-04, Viewer в трёх нагруженных сценах
 
 К существующему 12-секундному PostgreSQL-прогону трёх runner по 100 рыб и 10 Controller добавлен один настоящий read-only Viewer WebSocket на сцену. Каждый должен получить snapshot своей сцены, попытаться вызвать корм и получить `READ_ONLY`, продолжать получать монотонные 2 Hz кадры со 100 рыбами и оба применённых события корм/лодка. Это проверяет доставку и запрет действий при совместной нагрузке 33 клиентов; цифровые и бумажные uploads ещё не включены. Локальные `cargo fmt --all -- --check` и `git diff --check` — PASS. Ubuntu/PostgreSQL CI — NOT_RUN до push.
+
+Первый [Ubuntu CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36636738417) этого шага — FAIL до начала нагрузочной пробы: тестовая вставка ошибочно задала `participant_id` для Viewer, нарушив `device_grants_check`. По схеме этот ID есть только у Controller; тестовая фикстура исправлена без изменения рабочего кода. Повторный CI — NOT_RUN до push.
