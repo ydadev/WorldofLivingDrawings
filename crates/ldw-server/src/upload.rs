@@ -4,7 +4,7 @@
 use ldw_sim::Point;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -45,6 +45,10 @@ pub enum UploadError {
     SceneFull,
     #[error("too many drawing uploads")]
     IntentLimit,
+    #[error("upload intent expired")]
+    Expired,
+    #[error("uploaded image conflicts with the frozen drawing")]
+    Conflict,
     #[error("invalid persisted scene state")]
     InvalidScene,
     #[error("database operation failed: {0}")]
@@ -68,6 +72,38 @@ fn valid_template(input: &UploadIntentRequest) -> bool {
         && input.layout_hash == layout["contentHash"].as_str().unwrap_or_default()
         && matches!(input.source_kind.as_str(), "paper" | "browser")
         && input.color_space == "sRGB"
+}
+
+async fn principal_id(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: GrantKind,
+    access: &SceneAccess,
+) -> Result<Uuid, UploadError> {
+    let principal: Option<Uuid> = match kind {
+        GrantKind::Owner => {
+            sqlx::query_scalar(
+                "SELECT account_id FROM owner_grants \
+                 WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()",
+            )
+            .bind(access.grant_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        }
+        GrantKind::Controller => {
+            sqlx::query_scalar(
+                "SELECT participant_id FROM device_grants \
+                 WHERE id = $1 AND session_id = $2 AND role = 'controller' \
+                 AND revoked_at IS NULL AND expires_at > now() \
+                 AND last_activity_at > now() - interval '2 hours'",
+            )
+            .bind(access.grant_id)
+            .bind(access.scene.session_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        }
+        GrantKind::Viewer => None,
+    };
+    principal.ok_or(UploadError::Forbidden)
 }
 
 /// The caller first validates the cookie, Origin and CSRF, then supplies the
@@ -121,31 +157,7 @@ pub async fn create_upload_intent(
     {
         return Err(UploadError::StaleScene);
     }
-    let principal: Option<Uuid> = match kind {
-        GrantKind::Owner => {
-            sqlx::query_scalar(
-                "SELECT account_id FROM owner_grants \
-             WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()",
-            )
-            .bind(access.grant_id)
-            .fetch_optional(&mut *tx)
-            .await?
-        }
-        GrantKind::Controller => {
-            sqlx::query_scalar(
-                "SELECT participant_id FROM device_grants \
-             WHERE id = $1 AND session_id = $2 AND role = 'controller' \
-             AND revoked_at IS NULL AND expires_at > now() \
-             AND last_activity_at > now() - interval '2 hours'",
-            )
-            .bind(access.grant_id)
-            .bind(access.scene.session_id)
-            .fetch_optional(&mut *tx)
-            .await?
-        }
-        GrantKind::Viewer => None,
-    };
-    let principal = principal.ok_or(UploadError::Forbidden)?;
+    let principal = principal_id(&mut tx, kind, access).await?;
     let entity_count = match state.get("entities") {
         None => 0,
         Some(Value::Array(items)) => items.len(),
@@ -209,13 +221,133 @@ pub async fn create_upload_intent(
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedPaintResponse {
+    pub intent_id: Uuid,
+    pub normalized_bytes: usize,
+}
+
+/// Store only bytes produced by the bounded PNG normalizer. The image stays in
+/// quarantine until a separate finalization commits an Entity and blob reference.
+pub async fn store_paint(
+    pool: &PgPool,
+    kind: GrantKind,
+    access: &SceneAccess,
+    intent_id: Uuid,
+    normalized: Vec<u8>,
+) -> Result<UploadedPaintResponse, UploadError> {
+    if kind == GrantKind::Viewer {
+        return Err(UploadError::Forbidden);
+    }
+    let mut tx = pool.begin().await?;
+    let scene: Option<(i64, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.scene_epoch, s.status, s.active_scene_id \
+         FROM sessions s JOIN scenes c ON c.session_id = s.id \
+         WHERE s.id = $1 AND c.id = $2 FOR UPDATE OF s, c",
+    )
+    .bind(access.scene.session_id)
+    .bind(access.scene.scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((epoch, status, active_scene)) = scene else {
+        return Err(UploadError::StaleScene);
+    };
+    if status != "running"
+        || active_scene != Some(access.scene.scene_id)
+        || epoch != access.scene.scene_epoch
+    {
+        return Err(UploadError::StaleScene);
+    }
+    let principal = principal_id(&mut tx, kind, access).await?;
+    let intent: Option<(i64, String, Uuid, String, bool, bool, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT scene_epoch, principal_kind, principal_id, status, \
+         reservation_until > now(), expires_at > now(), normalized_png \
+         FROM upload_intents WHERE id = $1 AND session_id = $2 AND scene_id = $3 FOR UPDATE",
+    )
+    .bind(intent_id)
+    .bind(access.scene.session_id)
+    .bind(access.scene.scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((intent_epoch, principal_kind, author, intent_status, reserved, live, previous)) =
+        intent
+    else {
+        return Err(UploadError::Forbidden);
+    };
+    if author != principal
+        || principal_kind
+            != if kind == GrantKind::Owner {
+                "owner"
+            } else {
+                "controller"
+            }
+    {
+        return Err(UploadError::Forbidden);
+    }
+    if intent_epoch != epoch {
+        return Err(UploadError::StaleScene);
+    }
+    if !live {
+        return Err(UploadError::Expired);
+    }
+    if intent_status == "uploaded" {
+        return if previous.as_deref() == Some(normalized.as_slice()) {
+            Ok(UploadedPaintResponse {
+                intent_id,
+                normalized_bytes: normalized.len(),
+            })
+        } else {
+            Err(UploadError::Conflict)
+        };
+    }
+    if intent_status != "reserved" {
+        return Err(UploadError::Conflict);
+    }
+    if !reserved {
+        let (entities, pending, reservations, session_intents, controller_intents): (i64, i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT coalesce(jsonb_array_length(c.state->'entities'), 0)::bigint, \
+                 (SELECT count(*) FROM fish_publications WHERE scene_id = c.id), \
+                 (SELECT count(*) FROM upload_intents WHERE scene_id = c.id AND status <> 'finalized' AND reservation_until > now()), \
+                 (SELECT count(*) FROM upload_intents WHERE session_id = c.session_id AND status <> 'finalized' AND reservation_until > now()), \
+                 (SELECT count(*) FROM upload_intents WHERE session_id = c.session_id AND principal_kind = 'controller' \
+                    AND principal_id = $2 AND status <> 'finalized' AND reservation_until > now()) \
+                 FROM scenes c WHERE c.id = $1",
+            )
+            .bind(access.scene.scene_id)
+            .bind(principal)
+            .fetch_one(&mut *tx)
+            .await?;
+        if entities + pending + reservations >= ldw_sim::MAX_FISH as i64 {
+            return Err(UploadError::SceneFull);
+        }
+        if session_intents >= 10 || (kind == GrantKind::Controller && controller_intents >= 1) {
+            return Err(UploadError::IntentLimit);
+        }
+    }
+    sqlx::query(
+        "UPDATE upload_intents SET normalized_png = $2, status = 'uploaded', \
+         reservation_until = expires_at WHERE id = $1",
+    )
+    .bind(intent_id)
+    .bind(&normalized)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(UploadedPaintResponse {
+        intent_id,
+        normalized_bytes: normalized.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use argon2::{Argon2, password_hash::PasswordHasher};
     use axum::{
-        body::Body,
+        body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
     use tower::ServiceExt;
@@ -241,6 +373,23 @@ mod tests {
             color_space: "sRGB".into(),
             position: Point { x: 0.0, y: 0.0 },
         }
+    }
+
+    fn image(value: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 512, 512);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .add_text_chunk("Comment".into(), "private drawing metadata".into())
+                .unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&vec![value; 512 * 512 * 4])
+                .unwrap();
+        }
+        bytes
     }
 
     #[tokio::test]
@@ -321,6 +470,127 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
+        let created_body = to_bytes(created.into_body(), 4096).await.unwrap();
+        let intent_id = Uuid::parse_str(
+            serde_json::from_slice::<Value>(&created_body).unwrap()["intentId"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let image_url = format!(
+            "/api/sessions/{}/upload-intents/{intent_id}/paint",
+            scene.session_id
+        );
+        let paint_request =
+            |origin: &str, csrf: &str, cookie: &str, media: &str, bytes: Vec<u8>| {
+                Request::builder()
+                    .method("PUT")
+                    .uri(&image_url)
+                    .header(header::ORIGIN, origin)
+                    .header("x-csrf-token", csrf)
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, media)
+                    .body(Body::from(bytes))
+                    .unwrap()
+            };
+        let painted = image(42);
+        let rejected = app
+            .clone()
+            .oneshot(paint_request(
+                "https://wrong.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/png",
+                painted.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        let rejected = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/jpeg",
+                painted.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let rejected = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/png",
+                vec![1, 2, 3],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let rejected = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/png",
+                vec![0; crate::paint_image::MAX_UPLOAD_BYTES + 1],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let stored = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/png",
+                painted.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(stored.status(), StatusCode::OK);
+        let frozen: Vec<u8> = sqlx::query_scalar(
+            "SELECT normalized_png FROM upload_intents WHERE id = $1 AND status = 'uploaded'",
+        )
+        .bind(intent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(frozen, painted);
+        assert!(
+            !frozen
+                .windows(b"private drawing metadata".len())
+                .any(|window| window == b"private drawing metadata")
+        );
+        let replay = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/png",
+                painted,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::OK);
+        let conflict = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+                "image/png",
+                image(43),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
         let persisted: i64 =
             sqlx::query_scalar("SELECT count(*) FROM upload_intents WHERE scene_id = $1")
                 .bind(scene.scene_id)
@@ -343,6 +613,18 @@ mod tests {
             .await
             .unwrap();
         let viewer_cookie = format!("__Host-ldw-viewer={}", viewer.token);
+        let rejected = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &viewer.csrf,
+                &viewer_cookie,
+                "image/png",
+                image(42),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
         let rejected = app
             .clone()
             .oneshot(http_request(
@@ -371,6 +653,18 @@ mod tests {
         .unwrap();
         let other = store.login(&other_login, &other_password).await.unwrap();
         let other_cookie = format!("__Host-ldw-owner={}", other.token);
+        let rejected = app
+            .clone()
+            .oneshot(paint_request(
+                "https://example.test",
+                &other.csrf,
+                &other_cookie,
+                "image/png",
+                image(42),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
         let rejected = app
             .clone()
             .oneshot(http_request(

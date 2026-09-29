@@ -1,21 +1,31 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path, State},
+    body::Bytes,
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
+use tokio::{sync::Semaphore, time::timeout};
 use uuid::Uuid;
 
 use crate::{
     access::{AccessError, AccessStore, GrantKind, PairCode},
+    paint_image::{self, PaintImageError},
     upload::{self, UploadError},
 };
+
+static PAINT_CPU: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
+static PAINT_QUEUE: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(20)));
 
 const OWNER_COOKIE: &str = "__Host-ldw-owner";
 const CONTROLLER_COOKIE: &str = "__Host-ldw-controller";
@@ -38,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/upload-intents",
             post(create_upload_intent),
+        )
+        .route(
+            "/api/sessions/{id}/upload-intents/{intent_id}/paint",
+            put(upload_paint).layer(DefaultBodyLimit::max(paint_image::MAX_UPLOAD_BYTES)),
         )
         .route("/api/sessions/{id}/scene", get(scene))
         .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
@@ -118,9 +132,20 @@ impl From<UploadError> for ApiError {
             UploadError::StaleScene => Self(StatusCode::CONFLICT, "STALE_SCENE"),
             UploadError::SceneFull => Self(StatusCode::CONFLICT, "SCENE_FULL"),
             UploadError::IntentLimit => Self(StatusCode::TOO_MANY_REQUESTS, "UPLOAD_INTENT_LIMIT"),
+            UploadError::Expired => Self(StatusCode::CONFLICT, "UPLOAD_INTENT_EXPIRED"),
+            UploadError::Conflict => Self(StatusCode::CONFLICT, "UPLOAD_CONFLICT"),
             UploadError::InvalidScene | UploadError::Database(_) => {
                 Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
             }
+        }
+    }
+}
+
+impl From<PaintImageError> for ApiError {
+    fn from(error: PaintImageError) -> Self {
+        match error {
+            PaintImageError::InvalidImage => Self(StatusCode::BAD_REQUEST, "INVALID_PAINT_IMAGE"),
+            PaintImageError::TooLarge => Self(StatusCode::PAYLOAD_TOO_LARGE, "PAINT_TOO_LARGE"),
         }
     }
 }
@@ -263,6 +288,57 @@ async fn create_upload_intent(
     let access = state.access.scene_access(kind, token, session_id).await?;
     let intent = upload::create_upload_intent(state.access.pool(), kind, &access, &input).await?;
     Ok((StatusCode::CREATED, Json(intent)))
+}
+
+async fn upload_paint(
+    State(state): State<AppState>,
+    Path((session_id, intent_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    image: Bytes,
+) -> Result<Json<upload::UploadedPaintResponse>, ApiError> {
+    require_origin(&headers, &state)?;
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some("image/png")
+    {
+        return Err(ApiError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "PNG_REQUIRED"));
+    }
+    let (kind, token) = if let Some(owner) = jar.get(OWNER_COOKIE) {
+        (GrantKind::Owner, owner.value())
+    } else {
+        (
+            GrantKind::Controller,
+            cookie_token(&jar, CONTROLLER_COOKIE)?,
+        )
+    };
+    state
+        .access
+        .check_socket_csrf(kind, token, csrf(&headers)?, session_id)
+        .await?;
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    let _queued = PAINT_QUEUE
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "PAINT_QUEUE_FULL"))?;
+    let worker = timeout(Duration::from_secs(10), PAINT_CPU.clone().acquire_owned())
+        .await
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "PAINT_QUEUE_TIMEOUT"))?
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR"))?;
+    let normalized = timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let _worker = worker;
+            paint_image::normalize_png(&image)
+        }),
+    )
+    .await
+    .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "PAINT_TIMEOUT"))?
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR"))??;
+    let stored =
+        upload::store_paint(state.access.pool(), kind, &access, intent_id, normalized).await?;
+    Ok(Json(stored))
 }
 
 #[derive(Serialize)]

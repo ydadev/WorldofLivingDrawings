@@ -306,7 +306,14 @@ pub(crate) async fn queue_fish(
             .bind(scene_id)
             .fetch_one(&mut *tx)
             .await?;
-    if entities.len() + queued as usize >= ldw_sim::MAX_FISH {
+    let reserved: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM upload_intents WHERE scene_id = $1 \
+         AND status <> 'finalized' AND reservation_until > now()",
+    )
+    .bind(scene_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if entities.len() + queued as usize + reserved as usize >= ldw_sim::MAX_FISH {
         return Err(SimulationError::InvalidPublication);
     }
     world
