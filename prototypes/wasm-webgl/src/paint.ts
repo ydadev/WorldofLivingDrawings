@@ -9,6 +9,7 @@ import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { Scene } from '@babylonjs/core/scene';
 import { PaintDocument, layoutPoint, type PaintAction, type PaintLayout } from './paint-core';
+import { DraftError, deleteDraft, listDrafts, loadDraft, saveDraft, type PaintDraft } from './paint-drafts';
 import './style.css';
 
 type FishId = 'coral' | 'stream';
@@ -36,6 +37,15 @@ const undoButton = required<HTMLButtonElement>('#paint-undo');
 const redoButton = required<HTMLButtonElement>('#paint-redo');
 const clearButton = required<HTMLButtonElement>('#paint-clear');
 const downloadButton = required<HTMLButtonElement>('#paint-download');
+const draftSaveButton = required<HTMLButtonElement>('#draft-save');
+const draftList = required<HTMLSelectElement>('#draft-list');
+const draftOpenButton = required<HTMLButtonElement>('#draft-open');
+const draftCopyButton = required<HTMLButtonElement>('#draft-copy');
+const draftDeleteButton = required<HTMLButtonElement>('#draft-delete');
+const draftStatus = required<HTMLParagraphElement>('#draft-status');
+const draftPreview = required<HTMLDivElement>('#draft-preview');
+const draftPreviewImage = required<HTMLImageElement>('#draft-preview-image');
+const draftPreviewDownload = required<HTMLButtonElement>('#draft-preview-download');
 const sheetContext = sheet.getContext('2d')!;
 const engine = new Engine(model, true);
 const scene = new Scene(engine);
@@ -61,6 +71,94 @@ let pointerTool: 'stroke' | 'erase' = 'stroke';
 let pointerColor = '#e9463a';
 let pointerSize = 16;
 let generation = 0;
+let draftId: string | undefined;
+let draftRevision = 0;
+let draftEnabled = false;
+let editNumber = 0;
+let savedNumber = 0;
+let saveTimer: number | undefined;
+let saving: Promise<boolean> | undefined;
+let previewUrl: string | undefined;
+let previewDraft: PaintDraft | undefined;
+
+function draftMessage(message: string, state: string): void {
+  draftStatus.textContent = message;
+  draftStatus.dataset.state = state;
+}
+
+function hideDraftPreview(): void {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = undefined;
+  previewDraft = undefined;
+  draftPreview.hidden = true;
+  draftPreviewImage.removeAttribute('src');
+}
+
+async function refreshDrafts(selected = draftId): Promise<void> {
+  try {
+    const drafts = await listDrafts();
+    draftList.replaceChildren();
+    draftList.add(new Option('Выбери черновик', ''));
+    for (const draft of drafts) {
+      const label = `${draft.templateId} · ${new Date(draft.modifiedAt).toLocaleString()} · v${draft.revision}`;
+      const option = new Option(label, draft.id);
+      option.dataset.revision = String(draft.revision);
+      draftList.add(option);
+    }
+    if (selected && drafts.some(draft => draft.id === selected)) draftList.value = selected;
+    draftOpenButton.disabled = draftDeleteButton.disabled = !draftList.value;
+  } catch (error) {
+    draftMessage(error instanceof Error ? error.message : 'Черновики недоступны', 'error');
+  }
+}
+
+function changed(): void {
+  if (!draftEnabled) return;
+  editNumber++;
+  draftMessage('Сохраняем…', 'saving');
+  if (saveTimer !== undefined) clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => { saveTimer = undefined; void flushDraft(); }, 350);
+}
+
+async function writeDraft(): Promise<boolean> {
+  const doc = documentState;
+  if (!doc || !draftEnabled || !draftId) return true;
+  const snapshotNumber = editNumber;
+  draftMessage('Сохраняем…', 'saving');
+  try {
+    const image = await doc.draftLayer();
+    const saved = await saveDraft({ id: draftId, editorVersion: 1,
+      templateId: doc.layout.templateId, templateVersion: doc.layout.templateVersion,
+      layoutHash: doc.layout.contentHash, modelId: `fish/${doc.layout.templateId}.glb`, image }, draftRevision);
+    draftRevision = saved.revision;
+    savedNumber = snapshotNumber;
+    if (savedNumber === editNumber) draftMessage('Сохранено. Черновик хранится на этом устройстве.', 'saved');
+    await refreshDrafts(saved.id);
+    return true;
+  } catch (error) {
+    const code = error instanceof DraftError ? error.code : 'unavailable';
+    draftMessage(`${error instanceof Error ? error.message : 'Не удалось сохранить'}. Рисунок остаётся в памяти; скачай PNG или освободи место.`, code);
+    draftCopyButton.hidden = code !== 'conflict';
+    return false;
+  }
+}
+
+async function flushDraft(): Promise<boolean> {
+  if (saveTimer !== undefined) { clearTimeout(saveTimer); saveTimer = undefined; }
+  if (!draftEnabled || savedNumber === editNumber) return true;
+  if (saving) {
+    const previous = saving;
+    const okay = await previous;
+    if (saving === previous) saving = undefined;
+    return okay ? flushDraft() : false;
+  }
+  const current = writeDraft();
+  saving = current;
+  const okay = await current;
+  if (saving === current) saving = undefined;
+  if (okay && savedNumber !== editNumber) return flushDraft();
+  return okay;
+}
 
 function coordinate(event: PointerEvent): [number, number] {
   const rect = sheet.getBoundingClientRect();
@@ -128,9 +226,10 @@ function commit(action: PaintAction): void {
   documentState?.add(action);
   paintSheet();
   updateModel();
+  changed();
 }
 
-async function load(species: FishId): Promise<void> {
+async function load(species: FishId, draft?: PaintDraft): Promise<void> {
   const thisGeneration = ++generation;
   currentPointer = undefined;
   points = [];
@@ -148,6 +247,14 @@ async function load(species: FishId): Promise<void> {
     texture?.dispose();
     roots = imported.meshes;
     documentState = new PaintDocument(layout);
+    if (draft) await documentState.restoreLayer(draft.image);
+    draftId = draft?.id;
+    draftRevision = draft?.revision ?? 0;
+    draftEnabled = !!draft;
+    editNumber = savedNumber = 0;
+    draftCopyButton.hidden = true;
+    hideDraftPreview();
+    draftMessage(draft ? 'Сохранено. Черновик хранится на этом устройстве.' : 'Рисунок пока не сохранён.', draft ? 'saved' : 'unsaved');
     window.paintResult = () => documentState!.result();
     const paintMaterials = new Set<PBRMaterial>();
     for (const mesh of roots) if (mesh.material instanceof PBRMaterial && mesh.material.name === 'paint')
@@ -162,7 +269,7 @@ async function load(species: FishId): Promise<void> {
     window.paintProbe = { status: 'PASS', templateId: species, layoutHash: layout.contentHash, actionCount: 0 };
     paintSheet();
     updateModel();
-    status.textContent = `Готово: ${species}. Рисунок остаётся на этом устройстве до закрытия страницы.`;
+    status.textContent = `Готово: ${species}. ${draft ? 'Локальный черновик открыт.' : 'Рисунок остаётся в памяти до сохранения черновика.'}`;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (thisGeneration === generation) {
@@ -215,8 +322,8 @@ sheet.addEventListener('pointerup', event => {
 sheet.addEventListener('pointercancel', event => {
   if (currentPointer === event.pointerId) { currentPointer = undefined; points = []; paintSheet(); }
 });
-undoButton.addEventListener('click', () => { documentState?.undo(); paintSheet(); updateModel(); });
-redoButton.addEventListener('click', () => { documentState?.redo(); paintSheet(); updateModel(); });
+undoButton.addEventListener('click', () => { if (!documentState?.undoable) return; documentState.undo(); paintSheet(); updateModel(); changed(); });
+redoButton.addEventListener('click', () => { if (!documentState?.redoable) return; documentState.redo(); paintSheet(); updateModel(); changed(); });
 clearButton.addEventListener('click', () => commit({ kind: 'clear' }));
 downloadButton.addEventListener('click', async () => {
   if (!documentState) return;
@@ -228,11 +335,93 @@ downloadButton.addEventListener('click', async () => {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
-speciesInput.addEventListener('change', () => void load(speciesInput.value as FishId));
+draftSaveButton.addEventListener('click', () => {
+  if (!documentState) return;
+  if (!draftEnabled) {
+    draftId = crypto.randomUUID();
+    draftRevision = 0;
+    draftEnabled = true;
+    editNumber++;
+  }
+  void flushDraft();
+});
+draftList.addEventListener('change', () => {
+  draftOpenButton.disabled = draftDeleteButton.disabled = !draftList.value;
+});
+draftOpenButton.addEventListener('click', async () => {
+  if (!draftList.value || !(await flushDraft())) return;
+  try {
+    const draft = await loadDraft(draftList.value);
+    if (draft.templateId !== 'coral' && draft.templateId !== 'stream') throw new DraftError('invalid', 'Неизвестная модель черновика');
+    const response = await fetch(`/fish/${draft.templateId}.layout.json`);
+    if (!response.ok) throw new Error('Шаблон недоступен');
+    const layout = await response.json() as PaintLayout;
+    if (draft.templateVersion !== layout.templateVersion || draft.layoutHash !== layout.contentHash ||
+        draft.modelId !== `fish/${draft.templateId}.glb`) {
+      hideDraftPreview();
+      previewUrl = URL.createObjectURL(draft.image);
+      previewDraft = draft;
+      draftPreviewImage.src = previewUrl;
+      draftPreview.hidden = false;
+      draftMessage('Версия шаблона не совпадает. Доступен просмотр и скачивание PNG.', 'incompatible');
+      return;
+    }
+    speciesInput.value = draft.templateId;
+    await load(draft.templateId, draft);
+  } catch (error) {
+    draftMessage(error instanceof Error ? error.message : 'Не удалось открыть черновик', 'error');
+  }
+});
+draftCopyButton.addEventListener('click', () => {
+  if (!documentState) return;
+  draftId = crypto.randomUUID();
+  draftRevision = 0;
+  draftEnabled = true;
+  editNumber++;
+  draftCopyButton.hidden = true;
+  void flushDraft();
+});
+draftDeleteButton.addEventListener('click', async () => {
+  if (draftList.value === draftId && !(await flushDraft())) return;
+  const id = draftList.value;
+  const revision = Number(draftList.selectedOptions[0]?.dataset.revision);
+  if (!id || !revision) return;
+  try {
+    await deleteDraft(id, revision);
+    if (draftId === id) {
+      if (saveTimer !== undefined) clearTimeout(saveTimer);
+      draftEnabled = false;
+      draftId = undefined;
+      draftRevision = 0;
+      draftMessage('Черновик удалён. Текущий рисунок остался в памяти.', 'unsaved');
+    }
+    hideDraftPreview();
+    await refreshDrafts();
+  } catch (error) {
+    draftMessage(error instanceof Error ? error.message : 'Не удалось удалить черновик', 'error');
+  }
+});
+draftPreviewDownload.addEventListener('click', () => {
+  if (!previewDraft || !previewUrl) return;
+  const link = document.createElement('a');
+  link.href = previewUrl;
+  link.download = `${previewDraft.templateId}-v${previewDraft.templateVersion}-draft.png`;
+  link.click();
+});
+speciesInput.addEventListener('change', async () => {
+  const previous = documentState?.layout.templateId as FishId | undefined;
+  const next = speciesInput.value as FishId;
+  if (!(await flushDraft())) { if (previous) speciesInput.value = previous; return; }
+  await load(next);
+  await refreshDrafts();
+});
 window.addEventListener('keydown', event => {
   if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return;
   event.preventDefault();
-  if (event.shiftKey) documentState?.redo(); else documentState?.undo();
+  if (event.shiftKey) { if (!documentState?.redoable) return; documentState.redo(); }
+  else { if (!documentState?.undoable) return; documentState.undo(); }
   paintSheet(); updateModel();
+  changed();
 });
 void load(speciesInput.value as FishId);
+void refreshDrafts();

@@ -20,6 +20,21 @@
         <button id="paint-download" type="button">Скачать PNG</button>
       </div>
       <p id="paint-status" role="status">Загрузка…</p>
+      <section aria-label="Черновики на этом устройстве">
+        <p>Черновики хранятся только в этом браузере. На общем устройстве можно рисовать без сохранения.</p>
+        <div class="paint-controls">
+          <button id="draft-save" type="button">Сохранить черновик на этом устройстве</button>
+          <label>Черновик <select id="draft-list"><option value="">Нет черновиков</option></select></label>
+          <button id="draft-open" type="button">Открыть</button>
+          <button id="draft-copy" type="button" hidden>Сохранить как копию</button>
+          <button id="draft-delete" type="button">Удалить выбранный</button>
+        </div>
+        <p id="draft-status" role="status">Рисунок пока не сохранён.</p>
+        <div id="draft-preview" hidden><p>Версия шаблона недоступна: этот черновик можно посмотреть и скачать, но нельзя оживить с текущим шаблоном.</p>
+          <img id="draft-preview-image" alt="Сохранённый слой раскраски" width="256" height="256">
+          <button id="draft-preview-download" type="button">Скачать черновик PNG</button>
+        </div>
+      </section>
       <div class="paint-grid">
         <div class="paint-sheet"><canvas id="paint-sheet" width="1024" height="1024" aria-label="Раскраска рыбы"></canvas></div>
         <div><canvas id="paint-model" aria-label="Объёмная рыба с текущей раскраской"></canvas><p>Один рисунок виден с обеих сторон рыбы.</p></div>

@@ -100,6 +100,9 @@ jobs:
       - name: Build browser pages
         working-directory: prototypes/wasm-webgl
         run: npm run build
+      - name: Test browser painting and local drafts
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:paint
       - name: Test browser pages with real server and PostgreSQL
         working-directory: prototypes/wasm-webgl
         run: npm run test:real-ui

@@ -137,6 +137,143 @@ try {
   if (errors.length) throw new Error(`Browser errors: ${errors.join(' | ')}`);
   await page.screenshot({ path: path.join(root, '.local/risk04-stream-touch.png') });
   console.log('RISK-04 paint: both fish, brush/touch, undo/redo, erase, fill, picker, clear and model texture: PASS');
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await clickAt(256, 256);
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  if (!white(await colorAt(256, 256))) throw new Error('Editor saved before explicit opt-in');
+  await clickAt(256, 256);
+  await page.locator('#draft-save').click();
+  await page.locator('#draft-status[data-state="saved"]').waitFor();
+  const firstId = await page.locator('#draft-list').inputValue();
+  if (!firstId) throw new Error('Saved draft missing from list');
+  const stored = await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('ldw-paint-drafts', 1);
+      open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+    });
+    const rows = await new Promise((resolve, reject) => {
+      const get = db.transaction('drafts').objectStore('drafts').getAll();
+      get.onsuccess = () => resolve(get.result); get.onerror = () => reject(get.error);
+    });
+    db.close();
+    return rows.map(row => ({ keys: Object.keys(row).sort(), imageType: row.image.type, size: row.image.size }));
+  });
+  if (stored.length !== 1 || stored[0].imageType !== 'image/png' || stored[0].size === 0 ||
+      stored[0].keys.some(key => /token|photo|stroke|stylus|undo/i.test(key)))
+    throw new Error(`Draft stored forbidden or missing fields: ${JSON.stringify(stored)}`);
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await page.locator('#draft-list').selectOption(firstId);
+  await page.locator('#draft-open').click();
+  await page.waitForFunction(() => document.querySelector('#draft-status')?.dataset.state === 'saved');
+  if (!red(await colorAt(256, 256)) || await page.locator('#paint-undo').isEnabled())
+    throw new Error('Saved layer was not restored as the undo baseline');
+
+  const second = await context.newPage();
+  second.on('pageerror', error => errors.push(error.message));
+  await second.goto('http://127.0.0.1:4173/paint.html', { waitUntil: 'networkidle' });
+  await second.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await second.locator('#draft-list').selectOption(firstId);
+  await second.locator('#draft-open').click();
+  await second.waitForFunction(() => document.querySelector('#draft-status')?.dataset.state === 'saved');
+  await page.locator('#paint-tool').selectOption('fill');
+  await page.locator('#paint-color').fill('#2456df');
+  await clickAt(256, 256);
+  await page.waitForFunction(() => document.querySelector('#draft-list option:checked')?.dataset.revision === '2');
+  const secondCanvas = second.locator('#paint-sheet');
+  const secondBox = await secondCanvas.boundingBox();
+  await second.locator('#paint-tool').selectOption('fill');
+  await second.locator('#paint-color').fill('#29c244');
+  await second.mouse.click(secondBox.x + secondBox.width / 2, secondBox.y + secondBox.height / 2);
+  await second.locator('#draft-status[data-state="conflict"]').waitFor();
+  if (!await second.locator('#draft-copy').isVisible()) throw new Error('Conflict copy action missing');
+  await second.locator('#draft-copy').click();
+  await second.locator('#draft-status[data-state="saved"]').waitFor();
+  const copyId = await second.locator('#draft-list').inputValue();
+  if (!copyId || copyId === firstId) throw new Error('Conflict copy overwrote original');
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await page.locator('#draft-list').selectOption(firstId);
+  await page.locator('#draft-open').click();
+  await page.waitForFunction(() => document.querySelector('#draft-status')?.dataset.state === 'saved');
+  if (!blue(await colorAt(256, 256))) throw new Error('Conflicting tab changed the original draft');
+
+  const incompatibleId = await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('ldw-paint-drafts', 1);
+      open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+    });
+    const original = await new Promise((resolve, reject) => {
+      const get = db.transaction('drafts').objectStore('drafts').getAll();
+      get.onsuccess = () => resolve(get.result[0]); get.onerror = () => reject(get.error);
+    });
+    const id = crypto.randomUUID();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('drafts', 'readwrite');
+      tx.objectStore('drafts').put({ ...original, id, templateVersion: 999 });
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    return id;
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await page.locator('#draft-list').selectOption(incompatibleId);
+  await page.locator('#draft-open').click();
+  await page.locator('#draft-status[data-state="incompatible"]').waitFor();
+  if (!await page.locator('#draft-preview-image').isVisible() ||
+      !await page.locator('#draft-preview-download').isEnabled())
+    throw new Error('Incompatible template cannot be previewed or downloaded');
+  await page.locator('#draft-delete').click();
+  await page.waitForFunction(id => ![...document.querySelector('#draft-list').options].some(option => option.value === id), incompatibleId);
+
+  await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('ldw-paint-drafts', 1);
+      open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+    });
+    const existing = await new Promise((resolve, reject) => {
+      const get = db.transaction('drafts').objectStore('drafts').getAll();
+      get.onsuccess = () => resolve(get.result); get.onerror = () => reject(get.error);
+    });
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('drafts', 'readwrite');
+      for (let i = existing.length; i < 10; i++) tx.objectStore('drafts').put({ ...existing[0], id: crypto.randomUUID() });
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await clickAt(256, 256);
+  await page.locator('#draft-save').click();
+  await page.locator('#draft-status[data-state="limit"]').waitFor();
+  if (!red(await colorAt(256, 256))) throw new Error('Quota failure lost the in-memory drawing');
+  const countAfterLimit = await page.locator('#draft-list option').count();
+  if (countAfterLimit !== 11) throw new Error('Quota failure deleted an existing draft');
+  await page.locator('#draft-list').selectOption(firstId);
+  await page.locator('#draft-delete').click();
+  await page.waitForFunction(id => ![...document.querySelector('#draft-list').options].some(option => option.value === id), firstId);
+  await page.locator('#draft-save').click();
+  await page.locator('#draft-status[data-state="saved"]').waitFor();
+  if (!red(await colorAt(256, 256))) throw new Error('Saving after explicit delete lost the drawing');
+
+  const unavailable = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await unavailable.addInitScript(() => Object.defineProperty(window, 'indexedDB', { value: undefined }));
+  const unavailablePage = await unavailable.newPage();
+  unavailablePage.on('pageerror', error => errors.push(error.message));
+  await unavailablePage.goto('http://127.0.0.1:4173/paint.html', { waitUntil: 'networkidle' });
+  await unavailablePage.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await unavailablePage.locator('#draft-save').click();
+  await unavailablePage.locator('#draft-status[data-state="unavailable"]').waitFor();
+  if (await unavailablePage.locator('#paint-download').isDisabled())
+    throw new Error('Download unavailable when IndexedDB is blocked');
+  await unavailable.close();
+  if (errors.length) throw new Error(`Draft browser errors: ${errors.join(' | ')}`);
+  console.log('MVP-02 drafts: opt-in, reload, conflict/copy, count limit and unavailable storage: PASS');
 } finally {
   await browser?.close();
   server.kill();

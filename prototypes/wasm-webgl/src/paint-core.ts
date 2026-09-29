@@ -41,6 +41,7 @@ export function silhouette(layout: PaintLayout): Path2D {
 export class PaintDocument {
   readonly layer = document.createElement('canvas');
   readonly mask = document.createElement('canvas');
+  private readonly base = document.createElement('canvas');
   readonly layout: PaintLayout;
   readonly outline: Path2D;
   private actions: PaintAction[] = [];
@@ -50,6 +51,7 @@ export class PaintDocument {
     this.layout = layout;
     this.layer.width = this.layer.height = WORK_SIZE;
     this.mask.width = this.mask.height = WORK_SIZE;
+    this.base.width = this.base.height = WORK_SIZE;
     this.outline = silhouette(layout);
     const m = this.mask.getContext('2d', { willReadFrequently: true })!;
     m.scale(2, 2);
@@ -78,6 +80,34 @@ export class PaintDocument {
 
   undo(): void { if (this.undoable) { this.cursor--; this.render(); } }
   redo(): void { if (this.redoable) { this.cursor++; this.render(); } }
+
+  async restoreLayer(image: Blob): Promise<void> {
+    if (image.type !== 'image/png' || image.size > 64 * 1024 * 1024)
+      throw new Error('Неверный формат черновика');
+    const bitmap = await createImageBitmap(image);
+    try {
+      if (bitmap.width !== WORK_SIZE || bitmap.height !== WORK_SIZE)
+        throw new Error('Неверный размер черновика');
+      const context = this.base.getContext('2d')!;
+      context.clearRect(0, 0, WORK_SIZE, WORK_SIZE);
+      context.save();
+      try {
+        context.drawImage(bitmap, 0, 0);
+        context.globalCompositeOperation = 'destination-in';
+        context.drawImage(this.mask, 0, 0);
+      } finally { context.restore(); }
+      this.actions = [];
+      this.cursor = 0;
+      this.render();
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  async draftLayer(): Promise<Blob> {
+    return new Promise((resolve, reject) => this.layer.toBlob(
+      blob => blob ? resolve(blob) : reject(new Error('Не удалось сохранить слой')), 'image/png'));
+  }
 
   private fill(x: number, y: number, color: string): void {
     const px = Math.floor(x * 2), py = Math.floor(y * 2);
@@ -124,6 +154,7 @@ export class PaintDocument {
     const context = this.layer.getContext('2d', { willReadFrequently: true })!;
     context.resetTransform();
     context.clearRect(0, 0, WORK_SIZE, WORK_SIZE);
+    context.drawImage(this.base, 0, 0);
     for (const action of this.actions.slice(0, this.cursor)) {
       if (action.kind === 'clear') {
         context.clearRect(0, 0, WORK_SIZE, WORK_SIZE);
