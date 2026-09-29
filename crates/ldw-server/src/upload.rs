@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use crate::{
     access::{GrantKind, SceneAccess},
-    simulation,
+    blob_store::{BlobStore, BlobStoreError},
+    simulation::{self, SimulationError},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -45,14 +46,22 @@ pub enum UploadError {
     SceneFull,
     #[error("too many drawing uploads")]
     IntentLimit,
+    #[error("paint storage quota reached")]
+    StorageFull,
     #[error("upload intent expired")]
     Expired,
+    #[error("finalization command expired or exceeds its allowed window")]
+    InvalidExpiry,
     #[error("uploaded image conflicts with the frozen drawing")]
     Conflict,
     #[error("invalid persisted scene state")]
     InvalidScene,
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("blob storage failed: {0}")]
+    Storage(#[from] BlobStoreError),
+    #[error("simulation publication failed: {0}")]
+    Simulation(#[from] SimulationError),
 }
 
 fn valid_template(input: &UploadIntentRequest) -> bool {
@@ -341,9 +350,301 @@ pub async fn store_paint(
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizedPaintResponse {
+    pub intent_id: Uuid,
+    pub fish_id: Uuid,
+    pub paint_blob_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinalizeRequest {
+    pub expires_at: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct FinalizeIntentRow {
+    scene_epoch: i64,
+    principal_kind: String,
+    principal_id: Uuid,
+    fish_id: Uuid,
+    definition_id: String,
+    position_x: f32,
+    position_y: f32,
+    status: String,
+    reserved: bool,
+    live: bool,
+    normalized_png: Option<Vec<u8>>,
+    paint_blob_id: Option<String>,
+}
+
+fn matching_author(kind: GrantKind, principal: Uuid, row: &FinalizeIntentRow) -> bool {
+    row.principal_id == principal
+        && row.principal_kind
+            == if kind == GrantKind::Owner {
+                "owner"
+            } else {
+                "controller"
+            }
+}
+
+fn finalized_response(
+    intent_id: Uuid,
+    row: &FinalizeIntentRow,
+) -> Result<FinalizedPaintResponse, UploadError> {
+    Ok(FinalizedPaintResponse {
+        intent_id,
+        fish_id: row.fish_id,
+        paint_blob_id: row.paint_blob_id.clone().ok_or(UploadError::InvalidScene)?,
+    })
+}
+
+/// File durability precedes the DB commit. The same DB transaction records
+/// the catalog/ref, finalizes the intent and publishes or queues the fish.
+pub async fn finalize_upload(
+    pool: &PgPool,
+    blobs: &BlobStore,
+    kind: GrantKind,
+    access: &SceneAccess,
+    intent_id: Uuid,
+    expires_at: i64,
+) -> Result<FinalizedPaintResponse, UploadError> {
+    if kind == GrantKind::Viewer {
+        return Err(UploadError::Forbidden);
+    }
+    // A committed result remains readable after its ten-minute intent expires
+    // or the active scene/epoch changes. This early read is not a mutation.
+    let completed: Option<FinalizeIntentRow> = sqlx::query_as(
+        "SELECT scene_epoch, principal_kind, principal_id, fish_id, definition_id, \
+         position_x, position_y, status, reservation_until > now() AS reserved, \
+         expires_at > now() AS live, normalized_png, paint_blob_id \
+         FROM upload_intents WHERE id = $1 AND session_id = $2 AND status = 'finalized'",
+    )
+    .bind(intent_id)
+    .bind(access.scene.session_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(row) = completed {
+        let mut tx = pool.begin().await?;
+        let principal = principal_id(&mut tx, kind, access).await?;
+        if !matching_author(kind, principal, &row) {
+            return Err(UploadError::Forbidden);
+        }
+        return finalized_response(intent_id, &row);
+    }
+
+    let mut tx = pool.begin().await?;
+    let scene: Option<(i64, String, i32, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.scene_epoch, c.world_id, c.world_version, c.state, s.status, s.active_scene_id \
+         FROM sessions s JOIN scenes c ON c.session_id = s.id \
+         WHERE s.id = $1 AND c.id = $2 FOR UPDATE OF s, c",
+    )
+    .bind(access.scene.session_id)
+    .bind(access.scene.scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((epoch, world_id, world_version, state, status, active_scene)) = scene else {
+        return Err(UploadError::StaleScene);
+    };
+    if status != "running"
+        || active_scene != Some(access.scene.scene_id)
+        || epoch != access.scene.scene_epoch
+        || world_id != "underwater"
+        || world_version != 1
+    {
+        return Err(UploadError::StaleScene);
+    }
+    let principal = principal_id(&mut tx, kind, access).await?;
+    let row: Option<FinalizeIntentRow> = sqlx::query_as(
+        "SELECT scene_epoch, principal_kind, principal_id, fish_id, definition_id, \
+         position_x, position_y, status, reservation_until > now() AS reserved, \
+         expires_at > now() AS live, normalized_png, paint_blob_id \
+         FROM upload_intents WHERE id = $1 AND session_id = $2 AND scene_id = $3 FOR UPDATE",
+    )
+    .bind(intent_id)
+    .bind(access.scene.session_id)
+    .bind(access.scene.scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let row = row.ok_or(UploadError::Forbidden)?;
+    if !matching_author(kind, principal, &row) {
+        return Err(UploadError::Forbidden);
+    }
+    if row.status == "finalized" {
+        return finalized_response(intent_id, &row);
+    }
+    if row.scene_epoch != epoch {
+        return Err(UploadError::StaleScene);
+    }
+    if !row.live {
+        return Err(UploadError::Expired);
+    }
+    if row.status != "uploaded" {
+        return Err(UploadError::Conflict);
+    }
+    let now_ms: i64 =
+        sqlx::query_scalar("SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+            .fetch_one(&mut *tx)
+            .await?;
+    if expires_at < now_ms || expires_at > now_ms + 60_000 {
+        return Err(UploadError::InvalidExpiry);
+    }
+    if !row.reserved {
+        let entities = state
+            .get("entities")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fish_publications WHERE scene_id = $1")
+                .bind(access.scene.scene_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let (scene_intents, session_intents, controller_intents): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE scene_id = $1), count(*), \
+             count(*) FILTER (WHERE principal_kind = 'controller' AND principal_id = $3) \
+             FROM upload_intents WHERE session_id = $2 AND status <> 'finalized' \
+             AND reservation_until > now()",
+        )
+        .bind(access.scene.scene_id)
+        .bind(access.scene.session_id)
+        .bind(principal)
+        .fetch_one(&mut *tx)
+        .await?;
+        if entities + queued as usize + scene_intents as usize >= ldw_sim::MAX_FISH {
+            return Err(UploadError::SceneFull);
+        }
+        if session_intents >= 10 || (kind == GrantKind::Controller && controller_intents >= 1) {
+            return Err(UploadError::IntentLimit);
+        }
+    }
+    let png = row
+        .normalized_png
+        .as_ref()
+        .ok_or(UploadError::InvalidScene)?;
+    let byte_size = i32::try_from(png.len()).map_err(|_| UploadError::InvalidScene)?;
+    let blob_id = BlobStore::id_for_normalized(png)?;
+
+    // All scene writers hold the scene lock above. One global advisory lock
+    // serializes physical blob-quota decisions across independent scenes.
+    sqlx::query("SELECT pg_advisory_xact_lock(72111401)")
+        .execute(&mut *tx)
+        .await?;
+    let existing_size: Option<i32> =
+        sqlx::query_scalar("SELECT byte_size FROM paint_blobs WHERE id = $1")
+            .bind(&blob_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing_size.is_some_and(|size| size != byte_size) {
+        return Err(UploadError::InvalidScene);
+    }
+    if existing_size.is_none() {
+        let used: i64 =
+            sqlx::query_scalar("SELECT COALESCE(sum(byte_size), 0)::bigint FROM paint_blobs")
+                .fetch_one(&mut *tx)
+                .await?;
+        if used + i64::from(byte_size) > 20 * 1024 * 1024 * 1024 {
+            return Err(UploadError::StorageFull);
+        }
+    }
+    let already_in_scene: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scene_paint_blobs WHERE scene_id = $1 AND blob_id = $2)",
+    )
+    .bind(access.scene.scene_id)
+    .bind(&blob_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !already_in_scene {
+        let used: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(b.byte_size), 0)::bigint FROM scene_paint_blobs r \
+             JOIN paint_blobs b ON b.id = r.blob_id WHERE r.scene_id = $1",
+        )
+        .bind(access.scene.scene_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let reserved: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(reserved_bytes), 0)::bigint FROM upload_intents \
+             WHERE scene_id = $1 AND id <> $2 AND status <> 'finalized' AND reservation_until > now()",
+        )
+        .bind(access.scene.scene_id)
+        .bind(intent_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if used + reserved + i64::from(byte_size) > 256 * 1024 * 1024 {
+            return Err(UploadError::StorageFull);
+        }
+    }
+
+    let store = blobs.clone();
+    let frozen = png.clone();
+    let persisted = tokio::task::spawn_blocking(move || store.put_normalized(&frozen))
+        .await
+        .map_err(|_| UploadError::InvalidScene)??;
+    if persisted != blob_id {
+        return Err(UploadError::InvalidScene);
+    }
+    sqlx::query(
+        "INSERT INTO paint_blobs (id, byte_size) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&blob_id)
+    .bind(byte_size)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO scene_paint_blobs (scene_id, blob_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(access.scene.scene_id)
+    .bind(&blob_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE upload_intents SET status = 'finalized', normalized_png = NULL, \
+         paint_blob_id = $2, result_entity_id = fish_id WHERE id = $1",
+    )
+    .bind(intent_id)
+    .bind(&blob_id)
+    .execute(&mut *tx)
+    .await?;
+    let position = Point {
+        x: row.position_x,
+        y: row.position_y,
+    };
+    if state.get("simulation").is_none() {
+        simulation::publish_first_fish_tx(
+            &mut tx,
+            access.scene.scene_id,
+            row.fish_id,
+            &row.definition_id,
+            &blob_id,
+            position,
+        )
+        .await?;
+    } else {
+        simulation::queue_fish_tx(
+            &mut tx,
+            access.scene.scene_id,
+            row.fish_id,
+            &row.definition_id,
+            &blob_id,
+            position,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(FinalizedPaintResponse {
+        intent_id,
+        fish_id: row.fish_id,
+        paint_blob_id: blob_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use argon2::{Argon2, password_hash::PasswordHasher};
     use axum::{
@@ -355,6 +656,7 @@ mod tests {
     use super::*;
     use crate::{
         access::{AccessStore, PairCode},
+        blob_store::BlobStore,
         http::{AppState, router},
     };
 
@@ -423,8 +725,12 @@ mod tests {
             .unwrap();
         let payload = request(access.scene.scene_epoch);
         let url = format!("/api/sessions/{}/upload-intents", scene.session_id);
+        let blob_directory =
+            std::env::temp_dir().join(format!("ldw-upload-blobs-{}", Uuid::new_v4()));
+        let blob_store = BlobStore::create(blob_directory.clone()).unwrap();
         let app = router(AppState {
             access: store.clone(),
+            blob_store: blob_store.clone(),
             public_origin: Arc::from("https://example.test"),
             simulation_hub: simulation::SimulationHub::default(),
         });
@@ -757,5 +1063,170 @@ mod tests {
         create_upload_intent(&pool, GrantKind::Owner, &access, &payload)
             .await
             .expect("expired reservation frees a scene slot");
+
+        // Leave only the uploaded intent active, then finalize the first fish.
+        sqlx::query(
+            "UPDATE upload_intents SET reservation_until = now() - interval '1 second' \
+             WHERE scene_id = $1 AND id <> $2",
+        )
+        .bind(scene.scene_id)
+        .bind(intent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let finalize_url = format!(
+            "/api/sessions/{}/upload-intents/{intent_id}/finalize",
+            scene.session_id
+        );
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 30_000;
+        let finalize_request = |cookie: &str, csrf: &str, expiry: i64| {
+            Request::builder()
+                .method("POST")
+                .uri(&finalize_url)
+                .header(header::ORIGIN, "https://example.test")
+                .header("x-csrf-token", csrf)
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"expiresAt": expiry}).to_string(),
+                ))
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(finalize_request(&other_cookie, &other.csrf, expires_at))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(finalize_request(&owner_cookie, &owner.csrf, 0))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let finalized = app
+            .clone()
+            .oneshot(finalize_request(&owner_cookie, &owner.csrf, expires_at))
+            .await
+            .unwrap();
+        assert_eq!(finalized.status(), StatusCode::OK);
+        let response: Value =
+            serde_json::from_slice(&to_bytes(finalized.into_body(), 4096).await.unwrap()).unwrap();
+        let blob_id = response["paintBlobId"].as_str().unwrap();
+        assert_eq!(blob_store.read(blob_id).unwrap(), frozen);
+        let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene.scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state["entities"].as_array().unwrap().len(), 1);
+
+        let second = create_upload_intent(&pool, GrantKind::Owner, &access, &payload)
+            .await
+            .unwrap();
+        let normalized = crate::paint_image::normalize_png(&image(43)).unwrap();
+        store_paint(
+            &pool,
+            GrantKind::Owner,
+            &access,
+            second.intent_id,
+            normalized,
+        )
+        .await
+        .unwrap();
+        let (first_finish, competing_finish) = tokio::join!(
+            finalize_upload(
+                &pool,
+                &blob_store,
+                GrantKind::Owner,
+                &access,
+                second.intent_id,
+                expires_at,
+            ),
+            finalize_upload(
+                &pool,
+                &blob_store,
+                GrantKind::Owner,
+                &access,
+                second.intent_id,
+                expires_at,
+            ),
+        );
+        let queued = first_finish.unwrap();
+        assert_eq!(competing_finish.unwrap().fish_id, queued.fish_id);
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fish_publications WHERE scene_id = $1 AND fish_id = $2 \
+             AND paint_blob_id = $3",
+        )
+        .bind(scene.scene_id)
+        .bind(queued.fish_id)
+        .bind(&queued.paint_blob_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1);
+        let repeated_queue = finalize_upload(
+            &pool,
+            &blob_store,
+            GrantKind::Owner,
+            &access,
+            second.intent_id,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated_queue.fish_id, queued.fish_id);
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fish_publications WHERE scene_id = $1 AND fish_id = $2",
+        )
+        .bind(scene.scene_id)
+        .bind(queued.fish_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1);
+        assert_eq!(state["entities"][0]["paintBlobId"], blob_id);
+        let catalog_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM paint_blobs b JOIN scene_paint_blobs r ON r.blob_id = b.id \
+             WHERE r.scene_id = $1 AND b.id = $2",
+        )
+        .bind(scene.scene_id)
+        .bind(blob_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(catalog_count, 1);
+        sqlx::query(
+            "UPDATE upload_intents SET expires_at = now() - interval '1 second', \
+             reservation_until = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(intent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repeated = app
+            .clone()
+            .oneshot(finalize_request(&owner_cookie, &owner.csrf, 0))
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+        let repeat: Value =
+            serde_json::from_slice(&to_bytes(repeated.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(repeat, response);
+        let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene.scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state["entities"].as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(blob_directory).unwrap();
     }
 }

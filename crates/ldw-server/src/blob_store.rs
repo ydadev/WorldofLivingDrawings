@@ -42,6 +42,15 @@ pub struct BlobStore {
 }
 
 impl BlobStore {
+    /// For isolated fixtures; production uses `new` with a provisioned volume.
+    pub fn create(root: PathBuf) -> Result<Self, BlobStoreError> {
+        if !root.is_absolute() {
+            return Err(BlobStoreError::InvalidPath);
+        }
+        create_private_directory(&root)?;
+        Self::new(root)
+    }
+
     /// The runtime owns this private persistent directory. It must already
     /// exist; missing storage is a startup failure, not a fallback to /tmp.
     pub fn new(root: PathBuf) -> Result<Self, BlobStoreError> {
@@ -66,14 +75,18 @@ impl BlobStore {
             .join(format!("{id}.png")))
     }
 
+    pub fn id_for_normalized(png: &[u8]) -> Result<String, BlobStoreError> {
+        if png.len() > MAX_UPLOAD_BYTES || !png.starts_with(PNG_SIGNATURE) {
+            return Err(BlobStoreError::InvalidPaint);
+        }
+        Ok(digest_id(png))
+    }
+
     /// Call only with bytes returned by the PNG normalizer. `hard_link` is an
     /// atomic no-replace install on the same volume; a failed DB transaction
     /// can leave only an unreferenced file for a later GC pass.
     pub fn put_normalized(&self, png: &[u8]) -> Result<String, BlobStoreError> {
-        if png.len() > MAX_UPLOAD_BYTES || !png.starts_with(PNG_SIGNATURE) {
-            return Err(BlobStoreError::InvalidPaint);
-        }
-        let id = digest_id(png);
+        let id = Self::id_for_normalized(png)?;
         let final_path = self.path(&id)?;
         let directory = final_path.parent().ok_or(BlobStoreError::InvalidPath)?;
         if !private_directory(&self.root)? {
@@ -212,8 +225,7 @@ mod tests {
     #[test]
     fn puts_immutable_normalized_png_and_detects_corruption() {
         let root = std::env::temp_dir().join(format!("ldw-blobs-{}", Uuid::new_v4()));
-        create_private_directory(&root).unwrap();
-        let store = BlobStore::new(root.clone()).unwrap();
+        let store = BlobStore::create(root.clone()).unwrap();
         let png = image(42);
         let id = store.put_normalized(&png).unwrap();
         assert_eq!(id.len(), 64);

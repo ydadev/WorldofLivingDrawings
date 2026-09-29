@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     access::{AccessError, AccessStore, GrantKind, PairCode},
+    blob_store::BlobStore,
     paint_image::{self, PaintImageError},
     upload::{self, UploadError},
 };
@@ -35,6 +36,7 @@ const VIEWER_CLAIM_COOKIE: &str = "__Host-ldw-viewer-claim";
 #[derive(Clone)]
 pub struct AppState {
     pub access: AccessStore,
+    pub blob_store: BlobStore,
     pub public_origin: Arc<str>,
     pub simulation_hub: crate::simulation::SimulationHub,
 }
@@ -52,6 +54,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/upload-intents/{intent_id}/paint",
             put(upload_paint).layer(DefaultBodyLimit::max(paint_image::MAX_UPLOAD_BYTES)),
+        )
+        .route(
+            "/api/sessions/{id}/upload-intents/{intent_id}/finalize",
+            post(finalize_upload),
         )
         .route("/api/sessions/{id}/scene", get(scene))
         .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
@@ -132,11 +138,19 @@ impl From<UploadError> for ApiError {
             UploadError::StaleScene => Self(StatusCode::CONFLICT, "STALE_SCENE"),
             UploadError::SceneFull => Self(StatusCode::CONFLICT, "SCENE_FULL"),
             UploadError::IntentLimit => Self(StatusCode::TOO_MANY_REQUESTS, "UPLOAD_INTENT_LIMIT"),
-            UploadError::Expired => Self(StatusCode::CONFLICT, "UPLOAD_INTENT_EXPIRED"),
-            UploadError::Conflict => Self(StatusCode::CONFLICT, "UPLOAD_CONFLICT"),
-            UploadError::InvalidScene | UploadError::Database(_) => {
-                Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
+            UploadError::StorageFull => {
+                Self(StatusCode::INSUFFICIENT_STORAGE, "PAINT_STORAGE_FULL")
             }
+            UploadError::Expired => Self(StatusCode::CONFLICT, "UPLOAD_INTENT_EXPIRED"),
+            UploadError::InvalidExpiry => Self(StatusCode::CONFLICT, "UPLOAD_COMMAND_EXPIRED"),
+            UploadError::Conflict => Self(StatusCode::CONFLICT, "UPLOAD_CONFLICT"),
+            UploadError::Simulation(crate::simulation::SimulationError::InvalidPublication) => {
+                Self(StatusCode::CONFLICT, "SCENE_FULL")
+            }
+            UploadError::InvalidScene
+            | UploadError::Database(_)
+            | UploadError::Storage(_)
+            | UploadError::Simulation(_) => Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR"),
         }
     }
 }
@@ -339,6 +353,39 @@ async fn upload_paint(
     let stored =
         upload::store_paint(state.access.pool(), kind, &access, intent_id, normalized).await?;
     Ok(Json(stored))
+}
+
+async fn finalize_upload(
+    State(state): State<AppState>,
+    Path((session_id, intent_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<upload::FinalizeRequest>,
+) -> Result<Json<upload::FinalizedPaintResponse>, ApiError> {
+    require_origin(&headers, &state)?;
+    let (kind, token) = if let Some(owner) = jar.get(OWNER_COOKIE) {
+        (GrantKind::Owner, owner.value())
+    } else {
+        (
+            GrantKind::Controller,
+            cookie_token(&jar, CONTROLLER_COOKIE)?,
+        )
+    };
+    state
+        .access
+        .check_socket_csrf(kind, token, csrf(&headers)?, session_id)
+        .await?;
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    let result = upload::finalize_upload(
+        state.access.pool(),
+        &state.blob_store,
+        kind,
+        &access,
+        intent_id,
+        input.expires_at,
+    )
+    .await?;
+    Ok(Json(result))
 }
 
 #[derive(Serialize)]

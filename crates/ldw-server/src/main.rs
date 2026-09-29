@@ -2,6 +2,7 @@ use std::{env, error::Error, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use ldw_server::{
     access::AccessStore,
+    blob_store::BlobStore,
     http::{AppState, router},
     migrate, simulation,
 };
@@ -56,6 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Err("LDW_PUBLIC_ORIGIN must be a bare HTTPS origin".into());
             }
             let address: SocketAddr = env::var("LDW_BIND_ADDR")?.parse()?;
+            let blob_store = BlobStore::new(PathBuf::from(env::var("LDW_BLOB_DIR")?))?;
             let listener = tokio::net::TcpListener::bind(address).await?;
             access.bump_active_epochs().await?;
             let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -64,6 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tokio::spawn(simulation::run(simulation_pool, shutdown_rx, hub.clone()));
             let app = router(AppState {
                 access,
+                blob_store,
                 public_origin: Arc::from(origin),
                 simulation_hub: hub,
             });

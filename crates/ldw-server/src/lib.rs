@@ -578,6 +578,10 @@ mod tests {
         let simulation_hub = simulation::SimulationHub::default();
         let app = http::router(http::AppState {
             access: store.clone(),
+            blob_store: blob_store::BlobStore::create(
+                std::env::temp_dir().join(format!("ldw-http-blobs-{}", Uuid::new_v4())),
+            )
+            .unwrap(),
             public_origin: Arc::from("https://world.example.test"),
             simulation_hub: simulation_hub.clone(),
         });
