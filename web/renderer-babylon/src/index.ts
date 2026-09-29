@@ -12,6 +12,7 @@ import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { Plane } from '@babylonjs/core/Maths/math.plane';
 import { LoadAssetContainerAsync } from '@babylonjs/core/Loading/sceneLoader';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
@@ -21,6 +22,7 @@ import { Scene } from '@babylonjs/core/scene';
 import type { ActiveAction, Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
 import { addAquarium } from './aquarium';
+import { createFishPaintMaterial } from './fish-paint-material';
 
 const modelByDefinition: Record<string, string> = {
   'coral-fish': 'coral.glb',
@@ -42,7 +44,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly modelCache = new Map<string, Promise<AssetContainer>>();
   private readonly modelEntries = new Map<string, InstantiatedEntries>();
   private readonly paintTextures = new Map<string, Texture>();
-  private readonly paintMaterials = new Map<string, PBRMaterial[]>();
+  private readonly paintMaterials = new Map<string, ShaderMaterial[]>();
   private readonly entityVersions = new Map<string, string>();
   private readonly movement = new Map<string, { from: Point2 & { depth: number };
     to: Point2 & { depth: number }; started: number }>();
@@ -357,24 +359,18 @@ export class BabylonRendererAdapter implements RendererAdapter {
     if (entity.paintBlobId) {
       const texture = new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true);
       this.paintTextures.set(entity.id, texture);
-      const clonedMaterials = new Map<PBRMaterial, PBRMaterial>();
+      let material: ShaderMaterial | undefined;
       for (const root of entries.rootNodes) {
         for (const node of root.getDescendants(false)) {
           if (node instanceof AbstractMesh && node.material instanceof PBRMaterial &&
               node.material.name === 'paint') {
-            let material = clonedMaterials.get(node.material);
-            if (!material) {
-              material = node.material.clone(`${entity.id}/paint`);
-              material.unlit = true;
-              material.albedoColor = Color3.White();
-              material.albedoTexture = texture;
-              clonedMaterials.set(node.material, material);
-            }
+            material ??= createFishPaintMaterial(this.scene, `${entity.id}/paint`, texture);
             node.material = material;
           }
         }
       }
-      this.paintMaterials.set(entity.id, [...clonedMaterials.values()]);
+      if (!material) throw new Error('PAINT_MESH_MISSING');
+      this.paintMaterials.set(entity.id, [material]);
     }
     this.loadingMarkers.get(entity.id)?.dispose();
     this.loadingMarkers.delete(entity.id);

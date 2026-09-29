@@ -17,13 +17,13 @@ function meshData() {
   return { positions: [], normals: [], colors: [], uvs: [], indices: [] };
 }
 
-function vertex(mesh, position, normal, uv = [0, 0]) {
+function vertex(mesh, position, normal, uv = [0, 0], color) {
   const index = mesh.positions.length / 3;
   mesh.positions.push(...position.map(round));
   mesh.normals.push(...normal.map(round));
   const shade = Math.max(0.57, Math.min(1,
     0.75 + normal[1] * 0.12 - normal[0] * 0.07 + Math.abs(normal[2]) * 0.12));
-  mesh.colors.push(round(shade), round(shade), round(shade));
+  mesh.colors.push(...(color ?? [shade, shade, shade]).map(round));
   mesh.uvs.push(...uv.map(round));
   return index;
 }
@@ -45,8 +45,8 @@ function smoothBody(fish) {
     const start = controls[i], end = controls[i + 1];
     const after = controls[Math.min(controls.length - 1, i + 2)];
     const span = end[0] - start[0];
-    for (let part = 0; part < 4; part++) {
-      const t = part / 4, t2 = t * t, t3 = t2 * t;
+    for (let part = 0; part < 3; part++) {
+      const t = part / 3, t2 = t * t, t3 = t2 * t;
       const section = [start[0] + span * t];
       for (const axis of [1, 2]) {
         const leftSlope = (end[axis] - before[axis]) / (end[0] - before[0]);
@@ -65,7 +65,7 @@ function smoothBody(fish) {
 }
 
 function addBody(mesh, fish) {
-  const segments = 24;
+  const segments = 16;
   const sections = smoothBody(fish);
   for (let i = 0; i < sections.length; i++) {
     const [x, height, depth] = sections[i];
@@ -126,16 +126,16 @@ function addFin(mesh, fish, fin) {
   }
 }
 
-function addEye(mesh, fish, radius, zOffset) {
+function addEye(mesh, fish, radius, zOffset, color) {
   const [x, y] = fish.eye;
   for (const side of [-1, 1]) {
     const z = side * (bodyDepth(fish, x, y) + zOffset);
     const normal = [0, 0, side];
-    const center = vertex(mesh, [x, y, z], normal);
+    const center = vertex(mesh, [x, y, z], normal, [0, 0], color);
     const ring = [];
     for (let j = 0; j < 16; j++) {
       const angle = 2 * Math.PI * j / 16;
-      ring.push(vertex(mesh, [x + radius * Math.cos(angle), y + radius * Math.sin(angle), z], normal));
+      ring.push(vertex(mesh, [x + radius * Math.cos(angle), y + radius * Math.sin(angle), z], normal, [0, 0], color));
     }
     for (let j = 0; j < 16; j++) {
       const a = ring[j], b = ring[(j + 1) % 16];
@@ -216,10 +216,8 @@ function glb(fish, meshes, tail, tailPivot, layoutHash) {
     attributes: {
       POSITION: accessor(mesh.positions, 5126, 'VEC3', 34962, true),
       NORMAL: accessor(mesh.normals, 5126, 'VEC3', 34962),
-      ...(material === 0 ? {
-        TEXCOORD_0: accessor(mesh.uvs, 5126, 'VEC2', 34962),
-        COLOR_0: accessor(mesh.colors, 5126, 'VEC3', 34962),
-      } : {}),
+      ...(material === 0 ? { TEXCOORD_0: accessor(mesh.uvs, 5126, 'VEC2', 34962) } : {}),
+      COLOR_0: accessor(mesh.colors, 5126, 'VEC3', 34962),
     },
     indices: accessor(mesh.indices, 5123, 'SCALAR', 34963),
     material,
@@ -239,8 +237,7 @@ function glb(fish, meshes, tail, tailPivot, layoutHash) {
       { name: `${fish.id}-tail`, primitives: [tailPrimitive] }],
     materials: [
       { name: 'paint', pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], baseColorTexture: { index: 0, texCoord: 0 }, metallicFactor: 0, roughnessFactor: 0.9 } },
-      { name: 'eye-white', pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 } },
-      { name: 'eye-black', pbrMetallicRoughness: { baseColorFactor: [0.015, 0.02, 0.04, 1], metallicFactor: 0, roughnessFactor: 0.9 } },
+      { name: 'eye', pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 } },
     ],
     images: [{ bufferView: neutralImageView, mimeType: 'image/png' }],
     textures: [{ source: 0, sampler: 0 }],
@@ -297,14 +294,14 @@ for (const fish of species) {
   const layoutBase = { templateId: fish.id, templateVersion: fish.templateVersion, projection: 'orthographic-side', textureSize: [512, 512], bounds: fish.bounds, body: fish.body, fins: fish.fins, eye: fish.eye, paintMask: { include: ['body', 'fins'], exclude: ['eye'] }, paintMaterial: 'paint', uvSet: 0, sideMapping: 'same-xy-on-both-sides', edgeMapping: 'project-xy', colorSpace: 'sRGB' };
   const layoutHash = sha256(JSON.stringify(layoutBase));
   const layout = { ...layoutBase, contentHash: layoutHash };
-  const paint = meshData(), white = meshData(), black = meshData(), tail = meshData();
+  const paint = meshData(), eye = meshData(), tail = meshData();
   addBody(paint, fish);
   for (const fin of fish.fins) addFin(fin.id.startsWith('tail-') ? tail : paint, fish, fin);
   const tailPivot = fish.body.at(-1)[0] - .04;
   for (let i = 0; i < tail.positions.length; i += 3) tail.positions[i] = round(tail.positions[i] - tailPivot);
-  addEye(white, fish, fish.eye[2], 0.012);
-  addEye(black, fish, fish.eye[2] * 0.48, 0.017);
-  const model = glb(fish, [paint, white, black], tail, tailPivot, layoutHash);
+  addEye(eye, fish, fish.eye[2], 0.012, [1, 1, 1]);
+  addEye(eye, fish, fish.eye[2] * 0.48, 0.017, [0.015, 0.02, 0.04]);
+  const model = glb(fish, [paint, eye], tail, tailPivot, layoutHash);
   const svg = printableSVG(fish, layoutHash);
   writeFileSync(path.join(output, `${fish.id}.glb`), model);
   writeFileSync(path.join(output, `${fish.id}.svg`), svg);

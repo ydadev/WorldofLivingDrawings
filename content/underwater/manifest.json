@@ -6,7 +6,7 @@
     {
       "id": "coral-model",
       "path": "assets/coral.glb",
-      "sha256": "a4348b87307b659fa9b505101f8bac23b53d804ef04690e1fee172ed1b7821bf",
+      "sha256": "43a7ac1f70e582a042dce1da0828f5d56a9b4ec46af5b59dad31829b81c9f6af",
       "mediaType": "model/gltf-binary",
       "license": "project-content"
     },
@@ -34,7 +34,7 @@
     {
       "id": "stream-model",
       "path": "assets/stream.glb",
-      "sha256": "f7bc390f2d2270d44d77c37c96418a37e79bf4a22010b44730fae112aa5f5171",
+      "sha256": "44505dc72a9c7412fe238c1d326d169746d31075931d857d88fb7098c663164f",
       "mediaType": "model/gltf-binary",
       "license": "project-content"
     },

@@ -82,24 +82,27 @@ try {
   try {
     await desktop.waitForFunction(() => ['fish-1', 'fish-2'].every(id =>
       window.coreAdapter.scene.meshes.some(mesh => mesh.name.startsWith(`${id}/`) &&
-        mesh.material?.name.endsWith('/paint') && mesh.material.albedoTexture?.isReady())),
+        mesh.material?.name.endsWith('/paint') && mesh.material.getActiveTextures()?.[0]?.isReady())),
       null, { timeout: 10000 });
   } catch (error) {
     const meshes = await desktop.evaluate(() => window.coreAdapter.scene.meshes.map(mesh =>
       ({ name: mesh.name, material: mesh.material?.name, visible: mesh.isVisible,
-        texture: mesh.material?.albedoTexture?.url, textureReady: mesh.material?.albedoTexture?.isReady() })));
+        texture: mesh.material?.getActiveTextures()?.[0]?.url,
+        textureReady: mesh.material?.getActiveTextures()?.[0]?.isReady() })));
     throw new Error(`GLB instances missing: ${JSON.stringify({ meshes, coralRequests, consoleErrors, errors })}`, { cause: error });
   }
   const models = await desktop.evaluate(() => {
     const meshes = window.coreAdapter.scene.meshes;
     const paint = id => meshes.find(mesh => mesh.name.startsWith(`${id}/`) &&
       mesh.material?.name.endsWith('/paint'))?.material;
+    const paintTexture = id => paint(id)?.getActiveTextures()?.[0];
     const eye = id => meshes.find(mesh => mesh.name.startsWith(`${id}/`) &&
-      mesh.material?.name === 'eye-white')?.material;
+      mesh.material?.name === 'eye')?.material;
     return { distinctPaintMaterials: paint('fish-1') !== paint('fish-2'),
-      distinctPaintTextures: paint('fish-1')?.albedoTexture !== paint('fish-2')?.albedoTexture,
+      distinctPaintTextures: paintTexture('fish-1') !== paintTexture('fish-2'),
       sharedEyeMaterial: !!eye('fish-1') && eye('fish-1') === eye('fish-2'),
-      texturesReady: !!paint('fish-1')?.albedoTexture?.isReady() && !!paint('fish-2')?.albedoTexture?.isReady(),
+      texturesReady: !!paintTexture('fish-1')?.isReady() && !!paintTexture('fish-2')?.isReady(),
+      lightweightPaint: paint('fish-1')?.getClassName() === 'ShaderMaterial',
       firstVisible: meshes.some(mesh => mesh.name.startsWith('fish-1/') && mesh.isVisible),
       secondVisible: meshes.some(mesh => mesh.name.startsWith('fish-2/') && mesh.isVisible),
       activeMeshes: window.coreAdapter.scene.getActiveMeshes().length };
@@ -107,7 +110,8 @@ try {
   const { activeMeshes, ...modelChecks } = models;
   assert(activeMeshes >= 2, `GLB meshes were culled: ${activeMeshes}`);
   assert.deepEqual(modelChecks, { distinctPaintMaterials: true, distinctPaintTextures: true,
-    sharedEyeMaterial: true, texturesReady: true, firstVisible: true, secondVisible: true });
+    sharedEyeMaterial: true, texturesReady: true, lightweightPaint: true,
+    firstVisible: true, secondVisible: true });
   assert.equal(coralRequests, 1, 'one model download serves two Entity instances');
   await desktop.evaluate(() => window.coreAdapter.applyPositions({
     type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
@@ -245,7 +249,7 @@ try {
   });
   await desktop.waitForFunction(() => window.coreAdapter.scene.meshes.filter(mesh =>
     mesh.name.startsWith('fish-load-') && mesh.material?.name.endsWith('/paint') &&
-    mesh.material.albedoTexture?.isReady()).length === 200,
+    mesh.material.getActiveTextures()?.[0]?.isReady()).length === 200,
   null, { timeout: 30000 });
   const profile = await desktop.evaluate(async () => {
     const scene = window.coreAdapter.scene;

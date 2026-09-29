@@ -26,7 +26,9 @@ for (const fish of species) {
   check(gltf.materials[paint.material].name === 'paint' &&
     gltf.materials[paint.material].pbrMetallicRoughness.baseColorTexture.texCoord === 0,
     `${fish.id}: paint binding is missing`);
-  check(gltf.meshes[0].primitives.slice(1).every(p => !p.attributes.TEXCOORD_0 && gltf.materials[p.material].name.startsWith('eye-')),
+  check(gltf.meshes[0].primitives.length === 2 &&
+    !gltf.meshes[0].primitives[1].attributes.TEXCOORD_0 &&
+    gltf.materials[gltf.meshes[0].primitives[1].material].name === 'eye',
     `${fish.id}: eyes must use protected, unpainted materials`);
   const tailNode = gltf.nodes.find(node => node.name === 'tail-pivot');
   check(tailNode && tailNode.mesh === 1 && tailNode.translation?.length === 3 &&
@@ -99,6 +101,10 @@ for (const fish of species) {
     check(tailUVs[i].every((value, axis) => Math.abs(value - expected[axis]) < .00001),
       `${fish.id}: animated tail lost paint alignment at vertex ${i}`);
   }
+  const eyeColors = floats(gltf.meshes[0].primitives[1].attributes.COLOR_0, 3);
+  check(eyeColors.some(rgb => rgb.every(value => value > .99)) &&
+    eyeColors.some(rgb => rgb.every(value => value < .05)),
+    `${fish.id}: white eye and dark pupil must remain unpainted`);
   console.log(`${fish.id}: glTF valid; ${positions.length} paint vertices; ${matched} mirrored UV pairs; ${edges} edge vertices; template ${contentHash.slice(0, 12)}`);
 }
 console.log('RISK-02 geometry and template validation: PASS');
