@@ -68,6 +68,7 @@ pub struct PositionFrame {
     pub revision: i64,
     pub simulation_tick: u64,
     pub positions: Vec<EntityPosition>,
+    pub action_positions: Vec<ActionPosition>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -75,6 +76,12 @@ pub struct EntityPosition {
     pub id: String,
     pub position: ldw_sim::Point,
     pub heading: ldw_sim::Point,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ActionPosition {
+    pub id: String,
+    pub position: ldw_sim::Point,
 }
 
 fn position_frame(scene_id: Uuid, scene: &LoadedScene) -> PositionFrame {
@@ -95,6 +102,16 @@ fn position_frame(scene_id: Uuid, scene: &LoadedScene) -> PositionFrame {
                 heading: fish.heading,
             })
             .collect(),
+        action_positions: scene
+            .world
+            .boat()
+            .map(|boat| {
+                vec![ActionPosition {
+                    id: format!("boat-{}", boat.id),
+                    position: boat.position,
+                }]
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -117,22 +134,31 @@ pub(crate) fn initial_world(scene_id: Uuid) -> Result<World, SimulationError> {
     World::new(underwater_bounds()?, seed).map_err(|_| SimulationError::InvalidPackage)
 }
 
-fn feed_actions(world: &World) -> Value {
-    json!(
-        world
-            .feed_sources()
-            .iter()
-            .map(|source| json!({
+fn active_actions(world: &World) -> Value {
+    let mut actions: Vec<Value> = world
+        .feed_sources()
+        .iter()
+        .map(|source| {
+            json!({
                 "id":format!("feed-{}", source.id),
                 "interactionId":"feed", "point":source.position,
                 "remaining":source.remaining, "expiresAtTick":source.expires_at_tick,
-            }))
-            .collect::<Vec<_>>()
-    )
+            })
+        })
+        .collect();
+    if let Some(boat) = world.boat() {
+        actions.push(json!({
+            "id":format!("boat-{}", boat.id), "interactionId":"boat",
+            "point":boat.via, "position":boat.position,
+            "entry":boat.entry, "exit":boat.exit,
+            "expiresAtTick":boat.expires_at_tick,
+        }));
+    }
+    json!(actions)
 }
 
 fn interaction_state_event(world: &World, applied: &[Uuid]) -> Value {
-    json!({"type":"interaction_state", "activeActions":feed_actions(world),
+    json!({"type":"interaction_state", "activeActions":active_actions(world),
         "appliedCommandIds":applied, "simulationTick":world.tick_number()})
 }
 
@@ -501,9 +527,12 @@ async fn apply_pending_interactions(
     let mut remaining = Vec::new();
     let mut applied = Vec::new();
     for entry in pending {
-        if entry.get("type").and_then(Value::as_str) != Some("interaction_requested")
-            || entry.get("interactionId").and_then(Value::as_str) != Some("feed")
-        {
+        if entry.get("type").and_then(Value::as_str) != Some("interaction_requested") {
+            remaining.push(entry);
+            continue;
+        }
+        let interaction = entry.get("interactionId").and_then(Value::as_str);
+        if !matches!(interaction, Some("feed" | "boat")) {
             remaining.push(entry);
             continue;
         }
@@ -518,9 +547,15 @@ async fn apply_pending_interactions(
                 .cloned()
                 .ok_or(SimulationError::InvalidScene)?,
         )?;
-        candidate
-            .start_feed(&id.simple().to_string(), point)
-            .map_err(|_| SimulationError::InvalidScene)?;
+        if interaction == Some("feed") {
+            candidate
+                .start_feed(&id.simple().to_string(), point)
+                .map_err(|_| SimulationError::InvalidScene)?;
+        } else {
+            candidate
+                .start_boat(&id.simple().to_string(), point)
+                .map_err(|_| SimulationError::InvalidScene)?;
+        }
         applied.push(id);
     }
     if applied.is_empty() {
@@ -537,7 +572,7 @@ async fn apply_pending_interactions(
         serde_json::to_value(candidate.checkpoint())?,
     );
     object.insert("pendingInteractions".into(), json!(remaining));
-    object.insert("activeActions".into(), feed_actions(&candidate));
+    object.insert("activeActions".into(), active_actions(&candidate));
     let updated = sqlx::query(
         "UPDATE scenes SET state = $1::jsonb, simulation_tick = $2, revision = $3, updated_at = now() \
          WHERE id = $4 AND scene_epoch = $5 AND simulation_tick = $6",
@@ -605,7 +640,7 @@ async fn save_interaction_state(
         "simulation".into(),
         serde_json::to_value(scene.world.checkpoint())?,
     );
-    object.insert("activeActions".into(), feed_actions(&scene.world));
+    object.insert("activeActions".into(), active_actions(&scene.world));
     let updated = sqlx::query(
         "UPDATE scenes SET state = $1::jsonb, simulation_tick = $2, revision = $3, updated_at = now() \
          WHERE id = $4 AND scene_epoch = $5 AND simulation_tick = $6",
@@ -762,8 +797,10 @@ async fn run_scene(
                     }
                 }
                 let food_before = scene.world.feed_sources().to_vec();
+                let boat_before = scene.world.boat().is_some();
                 scene.world.step();
-                if scene.world.feed_sources() != food_before
+                if (scene.world.feed_sources() != food_before
+                    || scene.world.boat().is_some() != boat_before)
                     && !save_interaction_state(&pool, scene_id, &mut scene).await?
                 {
                     return Ok(());
@@ -799,6 +836,180 @@ mod tests {
     use ldw_sim::Point;
     use sha2::{Digest, Sha256};
     use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    async fn boat_command_moves_threat_and_finishes_durably() {
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        let grant = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scene_id = Uuid::new_v4();
+        let token = Uuid::new_v4().to_string();
+        let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("boat-{owner}")).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+                    VALUES ($1, $2, $3, $3, now() + interval '1 day')",
+        )
+        .bind(grant)
+        .bind(owner)
+        .bind(token_hash.to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+            .bind(session)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version) VALUES ($1, $2, 'underwater', 1)")
+            .bind(scene_id).bind(session).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fish_id = Uuid::new_v4();
+        publish_first_fish(
+            &pool,
+            scene_id,
+            fish_id,
+            "coral-fish",
+            "paint-boat",
+            Point { x: -5.0, y: 0.0 },
+        )
+        .await
+        .unwrap();
+        let store = AccessStore::new(pool.clone(), [5; 32]);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let command = InteractionCommand {
+            kind: "command".into(),
+            command_id: Uuid::new_v4(),
+            session_id: session,
+            scene_id,
+            scene_epoch: 1,
+            interaction_id: "boat".into(),
+            point: realtime::Point { x: 1.0, y: 0.0 },
+            expires_at: now_ms + 8_000,
+        };
+        let ack = realtime::process_command(&store, GrantKind::Owner, &token, session, &command)
+            .await
+            .unwrap();
+        assert_eq!(ack["accepted"], true);
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &command)
+                .await
+                .unwrap(),
+            ack
+        );
+        let next = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            ..command.clone()
+        };
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &next)
+                .await
+                .unwrap()["code"],
+            "BOAT_LIMIT"
+        );
+        let (stop, receiver) = watch::channel(false);
+        let hub = SimulationHub::default();
+        let mut frames = hub.subscribe();
+        let worker = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver,
+            hub,
+            Duration::from_millis(5),
+        ));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if state["activeActions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.len() == 1)
+                {
+                    assert!(state["pendingInteractions"].as_array().unwrap().is_empty());
+                    assert_eq!(state["activeActions"][0]["interactionId"], "boat");
+                    break;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut moving_frame = false;
+        for _ in 0..8 {
+            let frame = timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if frame
+                .action_positions
+                .first()
+                .is_some_and(|action| action.position.x > -6.0)
+            {
+                moving_frame = true;
+                break;
+            }
+        }
+        assert!(
+            moving_frame,
+            "boat must advance in transient position frames"
+        );
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if state["activeActions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.is_empty())
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        let restored = load_scene(&pool, scene_id).await.unwrap();
+        assert!(restored.world.boat().is_none());
+        assert!(!restored.world.fish()[0].fleeing);
+        let transitions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM scene_events \
+            WHERE scene_id = $1 AND event->>'type' = 'interaction_state'",
+        )
+        .bind(scene_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(transitions, 2, "start and exit each need one durable event");
+        let after_exit = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            ..command
+        };
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &after_exit)
+                .await
+                .unwrap()["code"],
+            "BOAT_SCENE_COOLDOWN"
+        );
+    }
 
     #[tokio::test]
     async fn accepted_feed_is_applied_once_consumed_and_restored() {

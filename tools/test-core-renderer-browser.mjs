@@ -175,6 +175,30 @@ try {
   assert(feed.startScale > feed.afterEating && feed.cleared && feed.restored &&
     feed.clearedOnSnapshot && feed.materialCleared,
     `Feed source must follow server state and reconnect snapshot: ${JSON.stringify(feed)}`);
+  const boat = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    const id = 'boat-000000000000000000000000000000bc';
+    const active = { id, interactionId: 'boat', point: { x: 1, y: 0 },
+      position: { x: -7.05, y: 0 }, entry: { x: -7.05, y: 0 },
+      exit: { x: 7.05, y: 0 }, expiresAtTick: 600 };
+    adapter.applySnapshot({ schemaVersion: 1, sceneEpoch: 3, revision: 0,
+      simulationTick: 0, worldId: 'underwater', worldVersion: 1,
+      entities: [], activeActions: [active] });
+    const root = adapter.scene.getTransformNodeByName(id);
+    const created = !!root && !!adapter.scene.getMeshByName(`${id}/hull`);
+    adapter.applyPositions({ type: 'positions', schemaVersion: 1, sceneId: 'scene-1',
+      sceneEpoch: 3, revision: 0, simulationTick: 10, positions: [],
+      actionPositions: [{ id, position: { x: -5.5, y: 0 } }] });
+    await new Promise(resolve => setTimeout(resolve, 550));
+    const moved = root?.position.x > -5.6;
+    adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 3, revision: 1,
+      simulationTick: 150, upsert: [], remove: [], event: { type: 'interaction_state',
+        activeActions: [], appliedCommandIds: [], simulationTick: 150 } });
+    return { created, moved, removed: !adapter.scene.getTransformNodeByName(id),
+      materialCleared: !adapter.scene.materials.some(material => material.name === 'boat') };
+  });
+  assert(boat.created && boat.moved && boat.removed && boat.materialCleared,
+    `Boat must follow server frames and clean up after exit: ${JSON.stringify(boat)}`);
   const budget = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     const canvas = document.querySelector('#core-scene');

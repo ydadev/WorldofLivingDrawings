@@ -158,6 +158,48 @@ fn record_feed_acceptance(
     Ok(())
 }
 
+fn boat_limit_code(
+    state: &Value,
+    world: &World,
+    now_ms: i64,
+) -> Result<Option<&'static str>, AccessError> {
+    let pending = match state.get("pendingInteractions") {
+        None => false,
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .any(|entry| entry.get("interactionId").and_then(Value::as_str) == Some("boat")),
+        _ => return Err(AccessError::SceneState),
+    };
+    if world.boat().is_some() || pending {
+        return Ok(Some("BOAT_LIMIT"));
+    }
+    if let Some(limits) = state.get("interactionLimits") {
+        if !limits.is_object() {
+            return Err(AccessError::SceneState);
+        }
+        if limits
+            .get("lastSceneBoatMs")
+            .and_then(Value::as_i64)
+            .is_some_and(|last| now_ms.saturating_sub(last) < 10_000)
+        {
+            return Ok(Some("BOAT_SCENE_COOLDOWN"));
+        }
+    }
+    Ok(None)
+}
+
+fn record_boat_acceptance(state: &mut Value, now_ms: i64) -> Result<(), AccessError> {
+    let limits = state
+        .as_object_mut()
+        .ok_or(AccessError::SceneState)?
+        .entry("interactionLimits")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or(AccessError::SceneState)?;
+    limits.insert("lastSceneBoatMs".into(), json!(now_ms));
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InteractionCommand {
@@ -546,7 +588,7 @@ pub async fn process_command(
     } else {
         None
     };
-    if code.is_none() && command.interaction_id == "feed" {
+    if code.is_none() && matches!(command.interaction_id.as_str(), "feed" | "boat") {
         let mut world = if let Some(value) = state.get("simulation") {
             let checkpoint: WorldCheckpoint =
                 serde_json::from_value(value.clone()).map_err(|_| AccessError::SceneState)?;
@@ -565,17 +607,30 @@ pub async fn process_command(
             }
             simulation::initial_world(access.scene.scene_id).map_err(|_| AccessError::SceneState)?
         };
-        code = feed_limit_code(&state, &world, actor_id, now_ms)?;
+        code = if command.interaction_id == "feed" {
+            feed_limit_code(&state, &world, actor_id, now_ms)?
+        } else {
+            boat_limit_code(&state, &world, now_ms)?
+        };
         if code.is_none() {
             let point = SimPoint {
                 x: command.point.x as f32,
                 y: command.point.y as f32,
             };
-            code = match world.start_feed(&command.command_id.simple().to_string(), point) {
-                Ok(()) => None,
-                Err(ldw_sim::SimError::InvalidPosition) => Some("OUTSIDE_WATER"),
-                Err(ldw_sim::SimError::FeedLimit) => Some("FEED_LIMIT"),
-                Err(_) => return Err(AccessError::SceneState),
+            code = if command.interaction_id == "feed" {
+                match world.start_feed(&command.command_id.simple().to_string(), point) {
+                    Ok(()) => None,
+                    Err(ldw_sim::SimError::InvalidPosition) => Some("OUTSIDE_WATER"),
+                    Err(ldw_sim::SimError::FeedLimit) => Some("FEED_LIMIT"),
+                    Err(_) => return Err(AccessError::SceneState),
+                }
+            } else {
+                match world.start_boat(&command.command_id.simple().to_string(), point) {
+                    Ok(()) => None,
+                    Err(ldw_sim::SimError::InvalidBoatRoute) => Some("INVALID_BOAT_ROUTE"),
+                    Err(ldw_sim::SimError::BoatLimit) => Some("BOAT_LIMIT"),
+                    Err(_) => return Err(AccessError::SceneState),
+                }
             };
             if code.is_none() && state.get("simulation").is_none() {
                 initial_checkpoint = Some(
@@ -613,6 +668,8 @@ pub async fn process_command(
         }
         if command.interaction_id == "feed" {
             record_feed_acceptance(&mut state, actor_id, now_ms)?;
+        } else if command.interaction_id == "boat" {
+            record_boat_acceptance(&mut state, now_ms)?;
         }
         sqlx::query(
             "UPDATE scenes SET revision = $1, updated_at = now(), state = $3::jsonb WHERE id = $2",

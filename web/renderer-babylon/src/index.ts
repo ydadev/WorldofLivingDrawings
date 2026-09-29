@@ -31,8 +31,10 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly camera: FreeCamera;
   private readonly fallbackMaterial: StandardMaterial;
   private feedMaterial?: StandardMaterial;
+  private boatMaterial?: StandardMaterial;
   private readonly markers = new Map<string, TransformNode>();
   private readonly feedMarkers = new Map<string, { root: TransformNode; source: AbstractMesh; point: Point2 }>();
+  private readonly boatMarkers = new Map<string, TransformNode>();
   private readonly loadingMarkers = new Map<string, AbstractMesh>();
   private readonly modelCache = new Map<string, Promise<AssetContainer>>();
   private readonly modelEntries = new Map<string, InstantiatedEntries>();
@@ -40,6 +42,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly paintMaterials = new Map<string, PBRMaterial[]>();
   private readonly entityVersions = new Map<string, string>();
   private readonly movement = new Map<string, { from: Point2; to: Point2; started: number }>();
+  private readonly boatMovement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
   private world?: WorldDefinition;
@@ -96,7 +99,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.revision = snapshot.revision;
     this.simulationTick = snapshot.simulationTick;
     for (const entity of snapshot.entities) this.upsert(entity);
-    this.syncFeed(snapshot.activeActions ?? []);
+    this.syncActions(snapshot.activeActions ?? []);
   }
 
   applyDelta(delta: SceneDelta): void {
@@ -104,7 +107,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
         delta.revision !== this.revision + 1) throw new Error('REVISION_GAP');
     for (const id of delta.remove) this.removeMarker(id);
     for (const entity of delta.upsert) this.upsert(entity);
-    if (delta.event?.type === 'interaction_state') this.syncFeed(delta.event.activeActions);
+    if (delta.event?.type === 'interaction_state') this.syncActions(delta.event.activeActions);
     this.revision = delta.revision;
   }
 
@@ -118,6 +121,15 @@ export class BabylonRendererAdapter implements RendererAdapter {
       const marker = this.markers.get(item.id);
       if (!marker) continue;
       this.movement.set(item.id, {
+        from: { x: marker.position.x, y: marker.position.y },
+        to: item.position,
+        started: now,
+      });
+    }
+    for (const item of frame.actionPositions ?? []) {
+      const marker = this.boatMarkers.get(item.id);
+      if (!marker || !Number.isFinite(item.position.x) || !Number.isFinite(item.position.y)) continue;
+      this.boatMovement.set(item.id, {
         from: { x: marker.position.x, y: marker.position.y },
         to: item.position,
         started: now,
@@ -143,6 +155,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.resizeObserver.disconnect();
     for (const id of [...this.markers.keys()]) this.removeMarker(id);
     for (const id of [...this.feedMarkers.keys()]) this.removeFeed(id);
+    for (const id of [...this.boatMarkers.keys()]) this.removeBoat(id);
     this.scene.dispose();
     this.engine.dispose();
   }
@@ -211,6 +224,52 @@ export class BabylonRendererAdapter implements RendererAdapter {
     for (const id of [...this.feedMarkers.keys()]) {
       if (!active.has(id)) this.removeFeed(id);
     }
+  }
+
+  private syncActions(actions: ActiveAction[]): void {
+    this.syncFeed(actions);
+    const active = new Set<string>();
+    for (const action of actions) {
+      if (action.interactionId !== 'boat' || !Number.isFinite(action.position.x) ||
+          !Number.isFinite(action.position.y) || active.has(action.id)) continue;
+      active.add(action.id);
+      let root = this.boatMarkers.get(action.id);
+      if (!root) {
+        root = new TransformNode(action.id, this.scene);
+        const hull = MeshBuilder.CreateSphere(`${action.id}/hull`, { diameter: 1, segments: 10 }, this.scene);
+        hull.scaling.set(1.25, .42, .55);
+        hull.parent = root;
+        hull.material = this.ensureBoatMaterial();
+        const tower = MeshBuilder.CreateBox(`${action.id}/tower`,
+          { width: .36, height: .32, depth: .4 }, this.scene);
+        tower.position.y = .29;
+        tower.parent = root;
+        tower.material = this.ensureBoatMaterial();
+        this.boatMarkers.set(action.id, root);
+      }
+      root.position.set(action.position.x, action.position.y, -.2);
+      root.scaling.x = action.exit.x >= action.entry.x ? 1 : -1;
+    }
+    for (const id of [...this.boatMarkers.keys()]) if (!active.has(id)) this.removeBoat(id);
+  }
+
+  private removeBoat(id: string): void {
+    this.boatMovement.delete(id);
+    this.boatMarkers.get(id)?.dispose(false, true);
+    this.boatMarkers.delete(id);
+    if (this.boatMarkers.size === 0) {
+      this.boatMaterial?.dispose();
+      this.boatMaterial = undefined;
+    }
+  }
+
+  private ensureBoatMaterial(): StandardMaterial {
+    if (!this.boatMaterial) {
+      this.boatMaterial = new StandardMaterial('boat', this.scene);
+      this.boatMaterial.diffuseColor = new Color3(.25, .67, .77);
+      this.boatMaterial.emissiveColor = new Color3(.08, .24, .3);
+    }
+    return this.boatMaterial;
   }
 
   private removeFeed(id: string): void {
@@ -294,6 +353,14 @@ export class BabylonRendererAdapter implements RendererAdapter {
       marker.position.x = move.from.x + (move.to.x - move.from.x) * progress;
       marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
       if (progress === 1) this.movement.delete(id);
+    }
+    for (const [id, move] of this.boatMovement) {
+      const marker = this.boatMarkers.get(id);
+      if (!marker) { this.boatMovement.delete(id); continue; }
+      const progress = Math.min(1, (now - move.started) / 500);
+      marker.position.x = move.from.x + (move.to.x - move.from.x) * progress;
+      marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
+      if (progress === 1) this.boatMovement.delete(id);
     }
   }
 

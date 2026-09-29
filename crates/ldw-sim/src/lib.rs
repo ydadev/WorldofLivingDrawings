@@ -11,6 +11,12 @@ const FEED_DETECTION_RADIUS: f32 = 3.75;
 const FEED_EATING_RADIUS: f32 = 0.3;
 const FEED_DURATION_TICKS: u64 = 300;
 const MAX_FEED_SOURCES: usize = 3;
+const BOAT_RADIUS: f32 = 0.45;
+const BOAT_SPEED: f32 = 2.0;
+const BOAT_DURATION_TICKS: u64 = 600;
+const THREAT_ENTER_RADIUS: f32 = 3.0;
+const THREAT_EXIT_RADIUS: f32 = 3.75;
+const THREAT_HOLD_TICKS: u64 = 20;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
@@ -68,6 +74,10 @@ pub struct Fish {
     stuck_ticks: u16,
     #[serde(default)]
     pub feeding: Option<String>,
+    #[serde(default)]
+    pub fleeing: bool,
+    #[serde(default)]
+    threat_hold_until_tick: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,6 +88,17 @@ pub struct FeedSource {
     pub expires_at_tick: u64,
     /// Each fish can consume at most one portion from this source.
     pub fed_fish: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Boat {
+    pub id: String,
+    pub position: Point,
+    pub entry: Point,
+    pub via: Point,
+    pub exit: Point,
+    pub expires_at_tick: u64,
+    phase: u8,
 }
 
 mod hex_u128 {
@@ -110,6 +131,9 @@ pub enum SimError {
     InvalidFeedId,
     FeedLimit,
     DuplicateFeed,
+    InvalidBoatId,
+    BoatLimit,
+    InvalidBoatRoute,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -122,6 +146,8 @@ pub struct WorldCheckpoint {
     pub seed: u64,
     #[serde(default)]
     pub feed_sources: Vec<FeedSource>,
+    #[serde(default)]
+    pub boat: Option<Boat>,
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +158,7 @@ pub struct World {
     tick: u64,
     seed: u64,
     feed_sources: Vec<FeedSource>,
+    boat: Option<Boat>,
 }
 
 impl World {
@@ -146,6 +173,7 @@ impl World {
             tick: 0,
             seed,
             feed_sources: Vec::new(),
+            boat: None,
         })
     }
 
@@ -162,6 +190,7 @@ impl World {
             tick: self.tick,
             seed: self.seed,
             feed_sources: self.feed_sources.clone(),
+            boat: self.boat.clone(),
         }
     }
 
@@ -201,6 +230,16 @@ impl World {
                 return Err(SimError::InvalidCheckpoint);
             }
         }
+        if let Some(boat) = &checkpoint.boat {
+            if !valid_action_id(&boat.id)
+                || boat.phase > 1
+                || boat.expires_at_tick <= checkpoint.tick
+                || !boat_route_valid(boat, checkpoint.bounds, &checkpoint.obstacles)
+                || !valid_boat_point(boat.position, checkpoint.bounds, &checkpoint.obstacles)
+            {
+                return Err(SimError::InvalidCheckpoint);
+            }
+        }
         for fish in &checkpoint.fish {
             if !seen.insert(fish.id)
                 || !fish.speed.is_finite()
@@ -216,6 +255,7 @@ impl World {
                     .feeding
                     .as_ref()
                     .is_some_and(|id| !feed_ids.contains(id.as_str()))
+                || (fish.fleeing && checkpoint.boat.is_none())
             {
                 return Err(SimError::InvalidCheckpoint);
             }
@@ -227,6 +267,7 @@ impl World {
             tick: checkpoint.tick,
             seed: checkpoint.seed,
             feed_sources: checkpoint.feed_sources,
+            boat: checkpoint.boat,
         })
     }
     pub fn fish(&self) -> &[Fish] {
@@ -237,6 +278,60 @@ impl World {
     }
     pub fn feed_sources(&self) -> &[FeedSource] {
         &self.feed_sources
+    }
+    pub fn boat(&self) -> Option<&Boat> {
+        self.boat.as_ref()
+    }
+
+    pub fn start_boat(&mut self, id: &str, via: Point) -> Result<(), SimError> {
+        if !valid_action_id(id) {
+            return Err(SimError::InvalidBoatId);
+        }
+        if self.boat.is_some() {
+            return Err(SimError::BoatLimit);
+        }
+        if !valid_boat_point(via, self.bounds, &self.obstacles) {
+            return Err(SimError::InvalidBoatRoute);
+        }
+        let left = Point {
+            x: self.bounds.min_x + BOAT_RADIUS,
+            y: via.y,
+        };
+        let right = Point {
+            x: self.bounds.max_x - BOAT_RADIUS,
+            y: via.y,
+        };
+        let (entry, exit) = if via.x >= (self.bounds.min_x + self.bounds.max_x) / 2.0 {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        let boat = Boat {
+            id: id.to_owned(),
+            position: entry,
+            entry,
+            via,
+            exit,
+            expires_at_tick: self.tick.saturating_add(BOAT_DURATION_TICKS),
+            phase: 0,
+        };
+        if !boat_route_valid(&boat, self.bounds, &self.obstacles) {
+            return Err(SimError::InvalidBoatRoute);
+        }
+        self.boat = Some(boat);
+        Ok(())
+    }
+
+    pub fn cancel_boat(&mut self, id: &str) -> bool {
+        if self.boat.as_ref().is_none_or(|boat| boat.id != id) {
+            return false;
+        }
+        self.boat = None;
+        for fish in &mut self.fish {
+            fish.fleeing = false;
+            fish.threat_hold_until_tick = 0;
+        }
+        true
     }
 
     pub fn start_feed(&mut self, id: &str, position: Point) -> Result<(), SimError> {
@@ -312,6 +407,8 @@ impl World {
             target_generation: 0,
             stuck_ticks: 0,
             feeding: None,
+            fleeing: false,
+            threat_hold_until_tick: 0,
         });
         Ok(())
     }
@@ -337,6 +434,69 @@ impl World {
 
     pub fn step(&mut self) {
         self.tick = self.tick.saturating_add(1);
+        if let Some(boat) = &mut self.boat {
+            let destination = if boat.phase == 0 { boat.via } else { boat.exit };
+            let dx = destination.x - boat.position.x;
+            let dy = destination.y - boat.position.y;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let step = BOAT_SPEED / TICKS_PER_SECOND as f32;
+            if distance <= step {
+                boat.position = destination;
+                if boat.phase == 0 {
+                    boat.phase = 1;
+                } else {
+                    self.boat = None;
+                }
+            } else {
+                boat.position.x += dx / distance * step;
+                boat.position.y += dy / distance * step;
+            }
+        }
+        if self
+            .boat
+            .as_ref()
+            .is_some_and(|boat| self.tick >= boat.expires_at_tick)
+        {
+            self.boat = None;
+        }
+        for fish in &mut self.fish {
+            let Some(boat) = &self.boat else {
+                fish.fleeing = false;
+                fish.threat_hold_until_tick = 0;
+                continue;
+            };
+            let distance_sq = fish.position.distance_squared(boat.position);
+            let mut newly_fleeing = false;
+            if !fish.fleeing && distance_sq <= THREAT_ENTER_RADIUS.powi(2) {
+                fish.fleeing = true;
+                newly_fleeing = true;
+                fish.threat_hold_until_tick = self.tick.saturating_add(THREAT_HOLD_TICKS);
+                fish.waypoint = None;
+            } else if fish.fleeing
+                && distance_sq > THREAT_EXIT_RADIUS.powi(2)
+                && self.tick >= fish.threat_hold_until_tick
+            {
+                fish.fleeing = false;
+                fish.threat_hold_until_tick = 0;
+            }
+            if fish.fleeing
+                && (newly_fleeing
+                    || fish.position.distance_squared(fish.target) < 0.09
+                    || fish.stuck_ticks > 30
+                    || self.tick % 10 == fish.id as u64 % 10)
+                && let Some(target) = escape_target(
+                    fish.position,
+                    boat.position,
+                    fish.id,
+                    self.bounds,
+                    &self.obstacles,
+                )
+            {
+                fish.target = target;
+                fish.waypoint = None;
+                fish.stuck_ticks = 0;
+            }
+        }
         self.feed_sources
             .retain(|source| source.remaining > 0 && source.expires_at_tick > self.tick);
         let mut assignments = vec![None; self.fish.len()];
@@ -347,6 +507,7 @@ impl World {
                 .enumerate()
                 .filter(|(index, fish)| {
                     assignments[*index].is_none()
+                        && !fish.fleeing
                         && !source.fed_fish.contains(&fish_id(fish.id))
                         && fish.position.distance_squared(source.position)
                             <= FEED_DETECTION_RADIUS.powi(2)
@@ -391,6 +552,7 @@ impl World {
         }
         for fish in &mut self.fish {
             if fish.feeding.is_none()
+                && !fish.fleeing
                 && (fish.position.distance_squared(fish.target) < 0.04 || fish.stuck_ticks > 80)
             {
                 fish.target_generation = fish.target_generation.wrapping_add(1);
@@ -514,10 +676,95 @@ fn fish_id(id: u128) -> String {
 }
 
 fn valid_feed_id(id: &str) -> bool {
+    valid_action_id(id)
+}
+
+fn valid_action_id(id: &str) -> bool {
     id.len() == 32
         && id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_boat_point(point: Point, bounds: Bounds, obstacles: &[Circle]) -> bool {
+    point.x.is_finite()
+        && point.y.is_finite()
+        && bounds.contains(point, BOAT_RADIUS)
+        && !obstacles.iter().any(|obstacle| {
+            point.distance_squared(obstacle.center) < (obstacle.radius + BOAT_RADIUS).powi(2)
+        })
+}
+
+fn boat_route_valid(boat: &Boat, bounds: Bounds, obstacles: &[Circle]) -> bool {
+    let (segment_start, segment_end) = if boat.phase == 0 {
+        (boat.entry.x, boat.via.x)
+    } else {
+        (boat.via.x, boat.exit.x)
+    };
+    let on_current_segment = (boat.position.y - boat.via.y).abs() < 0.0001
+        && boat.position.x >= segment_start.min(segment_end) - 0.0001
+        && boat.position.x <= segment_start.max(segment_end) + 0.0001;
+    [boat.entry, boat.via, boat.exit]
+        .iter()
+        .all(|point| valid_boat_point(*point, bounds, obstacles))
+        && on_current_segment
+        && segment_clear_with_margin(boat.entry, boat.via, obstacles, BOAT_RADIUS)
+        && segment_clear_with_margin(boat.via, boat.exit, obstacles, BOAT_RADIUS)
+        && segment_clear_with_margin(boat.entry, boat.position, obstacles, BOAT_RADIUS)
+}
+
+fn escape_target(
+    from: Point,
+    threat: Point,
+    id: u128,
+    bounds: Bounds,
+    obstacles: &[Circle],
+) -> Option<Point> {
+    let dx = from.x - threat.x;
+    let dy = from.y - threat.y;
+    let length = (dx * dx + dy * dy).sqrt();
+    let (away_x, away_y) = if length > f32::EPSILON {
+        (dx / length, dy / length)
+    } else if id & 1 == 0 {
+        (0.0, 1.0)
+    } else {
+        (0.0, -1.0)
+    };
+    let side = if id & 1 == 0 { 1.0 } else { -1.0 };
+    let directions = [
+        (away_x, away_y),
+        (
+            away_x * 0.70710677 - side * away_y * 0.70710677,
+            away_y * 0.70710677 + side * away_x * 0.70710677,
+        ),
+        (
+            away_x * 0.70710677 + side * away_y * 0.70710677,
+            away_y * 0.70710677 - side * away_x * 0.70710677,
+        ),
+        (-side * away_y, side * away_x),
+        (side * away_y, -side * away_x),
+    ];
+    let mut best: Option<(Point, f32)> = None;
+    for distance in [2.5, 1.5, 0.75] {
+        for (vx, vy) in directions {
+            let candidate = Point {
+                x: from.x + vx * distance,
+                y: from.y + vy * distance,
+            };
+            if !valid_point(candidate, bounds, obstacles)
+                || candidate.distance_squared(threat) <= from.distance_squared(threat) + 0.01
+                || !(segment_clear(from, candidate, obstacles)
+                    || plan_waypoint(from, candidate, id, bounds, obstacles).is_some())
+            {
+                continue;
+            }
+            let gain = candidate.distance_squared(threat) - from.distance_squared(threat);
+            if best.as_ref().is_none_or(|(_, score)| gain > *score) {
+                best = Some((candidate, gain));
+            }
+        }
+    }
+    best.map(|(point, _)| point)
 }
 
 fn feeding_target(
@@ -567,6 +814,10 @@ fn valid_point(point: Point, bounds: Bounds, obstacles: &[Circle]) -> bool {
 }
 
 fn segment_clear(start: Point, end: Point, obstacles: &[Circle]) -> bool {
+    segment_clear_with_margin(start, end, obstacles, FISH_RADIUS)
+}
+
+fn segment_clear_with_margin(start: Point, end: Point, obstacles: &[Circle], margin: f32) -> bool {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let length_sq = dx * dx + dy * dy;
@@ -581,7 +832,7 @@ fn segment_clear(start: Point, end: Point, obstacles: &[Circle]) -> bool {
             x: start.x + t * dx,
             y: start.y + t * dy,
         };
-        closest.distance_squared(obstacle.center) >= (obstacle.radius + FISH_RADIUS).powi(2)
+        closest.distance_squared(obstacle.center) >= (obstacle.radius + margin).powi(2)
     })
 }
 
@@ -803,10 +1054,15 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("feed_sources");
+        previous_format.as_object_mut().unwrap().remove("boat");
         previous_format["fish"][0]
             .as_object_mut()
             .unwrap()
             .remove("feeding");
+        previous_format["fish"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fleeing");
         let old: WorldCheckpoint = serde_json::from_value(previous_format).unwrap();
         assert!(World::restore(old).unwrap().feed_sources().is_empty());
         let mut restored = World::restore(decoded.clone()).unwrap();
@@ -920,5 +1176,107 @@ mod tests {
             assert!(!point_blocked(world.fish()[0].position, world.obstacles()));
         }
         assert_eq!(world.feed_sources()[0].remaining, 9);
+    }
+
+    #[test]
+    fn boat_visits_selected_point_exits_without_teleporting_and_fish_flee() {
+        let mut world = World::new(bounds(), 15).unwrap();
+        world.spawn_fish(2, Point { x: -5.0, y: 0.0 }, 1.2).unwrap();
+        world
+            .start_feed(
+                "00000000000000000000000000000001",
+                Point { x: -3.0, y: 0.0 },
+            )
+            .unwrap();
+        let boat_id = "00000000000000000000000000000002";
+        world.start_boat(boat_id, Point { x: 1.0, y: 0.0 }).unwrap();
+        let mut last = world.boat().unwrap().position;
+        let mut visited = false;
+        let mut saw_fleeing = false;
+        for _ in 0..200 {
+            world.step();
+            let fish = &world.fish()[0];
+            assert!(bounds().contains(fish.position, FISH_RADIUS));
+            if fish.fleeing {
+                saw_fleeing = true;
+                assert!(fish.feeding.is_none());
+            }
+            if let Some(boat) = world.boat() {
+                assert!(boat.position.distance_squared(last) <= 0.101_f32.powi(2));
+                visited |= boat.position.distance_squared(boat.via) < 0.0001;
+                last = boat.position;
+            } else {
+                break;
+            }
+        }
+        assert!(visited);
+        assert!(saw_fleeing);
+        assert!(world.boat().is_none());
+        assert!(!world.fish()[0].fleeing);
+    }
+
+    #[test]
+    fn boat_rejects_blocked_route_and_enforces_one_active_boat() {
+        let mut world = World::new(bounds(), 5).unwrap();
+        world
+            .add_obstacle(Circle {
+                center: Point { x: 0.0, y: 0.0 },
+                radius: 0.8,
+            })
+            .unwrap();
+        let id = "00000000000000000000000000000002";
+        assert_eq!(
+            world.start_boat(id, Point { x: 2.0, y: 0.0 }),
+            Err(SimError::InvalidBoatRoute)
+        );
+        assert_eq!(
+            world.start_boat("bad", Point { x: 2.0, y: 2.0 }),
+            Err(SimError::InvalidBoatId)
+        );
+        world.start_boat(id, Point { x: 2.0, y: 2.0 }).unwrap();
+        assert_eq!(
+            world.start_boat("00000000000000000000000000000003", Point { x: 2.0, y: 2.0 }),
+            Err(SimError::BoatLimit)
+        );
+        assert!(!world.cancel_boat("00000000000000000000000000000003"));
+        assert!(world.cancel_boat(id));
+        assert!(world.boat().is_none());
+    }
+
+    #[test]
+    fn boat_checkpoint_replays_fish_response_and_rejects_corruption() {
+        let mut world = World::new(bounds(), 23).unwrap();
+        for index in 0..100 {
+            let x = -6.5 + (index % 10) as f32 * 1.3;
+            let y = -3.2 + (index / 10) as f32 * 0.7;
+            world.spawn_fish(index, Point { x, y }, 1.0).unwrap();
+        }
+        world
+            .start_boat("00000000000000000000000000000002", Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        for _ in 0..35 {
+            world.step();
+        }
+        assert!(world.fish().iter().any(|fish| fish.fleeing));
+        let saved = serde_json::to_vec(&world.checkpoint()).unwrap();
+        let checkpoint: WorldCheckpoint = serde_json::from_slice(&saved).unwrap();
+        let mut replay = World::restore(checkpoint.clone()).unwrap();
+        for _ in 0..160 {
+            world.step();
+            replay.step();
+            assert_eq!(world.checkpoint(), replay.checkpoint());
+            assert!(
+                world
+                    .fish()
+                    .iter()
+                    .all(|fish| bounds().contains(fish.position, FISH_RADIUS))
+            );
+        }
+        let mut corrupted = checkpoint;
+        corrupted.boat.as_mut().unwrap().position.x = 99.0;
+        assert_eq!(
+            World::restore(corrupted).err(),
+            Some(SimError::InvalidCheckpoint)
+        );
     }
 }

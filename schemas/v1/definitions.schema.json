@@ -127,6 +127,12 @@
           "properties": { "id": { "$ref": "#/$defs/id" },
             "position": { "$ref": "#/$defs/point" },
             "heading": { "$ref": "#/$defs/point" } }
+        } },
+        "actionPositions": { "type": "array", "maxItems": 1, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "position"],
+          "properties": { "id": { "$ref": "#/$defs/id" },
+            "position": { "$ref": "#/$defs/point" } }
         } }
       }
     },
@@ -141,12 +147,25 @@
       }
     },
     "activeAction": {
+      "oneOf": [{ "$ref": "#/$defs/feedAction" }, { "$ref": "#/$defs/boatAction" }]
+    },
+    "feedAction": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "interactionId", "point", "remaining", "expiresAtTick"],
       "properties": {
         "id": { "$ref": "#/$defs/id" }, "interactionId": { "const": "feed" },
         "point": { "$ref": "#/$defs/point" },
         "remaining": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "expiresAtTick": { "$ref": "#/$defs/positiveInt" }
+      }
+    },
+    "boatAction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "interactionId", "point", "position", "entry", "exit", "expiresAtTick"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "interactionId": { "const": "boat" },
+        "point": { "$ref": "#/$defs/point" }, "position": { "$ref": "#/$defs/point" },
+        "entry": { "$ref": "#/$defs/point" }, "exit": { "$ref": "#/$defs/point" },
         "expiresAtTick": { "$ref": "#/$defs/positiveInt" }
       }
     },

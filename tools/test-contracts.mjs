@@ -93,6 +93,16 @@ const positions = { type: 'positions', schemaVersion: 1, sceneId: 'scene-uuid',
   positions: [{ id: 'fish-00000000000000000000000000000001',
     position: { x: 1, y: -1 }, heading: { x: 1, y: 0 } }] };
 valid('scenePositions', positions);
+const boat = { id: 'boat-00000000000000000000000000000002', interactionId: 'boat',
+  point: { x: 1, y: 0 }, position: { x: -5, y: 0 },
+  entry: { x: -7.05, y: 0 }, exit: { x: 7.05, y: 0 }, expiresAtTick: 600 };
+valid('scenePositions', { ...positions,
+  actionPositions: [{ id: boat.id, position: boat.position }] });
+valid('sceneSnapshot', { ...snapshot, activeActions: [boat] });
+valid('sceneDelta', { schemaVersion: 1, sceneEpoch: 1, revision: 3,
+  simulationTick: 1, upsert: [], remove: [], event: { type: 'interaction_state',
+    activeActions: [boat], appliedCommandIds: [], simulationTick: 1 } });
+invalid('sceneSnapshot', { ...snapshot, activeActions: [{ ...boat, remaining: 10 }] });
 invalid('scenePositions', { ...positions, simulationTick: -1 });
 invalid('scenePositions', { ...positions, positions: [{ ...positions.positions[0], id: '1' }] });
 valid('interactionIntent', { schemaVersion: 1, commandId: 'command-1', sceneEpoch: 1,

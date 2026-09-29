@@ -80,13 +80,23 @@ export interface EntityPublished {
   type: 'entity_published';
   entity: SceneEntity;
 }
-export interface ActiveAction {
+export interface FeedAction {
   id: string;
   interactionId: 'feed';
   point: Point2;
   remaining: number;
   expiresAtTick: number;
 }
+export interface BoatAction {
+  id: string;
+  interactionId: 'boat';
+  point: Point2;
+  position: Point2;
+  entry: Point2;
+  exit: Point2;
+  expiresAtTick: number;
+}
+export type ActiveAction = FeedAction | BoatAction;
 export interface InteractionState {
   type: 'interaction_state';
   activeActions: ActiveAction[];
@@ -125,6 +135,7 @@ export interface ScenePositions {
   revision: number;
   simulationTick: number;
   positions: { id: string; position: Point2; heading: Point2 }[];
+  actionPositions?: { id: string; position: Point2 }[];
 }
 export interface RealtimeCommand {
   type: 'command';

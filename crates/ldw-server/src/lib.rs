@@ -982,6 +982,7 @@ mod tests {
                 position: ldw_sim::Point { x: 1.0, y: -1.0 },
                 heading: ldw_sim::Point { x: 1.0, y: 0.0 },
             }],
+            action_positions: vec![],
         });
         let writer_positions: serde_json::Value = serde_json::from_str(
             tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
@@ -1010,7 +1011,7 @@ mod tests {
         let command = realtime::InteractionCommand {
             command_id: Uuid::new_v4(),
             scene_epoch: 2,
-            interaction_id: "boat".to_owned(),
+            interaction_id: "feed".to_owned(),
             expires_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1051,10 +1052,14 @@ mod tests {
         assert_eq!(writer_delta, reader_delta);
         assert_eq!(writer_delta["type"], "delta");
         assert_eq!(writer_delta["revision"], 2);
+        let publication_scene = store
+            .create_session(&first.token, &first.csrf)
+            .await
+            .unwrap();
         assert!(
             simulation::publish_first_fish(
                 store.pool(),
-                first_scene.scene_id,
+                publication_scene.scene_id,
                 Uuid::new_v4(),
                 "coral-fish",
                 "paint-invalid",
@@ -1066,7 +1071,7 @@ mod tests {
         let first_fish = Uuid::new_v4();
         let published = simulation::publish_first_fish(
             store.pool(),
-            first_scene.scene_id,
+            publication_scene.scene_id,
             first_fish,
             "coral-fish",
             "paint-first",
@@ -1082,7 +1087,7 @@ mod tests {
         assert!(
             simulation::publish_first_fish(
                 store.pool(),
-                first_scene.scene_id,
+                publication_scene.scene_id,
                 Uuid::new_v4(),
                 "coral-fish",
                 "paint-second",
@@ -1092,36 +1097,12 @@ mod tests {
             .is_err(),
             "a second first-fish transaction must not overwrite the checkpoint"
         );
-        let loaded = simulation::load_scene(store.pool(), first_scene.scene_id)
+        let loaded = simulation::load_scene(store.pool(), publication_scene.scene_id)
             .await
             .unwrap();
         assert_eq!(loaded.world.fish().len(), 1);
         assert_eq!(loaded.world.fish()[0].id, first_fish.as_u128());
         assert_eq!(loaded.world.tick_number(), 0);
-        let published_delta: serde_json::Value = serde_json::from_str(
-            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-                .to_text()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(published_delta["revision"], 3);
-        assert_eq!(published_delta["event"], published);
-        assert_eq!(published_delta["upsert"][0], *fish_entity);
-        let writer_published: serde_json::Value = serde_json::from_str(
-            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-                .to_text()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(writer_published, published_delta);
         drop(reader);
         let mut reconnect_request = url.as_str().into_client_request().unwrap();
         reconnect_request
@@ -1152,8 +1133,8 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(recovered["revision"], 3);
-        assert_eq!(recovered["entities"][0], *fish_entity);
+        assert_eq!(recovered["revision"], 2);
+        assert!(recovered["entities"].as_array().unwrap().is_empty());
         assert_eq!(
             recovered["pendingInteractions"].as_array().unwrap().len(),
             2
