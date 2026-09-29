@@ -14,6 +14,16 @@ use crate::paint_image::MAX_UPLOAD_BYTES;
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+fn digest_id(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id = String::with_capacity(64);
+    for octet in Sha256::digest(bytes) {
+        id.push(HEX[(octet >> 4) as usize] as char);
+        id.push(HEX[(octet & 0x0f) as usize] as char);
+    }
+    id
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BlobStoreError {
     #[error("invalid blob directory or digest")]
@@ -63,7 +73,7 @@ impl BlobStore {
         if png.len() > MAX_UPLOAD_BYTES || !png.starts_with(PNG_SIGNATURE) {
             return Err(BlobStoreError::InvalidPaint);
         }
-        let id = format!("{:x}", Sha256::digest(png));
+        let id = digest_id(png);
         let final_path = self.path(&id)?;
         let directory = final_path.parent().ok_or(BlobStoreError::InvalidPath)?;
         if !private_directory(&self.root)? {
@@ -122,7 +132,7 @@ fn verify_existing(
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_UPLOAD_BYTES
         || !bytes.starts_with(PNG_SIGNATURE)
-        || format!("{:x}", Sha256::digest(&bytes)) != id
+        || digest_id(&bytes) != id
         || expected.is_some_and(|value| value != bytes.as_slice())
     {
         return Err(BlobStoreError::CorruptBlob);
