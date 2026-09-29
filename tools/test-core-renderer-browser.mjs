@@ -137,15 +137,15 @@ try {
     const eyeCenter = eyeMesh?.getBoundingInfo().boundingBox.centerWorld;
     const tailCenter = tailMesh?.getBoundingInfo().boundingBox.centerWorld;
     const noseVector = eyeCenter && tailCenter ? eyeCenter.subtract(tailCenter) : null;
-    const noseDotHeading = noseVector &&
-      (noseVector.x * .92 + noseVector.z * .38) /
-      (Math.hypot(noseVector.x, noseVector.z) * Math.hypot(.92, .38));
-    return { depth: marker.position.z, scale: marker.scaling.x, yaw, noseDotHeading,
+    const noseDotMotion = noseVector &&
+      (noseVector.x + noseVector.z * 1.2) /
+      (Math.hypot(noseVector.x, noseVector.z) * Math.hypot(1, 1.2));
+    return { depth: marker.position.z, scale: marker.scaling.x, yaw, noseDotMotion,
       tailPresent: !!tail, tailMoved: Math.abs(tail?.rotation.y - first) > .02,
       tailNames: scene.meshes.concat(scene.transformNodes).filter(node => node.name.includes('tail')).map(node => node.name) };
   });
   assert(Math.abs(depthVisual.depth - 1.2) < .01 && depthVisual.scale < .9 &&
-    depthVisual.yaw < -.05 && depthVisual.noseDotHeading > .9 &&
+    depthVisual.yaw < -.5 && depthVisual.noseDotMotion > .98 &&
     depthVisual.tailPresent && depthVisual.tailMoved,
     `Depth, turn and tail must animate: ${JSON.stringify(depthVisual)}`);
   const climbVisual = await desktop.evaluate(async () => {
@@ -190,6 +190,23 @@ try {
     return adapter.scene.getTransformNodeByName('fish-1').position.x;
   });
   assert(Math.abs(afterStale - 3) < .01, 'stale position frame must not move the mesh');
+  const movingLeft = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    adapter.applyPositions({ type: 'positions', schemaVersion: 1,
+      sceneId: 'scene-1', sceneEpoch: 1, revision: 1, simulationTick: 13,
+      positions: [{ id: 'fish-1', position: { x: 2, y: -1 }, depth: 1.2,
+        heading: { x: 1, y: 0 }, headingDepth: 0 }] });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const eye = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.material?.name === 'eye');
+    const tail = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    return { eyeX: eye?.getBoundingInfo().boundingBox.centerWorld.x,
+      tailX: tail?.getBoundingInfo().boundingBox.centerWorld.x,
+      markerX: adapter.scene.getTransformNodeByName('fish-1')?.position.x };
+  });
+  assert(movingLeft.markerX < 3 && movingLeft.eyeX < movingLeft.tailX,
+    `Fish must face its visible motion, even when heading arrives late: ${JSON.stringify(movingLeft)}`);
   mkdirSync(path.join(root, '.local'), { recursive: true });
   const screenshot = PNG.sync.read(await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') }));
   let redPixels = 0, bluePixels = 0;

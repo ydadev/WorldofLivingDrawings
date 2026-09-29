@@ -48,8 +48,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly entityVersions = new Map<string, string>();
   private readonly movement = new Map<string, { from: Point2 & { depth: number };
     to: Point2 & { depth: number }; started: number }>();
-  private readonly fishMotion = new Map<string, { yaw: number; targetYaw: number;
-    pitch: number; targetPitch: number; phase: number; tail?: TransformNode }>();
+  private readonly fishMotion = new Map<string, { yaw: number; pitch: number;
+    phase: number; tail?: TransformNode }>();
   private readonly boatMovement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
@@ -60,7 +60,6 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private simulationTick = 0;
   private disposed = false;
   private renderScale = 1;
-  private lastAnimationTime = performance.now();
 
   constructor(private readonly canvas: HTMLCanvasElement,
     private readonly assetBaseUrl = '/content/underwater/assets/',
@@ -138,9 +137,13 @@ export class BabylonRendererAdapter implements RendererAdapter {
       if (!marker) continue;
       if (!Number.isFinite(item.position.x) || !Number.isFinite(item.position.y) ||
           (item.depth !== undefined && (!Number.isFinite(item.depth) || Math.abs(item.depth) > 1.5))) continue;
+      const depth = item.depth ?? marker.position.z;
+      const dx = item.position.x - marker.position.x;
+      const dy = item.position.y - marker.position.y;
+      const dz = depth - marker.position.z;
       this.movement.set(item.id, {
         from: { x: marker.position.x, y: marker.position.y, depth: marker.position.z },
-        to: { ...item.position, depth: item.depth ?? marker.position.z },
+        to: { ...item.position, depth },
         started: now,
       });
       const visual = this.fishMotion.get(item.id);
@@ -148,12 +151,17 @@ export class BabylonRendererAdapter implements RendererAdapter {
         const headingDepth = item.headingDepth ?? 0;
         if (Number.isFinite(headingDepth) && Math.abs(headingDepth) <= 1) {
           // The glTF loader's handedness root turns the authored -X nose into
-          // Babylon +X. Face the actual loaded head along the server heading.
-          if (Math.hypot(item.heading.x, headingDepth) > .01)
-            visual.targetYaw = Math.atan2(-headingDepth, item.heading.x);
-          visual.targetPitch = Math.max(-.32, Math.min(.32,
-            Math.atan2(item.heading.y, Math.max(.3,
-              Math.hypot(item.heading.x, headingDepth))) * .28));
+          // Babylon +X. Follow the visible interpolation segment; a delayed
+          // heading frame must never make the fish slide tail-first. When the
+          // position is unchanged, keep the server heading for the next turn.
+          const moving = Math.hypot(dx, dy, dz) > .001;
+          const forwardX = moving ? dx : item.heading.x;
+          const forwardY = moving ? dy : item.heading.y;
+          const forwardZ = moving ? dz : headingDepth;
+          const horizontal = Math.hypot(forwardX, forwardZ);
+          if (horizontal > .01) visual.yaw = Math.atan2(-forwardZ, forwardX);
+          visual.pitch = Math.max(-.32, Math.min(.32,
+            Math.atan2(forwardY, Math.max(.3, horizontal)) * .28));
         }
       }
     }
@@ -204,8 +212,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
       loading.material = this.fallbackMaterial;
       this.loadingMarkers.set(entity.id, loading);
       this.markers.set(entity.id, marker);
-      this.fishMotion.set(entity.id, { yaw: 0, targetYaw: 0,
-        pitch: 0, targetPitch: 0,
+      this.fishMotion.set(entity.id, { yaw: 0, pitch: 0,
         phase: [...entity.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) * .31 });
       this.entityVersions.set(entity.id, version);
       if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])
@@ -403,15 +410,9 @@ export class BabylonRendererAdapter implements RendererAdapter {
 
   private animateFish(): void {
     const now = performance.now();
-    const step = Math.min(.05, (now - this.lastAnimationTime) / 1000);
-    this.lastAnimationTime = now;
     for (const [id, visual] of this.fishMotion) {
       const marker = this.markers.get(id);
       if (!marker) continue;
-      const turn = Math.atan2(Math.sin(visual.targetYaw - visual.yaw),
-        Math.cos(visual.targetYaw - visual.yaw));
-      visual.yaw += Math.max(-step * 2.8, Math.min(step * 2.8, turn));
-      visual.pitch += Math.max(-step * .9, Math.min(step * .9, visual.targetPitch - visual.pitch));
       const stroke = Math.sin(now * .007 + visual.phase);
       marker.rotation.y = visual.yaw + stroke * .035;
       marker.rotation.z = visual.pitch;
