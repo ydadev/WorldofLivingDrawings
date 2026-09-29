@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "underwater",
+  "version": 1,
+  "view": { "kind": "orthographic-side", "width": 16, "height": 9, "fixed": true },
+  "zones": [{ "id": "water", "bounds": [-7.5, 7.5, -4, 4] }],
+  "entityDefinitions": ["coral-fish", "stream-fish"],
+  "interactions": ["feed", "boat"]
+}

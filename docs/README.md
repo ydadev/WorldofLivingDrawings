@@ -13,6 +13,6 @@
 - [Проверка ТЗ 1.0](TZ-review.md) — исходный аудит до согласования решений.
 - [Первый проект дополнения](TZ-1.1-proposal.md) — исторический черновик; не использовать как текущую спецификацию.
 
-Порядок работы: [STATUS](STATUS.md), [TASKS](TASKS.md), [WORKLOG](WORKLOG.md), [DEVELOPMENT](DEVELOPMENT.md), [DECISIONS](DECISIONS.md). Инфраструктура: [INFRASTRUCTURE](INFRASTRUCTURE.md), [RUNBOOK](RUNBOOK.md). Короткое задание для продолжения: [CONTINUE](CONTINUE.md).
+Порядок работы: [STATUS](STATUS.md), [TASKS](TASKS.md), [WORKLOG](WORKLOG.md), [DEVELOPMENT](DEVELOPMENT.md), [DECISIONS](DECISIONS.md). Каркас: [ARCHITECTURE](ARCHITECTURE.md). Инфраструктура: [INFRASTRUCTURE](INFRASTRUCTURE.md), [RUNBOOK](RUNBOOK.md). Короткое задание для продолжения: [CONTINUE](CONTINUE.md).
 
-Разработка приложения ещё не начата. Подготовка сервера и репозитория учитывается отдельно в статусе и журнале.
+Технические проверки завершены в части, не требующей реальных фото и TV. Начат каркас приложения; фактическая готовность отражена в статусе и журнале.

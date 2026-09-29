@@ -1,0 +1,12 @@
+[
+  {
+    "schemaVersion": 1, "id": "coral-fish", "version": 1,
+    "modelAssetId": "coral-model", "paintTemplateId": "coral", "paintTemplateVersion": 1,
+    "capabilities": ["consume-food", "avoid-threat"]
+  },
+  {
+    "schemaVersion": 1, "id": "stream-fish", "version": 1,
+    "modelAssetId": "stream-model", "paintTemplateId": "stream", "paintTemplateVersion": 1,
+    "capabilities": ["consume-food", "avoid-threat"]
+  }
+]

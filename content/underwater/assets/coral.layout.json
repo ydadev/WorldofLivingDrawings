@@ -1,0 +1,151 @@
+{
+  "templateId": "coral",
+  "templateVersion": 1,
+  "projection": "orthographic-side",
+  "textureSize": [
+    512,
+    512
+  ],
+  "bounds": [
+    -1.8,
+    1.9,
+    -1.25,
+    1.25
+  ],
+  "body": [
+    [
+      -1.28,
+      0.07,
+      0.045
+    ],
+    [
+      -1.12,
+      0.26,
+      0.14
+    ],
+    [
+      -0.88,
+      0.46,
+      0.28
+    ],
+    [
+      -0.52,
+      0.62,
+      0.38
+    ],
+    [
+      -0.08,
+      0.68,
+      0.42
+    ],
+    [
+      0.37,
+      0.6,
+      0.35
+    ],
+    [
+      0.73,
+      0.39,
+      0.23
+    ],
+    [
+      1.05,
+      0.15,
+      0.09
+    ]
+  ],
+  "fins": [
+    {
+      "id": "tail-top",
+      "points": [
+        [
+          0.98,
+          0.12
+        ],
+        [
+          1.62,
+          0.68
+        ],
+        [
+          1.38,
+          0.02
+        ]
+      ],
+      "depth": 0.055
+    },
+    {
+      "id": "tail-bottom",
+      "points": [
+        [
+          0.98,
+          -0.12
+        ],
+        [
+          1.38,
+          -0.02
+        ],
+        [
+          1.62,
+          -0.68
+        ]
+      ],
+      "depth": 0.055
+    },
+    {
+      "id": "dorsal",
+      "points": [
+        [
+          -0.63,
+          0.55
+        ],
+        [
+          -0.15,
+          1.02
+        ],
+        [
+          0.4,
+          0.55
+        ]
+      ],
+      "depth": 0.06
+    },
+    {
+      "id": "pelvic",
+      "points": [
+        [
+          -0.28,
+          -0.62
+        ],
+        [
+          0.15,
+          -0.94
+        ],
+        [
+          0.43,
+          -0.57
+        ]
+      ],
+      "depth": 0.05
+    }
+  ],
+  "eye": [
+    -0.95,
+    0.15,
+    0.105
+  ],
+  "paintMask": {
+    "include": [
+      "body",
+      "fins"
+    ],
+    "exclude": [
+      "eye"
+    ]
+  },
+  "paintMaterial": "paint",
+  "uvSet": 0,
+  "sideMapping": "same-xy-on-both-sides",
+  "edgeMapping": "project-xy",
+  "colorSpace": "sRGB",
+  "contentHash": "65c5bc5ba7ed7eb5e92c68c1e8f4c97ae4cf8112c2a0a2532a8e0e7c22f4509b"
+}

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://world.routx.ru/schemas/v1/definitions.schema.json",
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+    "positiveInt": { "type": "integer", "minimum": 1 },
+    "nonnegativeInt": { "type": "integer", "minimum": 0 },
+    "point": {
+      "type": "object", "required": ["x", "y"], "additionalProperties": false,
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+    },
+    "paintResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "templateId", "templateVersion", "layoutHash", "sourceKind", "colorSpace", "width", "height", "blobId"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "templateId": { "$ref": "#/$defs/id" },
+        "templateVersion": { "$ref": "#/$defs/positiveInt" },
+        "layoutHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sourceKind": { "enum": ["paper", "browser"] }, "colorSpace": { "const": "sRGB" },
+        "width": { "const": 512 }, "height": { "const": 512 }, "blobId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "entityDefinition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "version", "modelAssetId", "paintTemplateId", "paintTemplateVersion", "capabilities"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "id": { "$ref": "#/$defs/id" },
+        "version": { "$ref": "#/$defs/positiveInt" }, "modelAssetId": { "$ref": "#/$defs/id" },
+        "paintTemplateId": { "$ref": "#/$defs/id" }, "paintTemplateVersion": { "$ref": "#/$defs/positiveInt" },
+        "capabilities": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      }
+    },
+    "interactionDefinition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "version", "effect", "allowedZoneId", "requiredCapability", "radius", "durationTicks", "maxActive", "cooldownTicks", "priority"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "id": { "$ref": "#/$defs/id" },
+        "version": { "$ref": "#/$defs/positiveInt" }, "effect": { "enum": ["attraction", "threat"] },
+        "allowedZoneId": { "$ref": "#/$defs/id" }, "requiredCapability": { "$ref": "#/$defs/id" },
+        "radius": { "type": "number", "exclusiveMinimum": 0 },
+        "durationTicks": { "$ref": "#/$defs/positiveInt" }, "maxActive": { "$ref": "#/$defs/positiveInt" },
+        "cooldownTicks": { "$ref": "#/$defs/nonnegativeInt" }, "priority": { "type": "integer" }
+      }
+    },
+    "interactionIntent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "commandId", "sceneEpoch", "interactionId", "point"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "commandId": { "type": "string", "pattern": "^[a-zA-Z0-9-]{8,64}$" },
+        "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
+        "interactionId": { "$ref": "#/$defs/id" },
+        "point": { "$ref": "#/$defs/point" }
+      }
+    },
+    "worldDefinition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "version", "view", "zones", "entityDefinitions", "interactions"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "id": { "$ref": "#/$defs/id" },
+        "version": { "$ref": "#/$defs/positiveInt" },
+        "view": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "width", "height", "fixed"],
+          "properties": { "kind": { "const": "orthographic-side" }, "width": { "type": "number", "exclusiveMinimum": 0 },
+            "height": { "type": "number", "exclusiveMinimum": 0 }, "fixed": { "const": true } }
+        },
+        "zones": { "type": "array", "minItems": 1, "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "bounds"],
+          "properties": { "id": { "$ref": "#/$defs/id" }, "bounds": { "type": "array", "minItems": 4, "maxItems": 4, "prefixItems": [
+            { "type": "number" }, { "type": "number" }, { "type": "number" }, { "type": "number" }
+          ], "items": false } }
+        } },
+        "entityDefinitions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "interactions": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      }
+    },
+    "sceneEntity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "definitionId", "definitionVersion", "position"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "definitionId": { "$ref": "#/$defs/id" },
+        "definitionVersion": { "$ref": "#/$defs/positiveInt" }, "position": { "$ref": "#/$defs/point" },
+        "paintBlobId": { "$ref": "#/$defs/id" } }
+    },
+    "sceneSnapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "sceneEpoch", "revision", "simulationTick", "worldId", "worldVersion", "entities"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
+        "revision": { "$ref": "#/$defs/nonnegativeInt" }, "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
+        "worldId": { "$ref": "#/$defs/id" }, "worldVersion": { "$ref": "#/$defs/positiveInt" },
+        "entities": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } }
+      }
+    },
+    "sceneDelta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "sceneEpoch", "revision", "simulationTick", "upsert", "remove"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
+        "revision": { "$ref": "#/$defs/positiveInt" }, "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
+        "upsert": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
+        "remove": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      }
+    },
+    "assetManifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "packageId", "packageVersion", "assets"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "packageId": { "$ref": "#/$defs/id" },
+        "packageVersion": { "$ref": "#/$defs/positiveInt" },
+        "assets": { "type": "array", "minItems": 1, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "path", "sha256", "mediaType", "license"],
+          "properties": { "id": { "$ref": "#/$defs/id" }, "path": { "type": "string", "pattern": "^[a-z0-9][a-z0-9./-]+$" },
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "mediaType": { "enum": ["model/gltf-binary", "application/json", "image/svg+xml"] },
+            "license": { "type": "string", "minLength": 1, "maxLength": 120 } }
+        } }
+      }
+    }
+  }
+}

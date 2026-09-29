@@ -1,0 +1,12 @@
+{
+  "name": "@ldw/renderer-babylon",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@ldw/contracts": "0.1.0",
+    "@ldw/renderer": "0.1.0",
+    "@babylonjs/core": "9.28.0"
+  }
+}

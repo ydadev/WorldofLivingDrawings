@@ -1,0 +1,12 @@
+[
+  {
+    "schemaVersion": 1, "id": "feed", "version": 1, "effect": "attraction",
+    "allowedZoneId": "water", "requiredCapability": "consume-food",
+    "radius": 4, "durationTicks": 300, "maxActive": 3, "cooldownTicks": 10, "priority": 1
+  },
+  {
+    "schemaVersion": 1, "id": "boat", "version": 1, "effect": "threat",
+    "allowedZoneId": "water", "requiredCapability": "avoid-threat",
+    "radius": 3.2, "durationTicks": 600, "maxActive": 1, "cooldownTicks": 200, "priority": 10
+  }
+]

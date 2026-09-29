@@ -24,3 +24,4 @@ a { color: #92d9f0; }
 .interaction-controls { display: flex; gap: .65rem; flex-wrap: wrap; }
 .interaction-stage { display: flex; justify-content: center; align-items: center; width: 100%; }
 #interaction-scene { display: block; width: min(100%, 1200px); aspect-ratio: 16 / 9; height: auto; touch-action: none; border-radius: .5rem; }
+#core-scene { display: block; width: min(100%, 1200px); aspect-ratio: 16 / 9; height: auto; border-radius: .5rem; }

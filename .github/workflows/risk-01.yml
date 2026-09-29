@@ -5,7 +5,15 @@ on:
       - '.github/workflows/risk-01.yml'
       - 'rust-toolchain.toml'
       - '.node-version'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'web/**'
+      - 'schemas/**'
+      - 'content/**'
       - 'prototypes/**'
+      - 'tools/build-content.mjs'
+      - 'tools/test-contracts.mjs'
+      - 'tools/test-core-renderer-browser.mjs'
       - 'tools/build-wasm.mjs'
       - 'tools/test-risk-browser.mjs'
       - 'tools/test-fish-browser.mjs'
@@ -17,7 +25,15 @@ on:
       - '.github/workflows/risk-01.yml'
       - 'rust-toolchain.toml'
       - '.node-version'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'web/**'
+      - 'schemas/**'
+      - 'content/**'
       - 'prototypes/**'
+      - 'tools/build-content.mjs'
+      - 'tools/test-contracts.mjs'
+      - 'tools/test-core-renderer-browser.mjs'
       - 'tools/build-wasm.mjs'
       - 'tools/test-risk-browser.mjs'
       - 'tools/test-fish-browser.mjs'
@@ -42,6 +58,10 @@ jobs:
           package-manager-cache: false
       - name: Install minimal WebAssembly target
         run: rustup target add wasm32v1-none --toolchain 1.98.1
+      - name: Install root workspace dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check contracts and renderer types
+        run: npm run test:contracts && npm run typecheck
       - name: Install locked dependencies
         working-directory: prototypes/wasm-webgl
         run: npm ci --no-audit --no-fund
@@ -50,6 +70,8 @@ jobs:
         run: npm run build
       - name: Check generated fish files are current
         run: git diff --exit-code -- prototypes/fish-assets/generated
+      - name: Check bundled underwater assets are current
+        run: npm run build:content && git diff --exit-code -- content/underwater
       - name: Run Chrome browser probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:browser
@@ -65,3 +87,6 @@ jobs:
       - name: Run Chrome two-screen interaction probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:interaction
+      - name: Run Chrome renderer adapter probe
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:core-renderer
