@@ -309,3 +309,5 @@ Owner и Controller получили встроенные страницы ци�
 ## 2026-09-29 — CORE-04, команда очистки blob (в работе)
 
 Добавлена отдельная команда `ldw-server gc-blobs` с общим с сервером конфигом БД/хранилища. Она использует проверенный внутренний сборщик и не требует PIN-ключа, который нужен только HTTP-серверу. Расписание GC не включено до установки согласованного backup и проверки восстановления. Ubuntu/PostgreSQL CI новой команды — NOT_RUN.
+
+[Ubuntu/PostgreSQL/Chrome CI команды](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36587465043) — PASS: `cargo run ... gc-blobs` выполнился с реальной БД и закрытым каталогом, повторно прошли 10 серверных тестов, backup barrier/restore и браузерный сценарий. [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36587465192) — PASS. Команда доступна в исходниках; binary и timer ещё не развёрнуты на сервере. Продуктовая проверка GC вместе с восстановлением работающей сцены — NOT_RUN.
