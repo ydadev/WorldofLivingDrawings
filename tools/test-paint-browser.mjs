@@ -134,6 +134,30 @@ try {
   const box = await canvas.boundingBox();
   await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
   if (!red(await colorAt(256, 256))) throw new Error('Touch did not paint');
+  const actionsBeforePan = (await page.evaluate(() => window.paintProbe)).actionCount;
+  await page.locator('#paint-zoom-in').click();
+  if (await page.locator('#paint-zoom-level').textContent() !== '200%')
+    throw new Error('Zoom did not change the sheet scale');
+  await page.locator('#paint-tool').selectOption('pan');
+  const zoomBox = await canvas.boundingBox();
+  await page.mouse.move(zoomBox.x + zoomBox.width / 2, zoomBox.y + zoomBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(zoomBox.x + zoomBox.width * (256 + 100) / 512,
+    zoomBox.y + zoomBox.height / 2, { steps: 5 });
+  await page.mouse.up();
+  if (!red(await colorAt(356, 256)) || red(await colorAt(256, 256)) ||
+      (await page.evaluate(() => window.paintProbe)).actionCount !== actionsBeforePan)
+    throw new Error('Pan moved the drawing incorrectly or added a paint action');
+  await page.locator('#paint-tool').selectOption('stroke');
+  await page.locator('[data-paint-color="#2456df"]').click();
+  if (await page.locator('#paint-color').inputValue() !== '#2456df' ||
+      await page.locator('[data-paint-color="#2456df"]').getAttribute('aria-pressed') !== 'true')
+    throw new Error('Preset palette did not select blue');
+  await clickAt(256, 256);
+  if (!blue(await colorAt(256, 256))) throw new Error('Zoomed pointer was mapped to wrong paint point');
+  await page.locator('#paint-fit').click();
+  if (await page.locator('#paint-zoom-level').textContent() !== '100%' ||
+      !blue(await colorAt(206, 256))) throw new Error('Fit did not restore the full-sheet view');
   if (errors.length) throw new Error(`Browser errors: ${errors.join(' | ')}`);
   await page.screenshot({ path: path.join(root, '.local/risk04-stream-touch.png') });
   console.log('RISK-04 paint: both fish, brush/touch, undo/redo, erase, fill, picker, clear and model texture: PASS');

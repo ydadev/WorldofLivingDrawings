@@ -11,14 +11,28 @@
       <p>Выбери рыбку, рисуй мышью или пальцем и посмотри результат на объёмной модели.</p>
       <div class="paint-controls">
         <label>Рыбка <select id="paint-species"><option value="coral">Круглая</option><option value="stream">Быстрая</option></select></label>
-        <label>Инструмент <select id="paint-tool"><option value="stroke">Кисть</option><option value="fill">Заливка</option><option value="erase">Ластик</option><option value="pick">Пипетка</option></select></label>
+        <label>Инструмент <select id="paint-tool"><option value="stroke">Кисть</option><option value="fill">Заливка</option><option value="erase">Ластик</option><option value="pick">Пипетка</option><option value="pan">Переместить лист</option></select></label>
         <label>Цвет <input id="paint-color" type="color" value="#e9463a"></label>
         <label>Толщина <input id="paint-size" type="range" min="2" max="48" value="16"></label>
+        <button id="paint-zoom-out" type="button" aria-label="Уменьшить лист">−</button>
+        <output id="paint-zoom-level" aria-label="Масштаб листа">100%</output>
+        <button id="paint-zoom-in" type="button" aria-label="Увеличить лист">+</button>
+        <button id="paint-fit" type="button">Вписать целиком</button>
         <button id="paint-undo" type="button">Отменить</button>
         <button id="paint-redo" type="button">Повторить</button>
         <button id="paint-clear" type="button">Очистить</button>
         <button id="paint-download" type="button">Скачать PNG</button>
       </div>
+      <fieldset class="paint-palette"><legend>Готовые цвета</legend>
+        <button type="button" class="paint-swatch swatch-red" data-paint-color="#e9463a" aria-label="Красный" title="Красный"></button>
+        <button type="button" class="paint-swatch swatch-orange" data-paint-color="#f59b35" aria-label="Оранжевый" title="Оранжевый"></button>
+        <button type="button" class="paint-swatch swatch-yellow" data-paint-color="#f5df52" aria-label="Жёлтый" title="Жёлтый"></button>
+        <button type="button" class="paint-swatch swatch-green" data-paint-color="#39b86d" aria-label="Зелёный" title="Зелёный"></button>
+        <button type="button" class="paint-swatch swatch-blue" data-paint-color="#2456df" aria-label="Синий" title="Синий"></button>
+        <button type="button" class="paint-swatch swatch-purple" data-paint-color="#9b60ce" aria-label="Фиолетовый" title="Фиолетовый"></button>
+        <button type="button" class="paint-swatch swatch-brown" data-paint-color="#8d5c42" aria-label="Коричневый" title="Коричневый"></button>
+        <button type="button" class="paint-swatch swatch-black" data-paint-color="#263238" aria-label="Чёрный" title="Чёрный"></button>
+      </fieldset>
       <p id="paint-status" role="status">Загрузка…</p>
       <section aria-label="Черновики на этом устройстве">
         <p>Черновики хранятся только в этом браузере. На общем устройстве можно рисовать без сохранения.</p>

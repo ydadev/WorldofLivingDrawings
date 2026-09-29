@@ -13,7 +13,7 @@ import { DraftError, deleteDraft, listDrafts, loadDraft, saveDraft, type PaintDr
 import './style.css';
 
 type FishId = 'coral' | 'stream';
-type Tool = 'stroke' | 'fill' | 'erase' | 'pick';
+type Tool = 'stroke' | 'fill' | 'erase' | 'pick' | 'pan';
 declare global { interface Window {
   paintProbe?: { status: string; templateId?: string; layoutHash?: string;
     actionCount?: number; sampledColor?: string; texturePixel?: number[]; error?: string };
@@ -32,6 +32,11 @@ const speciesInput = required<HTMLSelectElement>('#paint-species');
 const toolInput = required<HTMLSelectElement>('#paint-tool');
 const colorInput = required<HTMLInputElement>('#paint-color');
 const sizeInput = required<HTMLInputElement>('#paint-size');
+const zoomInButton = required<HTMLButtonElement>('#paint-zoom-in');
+const zoomOutButton = required<HTMLButtonElement>('#paint-zoom-out');
+const fitButton = required<HTMLButtonElement>('#paint-fit');
+const zoomLevel = required<HTMLOutputElement>('#paint-zoom-level');
+const swatches = [...document.querySelectorAll<HTMLButtonElement>('[data-paint-color]')];
 const status = required<HTMLParagraphElement>('#paint-status');
 const undoButton = required<HTMLButtonElement>('#paint-undo');
 const redoButton = required<HTMLButtonElement>('#paint-redo');
@@ -80,6 +85,40 @@ let saveTimer: number | undefined;
 let saving: Promise<boolean> | undefined;
 let previewUrl: string | undefined;
 let previewDraft: PaintDraft | undefined;
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+let draggingPan = false;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragPanX = 0;
+let dragPanY = 0;
+
+function refreshSwatches(): void {
+  for (const swatch of swatches)
+    swatch.setAttribute('aria-pressed', String(swatch.dataset.paintColor === colorInput.value.toLowerCase()));
+}
+
+function clampPan(): void {
+  panX = Math.max(512 * (1 - zoom), Math.min(0, panX));
+  panY = Math.max(512 * (1 - zoom), Math.min(0, panY));
+}
+
+function showZoom(): void {
+  zoomLevel.value = `${Math.round(zoom * 100)}%`;
+  zoomInButton.disabled = zoom >= 4;
+  zoomOutButton.disabled = zoom <= 1;
+}
+
+function setZoom(next: number): void {
+  const adjusted = Math.max(1, Math.min(4, next));
+  panX = 256 - (256 - panX) * adjusted / zoom;
+  panY = 256 - (256 - panY) * adjusted / zoom;
+  zoom = adjusted;
+  clampPan();
+  showZoom();
+  paintSheet();
+}
 
 function draftMessage(message: string, state: string): void {
   draftStatus.textContent = message;
@@ -160,10 +199,15 @@ async function flushDraft(): Promise<boolean> {
   return okay;
 }
 
-function coordinate(event: PointerEvent): [number, number] {
+function screenCoordinate(event: PointerEvent): [number, number] {
   const rect = sheet.getBoundingClientRect();
   return [(event.clientX - rect.left) / rect.width * 512,
     (event.clientY - rect.top) / rect.height * 512];
+}
+
+function coordinate(event: PointerEvent): [number, number] {
+  const [x, y] = screenCoordinate(event);
+  return [(x - panX) / zoom, (y - panY) / zoom];
 }
 
 function paintSheet(): void {
@@ -172,6 +216,9 @@ function paintSheet(): void {
   sheetContext.setTransform(1, 0, 0, 1, 0, 0);
   sheetContext.fillStyle = '#fff';
   sheetContext.fillRect(0, 0, 1024, 1024);
+  sheetContext.save();
+  sheetContext.translate(panX * 2, panY * 2);
+  sheetContext.scale(zoom, zoom);
   sheetContext.drawImage(doc.layer, 0, 0);
   sheetContext.save();
   sheetContext.scale(2, 2);
@@ -207,6 +254,7 @@ function paintSheet(): void {
   sheetContext.beginPath();
   sheetContext.ellipse(ex, ey, rx * .48, ry * .48, 0, 0, Math.PI * 2);
   sheetContext.fill();
+  sheetContext.restore();
   sheetContext.restore();
   undoButton.disabled = !doc.undoable;
   redoButton.disabled = !doc.redoable;
@@ -248,6 +296,8 @@ async function load(species: FishId, draft?: PaintDraft): Promise<void> {
     roots = imported.meshes;
     documentState = new PaintDocument(layout);
     if (draft) await documentState.restoreLayer(draft.image);
+    zoom = 1; panX = panY = 0;
+    showZoom();
     draftId = draft?.id;
     draftRevision = draft?.revision ?? 0;
     draftEnabled = !!draft;
@@ -284,17 +334,29 @@ sheet.addEventListener('pointerdown', event => {
   if (currentPointer !== undefined) {
     points = [];
     currentPointer = undefined;
+    draggingPan = false;
     paintSheet();
     return;
   }
   if (event.pointerType === 'mouse' && event.button !== 0) return;
-  const [x, y] = coordinate(event);
   const tool = toolInput.value as Tool;
+  draggingPan = false;
+  if (tool === 'pan') {
+    currentPointer = event.pointerId;
+    draggingPan = true;
+    [dragStartX, dragStartY] = screenCoordinate(event);
+    dragPanX = panX;
+    dragPanY = panY;
+    sheet.setPointerCapture(event.pointerId);
+    return;
+  }
+  const [x, y] = coordinate(event);
   if (tool === 'fill') { commit({ kind: 'fill', x, y, color: colorInput.value }); return; }
   if (tool === 'pick') {
     const pixel = documentState.textureCanvas().getContext('2d')!
       .getImageData(Math.max(0, Math.min(511, Math.floor(x))), Math.max(0, Math.min(511, Math.floor(y))), 1, 1).data;
     colorInput.value = '#' + [...pixel].slice(0, 3).map(value => value.toString(16).padStart(2, '0')).join('');
+    refreshSwatches();
     if (window.paintProbe) window.paintProbe.sampledColor = colorInput.value;
     return;
   }
@@ -308,11 +370,20 @@ sheet.addEventListener('pointerdown', event => {
 });
 sheet.addEventListener('pointermove', event => {
   if (currentPointer !== event.pointerId) return;
+  if (draggingPan) {
+    const [x, y] = screenCoordinate(event);
+    panX = dragPanX + x - dragStartX;
+    panY = dragPanY + y - dragStartY;
+    clampPan();
+    paintSheet();
+    return;
+  }
   points.push(coordinate(event));
   paintSheet();
 });
 sheet.addEventListener('pointerup', event => {
   if (currentPointer !== event.pointerId) return;
+  if (draggingPan) { currentPointer = undefined; draggingPan = false; return; }
   points.push(coordinate(event));
   const action: PaintAction = { kind: pointerTool, points, size: pointerSize, color: pointerColor };
   currentPointer = undefined;
@@ -320,7 +391,19 @@ sheet.addEventListener('pointerup', event => {
   commit(action);
 });
 sheet.addEventListener('pointercancel', event => {
-  if (currentPointer === event.pointerId) { currentPointer = undefined; points = []; paintSheet(); }
+  if (currentPointer === event.pointerId) { currentPointer = undefined; draggingPan = false; points = []; paintSheet(); }
+});
+for (const swatch of swatches) swatch.addEventListener('click', () => {
+  colorInput.value = swatch.dataset.paintColor!;
+  refreshSwatches();
+});
+colorInput.addEventListener('input', refreshSwatches);
+toolInput.addEventListener('change', () => sheet.classList.toggle('is-panning', toolInput.value === 'pan'));
+zoomInButton.addEventListener('click', () => setZoom(zoom * 2));
+zoomOutButton.addEventListener('click', () => setZoom(zoom / 2));
+fitButton.addEventListener('click', () => {
+  zoom = 1; panX = panY = 0;
+  showZoom(); paintSheet();
 });
 undoButton.addEventListener('click', () => { if (!documentState?.undoable) return; documentState.undo(); paintSheet(); updateModel(); changed(); });
 redoButton.addEventListener('click', () => { if (!documentState?.redoable) return; documentState.redo(); paintSheet(); updateModel(); changed(); });
@@ -425,3 +508,5 @@ window.addEventListener('keydown', event => {
 });
 void load(speciesInput.value as FishId);
 void refreshDrafts();
+refreshSwatches();
+showZoom();

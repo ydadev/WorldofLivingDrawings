@@ -13,9 +13,23 @@ a { color: #92d9f0; }
 .paint-main { max-width: 1300px; margin: 0 auto; padding: 1rem; color: #e7f5f7; }
 .paint-controls { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin: 1rem 0; }
 .paint-controls label { display: inline-flex; align-items: center; gap: .3rem; }
+.paint-controls button { min-height: 44px; }
+.paint-palette { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; border: 1px solid #5891a6; border-radius: .5rem; }
+.paint-palette legend { padding: 0 .35rem; }
+.paint-swatch { width: 44px; height: 44px; border: 2px solid #e7f5f7; }
+.paint-swatch[aria-pressed="true"] { outline: 3px solid #fff; outline-offset: 2px; }
+.swatch-red { background: #e9463a; }
+.swatch-orange { background: #f59b35; }
+.swatch-yellow { background: #f5df52; }
+.swatch-green { background: #39b86d; }
+.swatch-blue { background: #2456df; }
+.swatch-purple { background: #9b60ce; }
+.swatch-brown { background: #8d5c42; }
+.swatch-black { background: #263238; }
 .paint-grid { display: grid; grid-template-columns: minmax(250px, 1fr) minmax(250px, 1fr); gap: 1rem; }
 .paint-sheet { width: 100%; max-width: 560px; }
 #paint-sheet { display: block; width: 100%; height: auto; background: white; border-radius: .5rem; touch-action: none; cursor: crosshair; }
+#paint-sheet.is-panning { cursor: grab; }
 #paint-model { display: block; width: 100%; height: min(60vh, 560px); border-radius: .5rem; }
 #draft-preview-image { display: block; max-width: 100%; background: white; border-radius: .5rem; margin-bottom: .5rem; }
 @media (max-width: 760px) { .paint-grid { grid-template-columns: 1fr; } #paint-model { height: 300px; } }
