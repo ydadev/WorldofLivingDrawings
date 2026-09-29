@@ -6,6 +6,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +44,13 @@ pub struct AccessStore {
     pool: PgPool,
     pin_key: [u8; 32],
 }
+
+static UNKNOWN_ACCOUNT_HASH: LazyLock<String> = LazyLock::new(|| {
+    Argon2::default()
+        .hash_password(b"unusable-owner-password")
+        .expect("dummy password hash")
+        .to_string()
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnerGrant {
@@ -365,23 +373,91 @@ impl AccessStore {
         Ok(id)
     }
 
-    pub async fn login(&self, login: &str, password: &str) -> Result<OwnerGrant, AccessError> {
+    pub async fn login(
+        &self,
+        login: &str,
+        password: &str,
+        peer_ip: &str,
+    ) -> Result<OwnerGrant, AccessError> {
+        if login.is_empty()
+            || login.len() > 64
+            || password.len() > 1024
+            || peer_ip.is_empty()
+            || peer_ip.len() > 64
+        {
+            return Err(AccessError::InvalidCredentials);
+        }
+        let login_hash = self.keyed_hash(b"owner-login", login.as_bytes());
+        let ip_hash = self.keyed_hash(b"owner-ip", peer_ip.as_bytes());
+        let mut lock_keys = [
+            i64::from_be_bytes(
+                login_hash[..8]
+                    .try_into()
+                    .map_err(|_| AccessError::Crypto)?,
+            ),
+            i64::from_be_bytes(ip_hash[..8].try_into().map_err(|_| AccessError::Crypto)?),
+        ];
+        lock_keys.sort_unstable();
+        let mut tx = self.pool.begin().await?;
+        for key in lock_keys {
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(key)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query(
+            "DELETE FROM owner_login_attempts WHERE attempted_at < now() - interval '1 day'",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let (login_attempts, ip_attempts): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE login_hash = $1 AND attempted_at > now() - interval '15 minutes'), \
+             count(*) FILTER (WHERE ip_hash = $2 AND attempted_at > now() - interval '1 minute') \
+             FROM owner_login_attempts WHERE attempted_at > now() - interval '15 minutes'"
+        ).bind(&login_hash).bind(&ip_hash).fetch_one(&mut *tx).await?;
+        if login_attempts >= 5 || ip_attempts >= 30 {
+            return Err(AccessError::RateLimited);
+        }
         let account: Option<(Uuid, String, String)> = sqlx::query_as(
             "SELECT id, role, password_hash FROM accounts WHERE login = $1 AND disabled_at IS NULL",
         )
         .bind(login)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        let (account_id, role, stored_hash) = account.ok_or(AccessError::InvalidCredentials)?;
-        let parsed = PasswordHash::new(&stored_hash).map_err(|_| AccessError::Crypto)?;
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .map_err(|_| AccessError::InvalidCredentials)?;
+        let stored_hash = account
+            .as_ref()
+            .map(|(_, _, hash)| hash.clone())
+            .unwrap_or_else(|| UNKNOWN_ACCOUNT_HASH.clone());
+        let supplied_password = password.to_owned();
+        let verified = tokio::task::spawn_blocking(move || {
+            let parsed = PasswordHash::new(&stored_hash).map_err(|_| AccessError::Crypto)?;
+            Ok::<bool, AccessError>(
+                Argon2::default()
+                    .verify_password(supplied_password.as_bytes(), &parsed)
+                    .is_ok(),
+            )
+        })
+        .await
+        .map_err(|_| AccessError::Crypto)??;
+        let Some((account_id, role, _)) = account.filter(|_| verified) else {
+            sqlx::query("INSERT INTO owner_login_attempts (login_hash, ip_hash) VALUES ($1, $2)")
+                .bind(login_hash)
+                .bind(ip_hash)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Err(AccessError::InvalidCredentials);
+        };
         let token = random_token()?;
         let csrf = random_token()?;
         sqlx::query("INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) VALUES ($1, $2, $3, $4, now() + interval '12 hours')")
             .bind(Uuid::new_v4()).bind(account_id).bind(hash_token(&token).to_vec())
-            .bind(hash_token(&csrf).to_vec()).execute(&self.pool).await?;
+            .bind(hash_token(&csrf).to_vec()).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM owner_login_attempts WHERE login_hash = $1")
+            .bind(login_hash)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(OwnerGrant {
             account_id,
             role,
@@ -945,4 +1021,112 @@ fn scene_row(
         },
     )
     .ok_or(AccessError::Forbidden)
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owner_login_limits_concurrent_guesses_before_allowing_a_later_valid_login() {
+        let pool = crate::test_pool().await;
+        let account_id = Uuid::new_v4();
+        let login = format!("rate-{account_id}");
+        let password = format!("valid-{account_id}");
+        let hash = Argon2::default()
+            .hash_password(password.as_bytes())
+            .unwrap()
+            .to_string();
+        sqlx::query(
+            "INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', $3)",
+        )
+        .bind(account_id)
+        .bind(&login)
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = AccessStore::new(pool.clone(), [81; 32]);
+        let peer = format!("test-{account_id}");
+        let unknown = format!("missing-{account_id}");
+        assert!(matches!(
+            store.login(&unknown, "wrong-password", &peer).await,
+            Err(AccessError::InvalidCredentials)
+        ));
+        let unknown_hash = store.keyed_hash(b"owner-login", unknown.as_bytes());
+        let unknown_record: Vec<u8> =
+            sqlx::query_scalar("SELECT login_hash FROM owner_login_attempts WHERE login_hash = $1")
+                .bind(&unknown_hash)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(unknown_record.len(), 32);
+        let mut guesses = tokio::task::JoinSet::new();
+        for _ in 0..10 {
+            let store = store.clone();
+            let login = login.clone();
+            let peer = peer.clone();
+            guesses.spawn(async move { store.login(&login, "wrong-password", &peer).await });
+        }
+        let mut denied = 0;
+        let mut limited = 0;
+        while let Some(result) = guesses.join_next().await {
+            match result.unwrap() {
+                Err(AccessError::InvalidCredentials) => denied += 1,
+                Err(AccessError::RateLimited) => limited += 1,
+                other => panic!("unexpected login outcome: {other:?}"),
+            }
+        }
+        assert_eq!((denied, limited), (5, 5));
+        assert!(matches!(
+            store.login(&login, &password, &peer).await,
+            Err(AccessError::RateLimited)
+        ));
+        let login_hash = store.keyed_hash(b"owner-login", login.as_bytes());
+        let recorded: Vec<Vec<u8>> =
+            sqlx::query_scalar("SELECT login_hash FROM owner_login_attempts WHERE login_hash = $1")
+                .bind(&login_hash)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded.len(), 5);
+        assert!(recorded.iter().all(|hash| hash.len() == 32));
+        sqlx::query("UPDATE owner_login_attempts SET attempted_at = now() - interval '16 minutes' WHERE login_hash = $1")
+            .bind(login_hash).execute(&pool).await.unwrap();
+        let grant = store.login(&login, &password, &peer).await.unwrap();
+        assert_eq!(grant.account_id, account_id);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM owner_login_attempts WHERE login_hash = $1")
+                .bind(store.keyed_hash(b"owner-login", login.as_bytes()))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn owner_login_limits_rotating_unknown_names_by_source() {
+        let pool = crate::test_pool().await;
+        let store = AccessStore::new(pool.clone(), [82; 32]);
+        let peer = format!("rotating-{}", Uuid::new_v4());
+        for index in 0..30 {
+            let login = format!("unknown-{index}-{}", Uuid::new_v4());
+            assert!(matches!(
+                store.login(&login, "wrong-password", &peer).await,
+                Err(AccessError::InvalidCredentials)
+            ));
+        }
+        let extra = format!("unknown-{}", Uuid::new_v4());
+        assert!(matches!(
+            store.login(&extra, "wrong-password", &peer).await,
+            Err(AccessError::RateLimited)
+        ));
+        let ip_hash = store.keyed_hash(b"owner-ip", peer.as_bytes());
+        sqlx::query("UPDATE owner_login_attempts SET attempted_at = now() - interval '2 minutes' WHERE ip_hash = $1")
+            .bind(ip_hash).execute(&pool).await.unwrap();
+        assert!(matches!(
+            store.login(&extra, "wrong-password", &peer).await,
+            Err(AccessError::InvalidCredentials)
+        ));
+    }
 }

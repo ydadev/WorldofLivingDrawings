@@ -716,7 +716,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let owner = store.login(&login, &password).await.unwrap();
+        let owner = store.login(&login, &password, "test-peer").await.unwrap();
         let scene = store
             .create_session(&owner.token, &owner.csrf)
             .await
@@ -959,7 +959,10 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let other = store.login(&other_login, &other_password).await.unwrap();
+        let other = store
+            .login(&other_login, &other_password, "test-peer")
+            .await
+            .unwrap();
         let other_cookie = format!("__Host-ldw-owner={}", other.token);
         let rejected = app
             .clone()

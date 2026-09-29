@@ -226,12 +226,19 @@ struct LoginResponse {
 
 async fn login(
     State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(input): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), ApiError> {
     require_origin(&headers, &state)?;
-    let grant = state.access.login(&input.login, &input.password).await?;
+    let peer_ip = peer
+        .map(|ConnectInfo(address)| address.ip().to_string())
+        .unwrap_or_else(|| "unknown-peer".to_owned());
+    let grant = state
+        .access
+        .login(&input.login, &input.password, &peer_ip)
+        .await?;
     let response = LoginResponse {
         role: grant.role,
         csrf: grant.csrf,

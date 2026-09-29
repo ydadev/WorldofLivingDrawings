@@ -29,7 +29,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pool = PgPool::connect(&database_url).await?;
     let store = BlobStore::new(blob_directory)?;
     let access = AccessStore::new(pool.clone(), [0; 32]);
-    let owner = access.login("ui-fixture-owner", &password).await?;
+    let owner = access
+        .login("ui-fixture-owner", &password, "fixture")
+        .await?;
     let summary = access.owner_scene(&owner.token, session_id).await?;
     assert_eq!(summary.world_id, "underwater");
     let mut loaded = simulation::load_scene(&pool, summary.scene_id).await?;

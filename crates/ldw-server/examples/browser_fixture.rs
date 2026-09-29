@@ -40,7 +40,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     access
         .bootstrap_admin("ui-fixture-admin", &password)
         .await?;
-    let admin = access.login("ui-fixture-admin", &password).await?;
+    let admin = access
+        .login("ui-fixture-admin", &password, "fixture")
+        .await?;
     access
         .create_owner(&admin.token, "ui-fixture-owner", &password)
         .await?;

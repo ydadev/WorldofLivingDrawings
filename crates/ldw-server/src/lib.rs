@@ -103,9 +103,14 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(store.login("ci-admin", "wrong-password").await.is_err());
+        assert!(
+            store
+                .login("ci-admin", "wrong-password", "test-peer")
+                .await
+                .is_err()
+        );
         let admin = store
-            .login("ci-admin", &admin_password)
+            .login("ci-admin", &admin_password, "test-peer")
             .await
             .expect("admin login");
         let first_password = Uuid::new_v4().to_string();
@@ -119,11 +124,11 @@ mod tests {
             .await
             .expect("second owner");
         let first = store
-            .login("ci-owner-one", &first_password)
+            .login("ci-owner-one", &first_password, "test-peer")
             .await
             .expect("first login");
         let second = store
-            .login("ci-owner-two", &second_password)
+            .login("ci-owner-two", &second_password, "test-peer")
             .await
             .expect("second login");
         assert!(
