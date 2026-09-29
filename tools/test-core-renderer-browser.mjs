@@ -126,6 +126,59 @@ try {
       !adapter.scene.meshes.some(mesh => /^fish-[12]\//.test(mesh.name));
   });
   assert(removed);
+  const budget = await desktop.evaluate(() => {
+    const adapter = window.coreAdapter;
+    const canvas = document.querySelector('#core-scene');
+    canvas.style.width = '3840px';
+    canvas.style.height = '2160px';
+    adapter.setRenderScale(1);
+    const standard = [adapter.engine.getRenderWidth(), adapter.engine.getRenderHeight()];
+    adapter.setRenderScale(.75);
+    const reduced = [adapter.engine.getRenderWidth(), adapter.engine.getRenderHeight()];
+    canvas.style.removeProperty('width');
+    canvas.style.removeProperty('height');
+    adapter.setRenderScale(1);
+    return { standard, reduced };
+  });
+  assert(budget.standard[0] <= 1280 && budget.standard[1] <= 720, `LOW cap: ${JSON.stringify(budget)}`);
+  assert(budget.reduced[0] <= 960 && budget.reduced[1] <= 540, `LOW scale: ${JSON.stringify(budget)}`);
+  await desktop.evaluate(() => {
+    const entities = Array.from({ length: 100 }, (_, index) => ({
+      id: `fish-load-${index}`, definitionId: index % 2 ? 'coral-fish' : 'stream-fish',
+      definitionVersion: 1,
+      paintBlobId: `load-${index}`,
+      position: { x: -6.7 + (index % 10) * 1.45, y: -3.4 + Math.floor(index / 10) * .74 },
+    }));
+    window.coreAdapter.applySnapshot({ schemaVersion: 1, sceneEpoch: 2, revision: 0,
+      simulationTick: 0, worldId: 'underwater', worldVersion: 1, entities });
+    window.coreAdapter.setRenderScale(.75);
+  });
+  await desktop.waitForFunction(() => window.coreAdapter.scene.meshes.filter(mesh =>
+    mesh.name.startsWith('fish-load-') && mesh.material?.name.endsWith('/paint') &&
+    mesh.material.albedoTexture?.isReady()).length === 100,
+  null, { timeout: 30000 });
+  const profile = await desktop.evaluate(async () => {
+    const scene = window.coreAdapter.scene;
+    const samples = [];
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    let last = performance.now();
+    const observer = scene.onAfterRenderObservable.add(() => {
+      const now = performance.now();
+      samples.push(now - last);
+      last = now;
+    });
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    scene.onAfterRenderObservable.remove(observer);
+    const sorted = samples.slice(5).sort((a, b) => a - b);
+    return { fish: scene.meshes.filter(mesh => mesh.name.startsWith('fish-load-') &&
+      mesh.material?.name.endsWith('/paint')).length,
+      frames: sorted.length, p95FrameMs: sorted[Math.floor(sorted.length * .95)] ?? null,
+      width: window.coreAdapter.engine.getRenderWidth(),
+      height: window.coreAdapter.engine.getRenderHeight() };
+  });
+  assert.equal(profile.fish, 100);
+  assert(profile.frames > 10, `No sustained frames: ${JSON.stringify(profile)}`);
+  console.log(`Short software-GPU 100-fish LOW probe: ${JSON.stringify(profile)}`);
   if (errors.length) throw new Error(`Browser errors: ${errors.join(' | ')}`);
   console.log('CORE-04 Chrome: fixed view, snapshot/delta, two painted GLB instances, interpolation and cleanup: PASS');
 } finally {

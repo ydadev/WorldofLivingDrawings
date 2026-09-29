@@ -41,6 +41,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private revision = 0;
   private simulationTick = 0;
   private disposed = false;
+  private renderScale = 1;
 
   constructor(private readonly canvas: HTMLCanvasElement,
     private readonly assetBaseUrl = '/content/underwater/assets/',
@@ -54,9 +55,17 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.scene.activeCamera = this.camera;
     new HemisphericLight('ambient', new Vector3(0, 1, -1), this.scene).intensity = 1.2;
     this.engine.runRenderLoop(() => { this.interpolate(); this.scene.render(); });
-    this.resizeObserver = new ResizeObserver(() => this.engine.resize());
+    this.resizeObserver = new ResizeObserver(() => this.resizeToBudget());
     this.resizeObserver.observe(canvas);
-    requestAnimationFrame(() => this.engine.resize());
+    requestAnimationFrame(() => this.resizeToBudget());
+  }
+
+  /** LOW starts at at most 1280×720 even when the panel has a 4K viewport. */
+  setRenderScale(scale: number): void {
+    if (!Number.isFinite(scale) || scale < .5 || scale > 1)
+      throw new Error('INVALID_RENDER_SCALE');
+    this.renderScale = scale;
+    this.resizeToBudget();
   }
 
   setWorld(world: WorldDefinition): void {
@@ -178,6 +187,13 @@ export class BabylonRendererAdapter implements RendererAdapter {
     if (this.disposed || this.markers.get(entity.id) !== marker) { entries.dispose(); return; }
     for (const root of entries.rootNodes) root.parent = marker;
     this.modelEntries.set(entity.id, entries);
+    for (const root of entries.rootNodes) {
+      for (const node of root.getDescendants(false)) {
+        if (node instanceof AbstractMesh && node.material instanceof PBRMaterial) {
+          node.material.unlit = true;
+        }
+      }
+    }
     if (entity.paintBlobId) {
       const texture = new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true);
       this.paintTextures.set(entity.id, texture);
@@ -203,5 +219,15 @@ export class BabylonRendererAdapter implements RendererAdapter {
       marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
       if (progress === 1) this.movement.delete(id);
     }
+  }
+
+  private resizeToBudget(): void {
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    if (width <= 0 || height <= 0) return;
+    const scaling = Math.max(1, width / (1280 * this.renderScale),
+      height / (720 * this.renderScale));
+    this.engine.setHardwareScalingLevel(scaling);
+    this.engine.resize();
   }
 }

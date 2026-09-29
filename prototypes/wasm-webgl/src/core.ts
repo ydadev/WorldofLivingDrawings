@@ -11,7 +11,8 @@ declare global {
 }
 
 const paintUrl = (id: string): string => {
-  const color = id === 'red' ? '#ed4333' : '#328bea';
+  const color = id === 'red' ? '#ed4333' : id === 'blue' ? '#328bea' :
+    `hsl(${(Number(id.slice(5)) * 37) % 360} 80% 50%)`;
   const paint = document.createElement('canvas');
   paint.width = paint.height = 512;
   const context = paint.getContext('2d')!;

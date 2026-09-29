@@ -34,7 +34,7 @@
 | CORE-01 | DONE | TypeScript workspace, JSON Schema v1, renderer adapter, самодостаточный manifest с SHA-256; локально/CI PASS | RISK-03-TECH, RISK-04, RISK-05 |
 | CORE-02 | DONE | Rust/PG миграции, Admin/Owner, сессии/сцены, QR/PIN Controller, cookie/Origin/CSRF; SQL+HTTP тесты изоляции двух сессий в CI | CORE-01 |
 | CORE-03 | DONE | Viewer/TV-активация, WebSocket snapshots/deltas, команды, epoch, dedup/reconnect; SQL+2 WS-клиента+Chrome/CI PASS | CORE-02 |
-| CORE-04 | IN_PROGRESS | Ядро, checkpoint/20 Hz, кадры 2 Hz проверены в CI; GLB с отдельной окраской прошёл локальный Chrome-тест, CI ожидается; далее публикация рыб и LOW | CORE-03 |
+| CORE-04 | IN_PROGRESS | Ядро/20 Hz, 2 Hz и GLB/окраска проверены в CI; LOW-буфер локально, 100 разных текстур выше цели на программном GPU, новый CI ожидается; далее публикация рыб и TV | CORE-03 |
 
 ## Этап 2 — законченные сценарии MVP
 
