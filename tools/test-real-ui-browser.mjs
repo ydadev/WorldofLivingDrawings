@@ -206,6 +206,59 @@ try {
   await mobile.waitForFunction(() => !document.querySelector('#action-feed').disabled,
     null, { timeout: 20000 });
 
+  const syntheticPaper = Buffer.from(await mobile.evaluate(async () => {
+    const sheet = new Image();
+    sheet.src = '/fish/stream.paper.svg';
+    await sheet.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = 1200;
+    canvas.height = 1700;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#cfcac0';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(sheet, 90, 90, 1020, 1442.57);
+    context.fillStyle = '#ee4131';
+    context.fillRect(90 + 1020 * 90 / 210, 90 + 1442.57 * 130 / 297,
+      1020 * 30 / 210, 1442.57 * 34 / 297);
+    return canvas.toDataURL('image/png').split(',')[1];
+  }), 'base64');
+  const paperRequests = [];
+  mobile.on('request', request => {
+    if (request.method() !== 'GET') paperRequests.push(request);
+  });
+  await mobile.locator('#capture-open').click();
+  const capture = mobile.frameLocator('#editor-frame');
+  await capture.locator('#capture-file').setInputFiles({
+    name: 'test-paper.png', mimeType: 'image/png', buffer: syntheticPaper,
+  });
+  await mobile.waitForFunction(() => ['PASS', 'FAIL'].includes(
+    document.querySelector('#editor-frame')?.contentWindow?.captureProbe?.status ?? ''),
+  null, { timeout: 30000 });
+  const paperProbe = await mobile.evaluate(() => document.querySelector('#editor-frame')?.contentWindow?.captureProbe);
+  assert(paperProbe.status === 'PASS' && paperProbe.templateId === 'stream',
+    `Controller paper capture failed: ${JSON.stringify(paperProbe)}`);
+  assert(paperRequests.length === 0, 'Raw photo processing made a network mutation');
+  await mobile.locator('#editor-pick').click();
+  await mobile.locator('#fish-place').waitFor({ state: 'visible', timeout: 20000 });
+  await mobile.waitForFunction(() => !document.querySelector('#fish-place').disabled,
+    null, { timeout: 20000 });
+  await mobile.locator('#fish-place').click();
+  await point(mobile, .65, .45, true);
+  await mobile.waitForFunction(() => /Рыбка сохранена/.test(document.querySelector('#publish-status')?.textContent ?? ''),
+    null, { timeout: 20000 });
+  const paperIntent = paperRequests.find(request => request.url().endsWith('/upload-intents'));
+  assert(paperIntent?.postDataJSON()?.sourceKind === 'paper', 'Paper sourceKind was not sent');
+  const paperPut = paperRequests.find(request => request.method() === 'PUT' && request.url().endsWith('/paint'));
+  assert(paperPut?.headers()['content-type'] === 'image/png', 'Controller did not send normalized PNG');
+  const paperPublished = await waitFrame(ownerFrames, frame => frame.type === 'delta' &&
+    frame.event?.type === 'entity_published' && frame.event.entity.definitionId === 'stream-fish', 20000);
+  assert(Math.abs(paperPublished.event.entity.position.x - 2.4) < .12 &&
+    Math.abs(paperPublished.event.entity.position.y - .45) < .12,
+  'Paper fish was published at the wrong point');
+  const paperTexture = await mobileContext.request.get(`${origin}/api/sessions/${sessionId}/paint/${paperPublished.event.entity.paintBlobId}`);
+  assert(paperTexture.status() === 200 && paperTexture.headers()['content-type'] === 'image/png',
+    'Controller could not fetch published paper texture');
+
   await owner.locator('#action-feed').click();
   await point(owner, .5, .5);
   const feedRequested = await waitFrame(ownerFrames, frame => frame.type === 'delta' &&
@@ -232,7 +285,7 @@ try {
     frame.actionPositions?.some(action => action.id.startsWith('boat-')));
 
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
-  console.log('CORE-04 real backend UI: HTTPS cookies, PostgreSQL, drawn fish publication, Owner, Viewer, Controller, feed and boat: PASS');
+  console.log('CORE-04 real backend UI: HTTPS cookies, PostgreSQL, drawn and paper fish publication, Owner, Viewer, Controller, feed and boat: PASS');
 } finally {
   await browser?.close();
   if (proxy.listening) {
