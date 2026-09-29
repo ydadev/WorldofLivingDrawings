@@ -1,0 +1,12 @@
+{
+  "markerFormatVersion": 1,
+  "pageSizeMm": [210, 297],
+  "imageRectMm": [20, 64, 170, 170],
+  "markerSizeMm": 32,
+  "markers": {
+    "TL": [27, 35],
+    "TR": [183, 35],
+    "BL": [27, 263],
+    "BR": [183, 263]
+  }
+}

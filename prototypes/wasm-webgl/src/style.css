@@ -18,3 +18,5 @@ a { color: #92d9f0; }
 #paint-sheet { display: block; width: 100%; height: auto; background: white; border-radius: .5rem; touch-action: none; cursor: crosshair; }
 #paint-model { display: block; width: 100%; height: min(60vh, 560px); border-radius: .5rem; }
 @media (max-width: 760px) { .paint-grid { grid-template-columns: 1fr; } #paint-model { height: 300px; } }
+#capture-result { display: block; width: min(100%, 560px); height: auto; background: white; border-radius: .5rem; }
+#capture-model { display: block; width: 100%; height: min(60vh, 560px); border-radius: .5rem; }

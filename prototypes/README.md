@@ -35,3 +35,9 @@ Paint Canvas — 512×512, ортографический боковой вид.
 After `npm run build`, open `paint.html` through the Vite preview. This separate technical page uses the versioned `PaintLayout` from the two fish assets to draw a 1024×1024 working canvas. Brush, fill, eraser, eyedropper, clear and undo/redo are restricted to the fish mask, with the eye protected. The same colors are reduced to a 512×512 sRGB PNG `PaintResult` and shown on the GLB model. `npm run test:paint` checks mouse and touch input, fill/mask, undo/redo, both species and the exported PNG in Chrome. It also saves screenshots only in ignored `.local/`.
 
 This is an editor risk probe, not the final Controller. The MVP editor still needs zoom/pan gestures, bounded history, explicit local drafts, production accessibility/error handling, authorization and submission to a scene.
+
+## Paper capture probe (RISK-03)
+
+`npm run build` also generates A4 `coral.paper.svg` and `stream.paper.svg` with four QR markers carrying the template identity and marker format version. Open `capture.html` via the Vite preview to select a local JPEG/PNG. The browser decodes it locally, sends pixels to a Worker, identifies all four markers, computes a homography, masks the painted side silhouette and produces a 512×512 paper `PaintResult`. The preview shows the result on the same GLB model used by the browser editor. Raw photos are not sent to the server or stored by this prototype.
+
+`npm run test:capture` checks synthetic A4, perspective JPEG and rotated PNG samples, two species, model preview, malformed or missing markers, and HEIC guidance. The real print/photo acceptance remains open; its dataset, thresholds and private evaluation procedure are in [CAPTURE-VALIDATION.md](../docs/CAPTURE-VALIDATION.md). Synthetic success does not certify camera accuracy.

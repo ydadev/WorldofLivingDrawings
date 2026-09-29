@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Фотография бумажной раскраски</title>
+  </head>
+  <body>
+    <main class="paint-main">
+      <h1>Раскраска с бумажного листа</h1>
+      <p>Распечатай шаблон на A4 без изменения масштаба. Раскрась рыбку и сфотографируй весь лист так, чтобы были видны четыре QR-маркера.</p>
+      <p><a href="/fish/coral.paper.svg" download>Скачать круглую рыбку</a> · <a href="/fish/stream.paper.svg" download>Скачать быструю рыбку</a></p>
+      <label>Фотография JPEG или PNG <input id="capture-file" type="file" accept="image/jpeg,image/png" capture="environment"></label>
+      <p id="capture-status" role="status">Выбери фотографию.</p>
+      <div class="paint-grid">
+        <section><h2>Результат раскраски</h2><canvas id="capture-result" width="512" height="512" aria-label="Распознанная раскраска"></canvas></section>
+        <section><h2>Предпросмотр на рыбке</h2><canvas id="capture-model" aria-label="Объёмная рыба с раскраской из фотографии"></canvas></section>
+      </div>
+      <button id="capture-download" type="button" disabled>Скачать нормализованный PNG</button>
+    </main>
+    <script type="module" src="/src/capture.ts"></script>
+  </body>
+</html>

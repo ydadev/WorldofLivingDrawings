@@ -8,20 +8,23 @@
   },
   "scripts": {
     "build:wasm": "node ../../tools/build-wasm.mjs",
-    "build:fish": "node ../fish-assets/generate.mjs && node verify-fish.mjs",
+    "build:fish": "node ../fish-assets/generate.mjs && node generate-paper.mjs && node verify-fish.mjs",
     "build": "npm run build:wasm && npm run build:fish && tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --strictPort",
     "test:browser": "node ../../tools/test-risk-browser.mjs",
     "test:fish": "node ../../tools/test-fish-browser.mjs",
-    "test:paint": "node ../../tools/test-paint-browser.mjs"
+    "test:paint": "node ../../tools/test-paint-browser.mjs",
+    "test:capture": "node ../../tools/test-capture-browser.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "9.28.0",
-    "@babylonjs/loaders": "9.28.0"
+    "@babylonjs/loaders": "9.28.0",
+    "jsqr": "1.4.0"
   },
   "devDependencies": {
     "gltf-validator": "2.0.0-dev.3.10",
     "playwright-core": "1.63.0",
+    "qrcode": "1.5.4",
     "typescript": "6.0.3",
     "vite": "8.3.1"
   }
