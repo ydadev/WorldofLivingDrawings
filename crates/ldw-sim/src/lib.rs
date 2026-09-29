@@ -1,12 +1,14 @@
 //! Deterministic, renderer-independent movement core for the fixed side-view world.
 //! Positions are logical world units; callers own persistence and authoritative ticks.
 
+use serde::{Deserialize, Serialize};
+
 pub const MAX_FISH: usize = 100;
 pub const MAX_OBSTACLES: usize = 16;
 pub const TICKS_PER_SECOND: u64 = 20;
 const FISH_RADIUS: f32 = 0.18;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -18,7 +20,7 @@ impl Point {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub min_x: f32,
     pub max_x: f32,
@@ -42,15 +44,16 @@ impl Bounds {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Circle {
     pub center: Point,
     pub radius: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fish {
-    pub id: u64,
+    #[serde(with = "hex_u128")]
+    pub id: u128,
     pub position: Point,
     pub target: Point,
     /// World units per second, before the fixed 20 Hz tick.
@@ -59,6 +62,22 @@ pub struct Fish {
     waypoint: Option<Point>,
     target_generation: u32,
     stuck_ticks: u16,
+}
+
+mod hex_u128 {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(id: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{id:032x}"))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(D::Error::custom("expected 32 hexadecimal digits"));
+        }
+        u128::from_str_radix(&value, 16).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +90,17 @@ pub enum SimError {
     ObstacleLimit,
     InvalidObstacle,
     UnknownFish,
+    InvalidCheckpoint,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldCheckpoint {
+    pub schema_version: u32,
+    pub bounds: Bounds,
+    pub fish: Vec<Fish>,
+    pub obstacles: Vec<Circle>,
+    pub tick: u64,
+    pub seed: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +128,58 @@ impl World {
 
     pub fn tick_number(&self) -> u64 {
         self.tick
+    }
+
+    pub fn checkpoint(&self) -> WorldCheckpoint {
+        WorldCheckpoint {
+            schema_version: 1,
+            bounds: self.bounds,
+            fish: self.fish.clone(),
+            obstacles: self.obstacles.clone(),
+            tick: self.tick,
+            seed: self.seed,
+        }
+    }
+
+    pub fn restore(checkpoint: WorldCheckpoint) -> Result<Self, SimError> {
+        if checkpoint.schema_version != 1
+            || !checkpoint.bounds.valid()
+            || checkpoint.fish.len() > MAX_FISH
+            || checkpoint.obstacles.len() > MAX_OBSTACLES
+        {
+            return Err(SimError::InvalidCheckpoint);
+        }
+        for obstacle in &checkpoint.obstacles {
+            if !obstacle.radius.is_finite()
+                || obstacle.radius <= 0.0
+                || !checkpoint.bounds.contains(obstacle.center, obstacle.radius)
+            {
+                return Err(SimError::InvalidCheckpoint);
+            }
+        }
+        let mut seen = std::collections::HashSet::with_capacity(checkpoint.fish.len());
+        for fish in &checkpoint.fish {
+            if !seen.insert(fish.id)
+                || !fish.speed.is_finite()
+                || !(0.1..=3.0).contains(&fish.speed)
+                || !valid_point(fish.position, checkpoint.bounds, &checkpoint.obstacles)
+                || !valid_point(fish.target, checkpoint.bounds, &checkpoint.obstacles)
+                || fish.waypoint.is_some_and(|point| {
+                    !valid_point(point, checkpoint.bounds, &checkpoint.obstacles)
+                })
+                || !fish.heading.x.is_finite()
+                || !fish.heading.y.is_finite()
+            {
+                return Err(SimError::InvalidCheckpoint);
+            }
+        }
+        Ok(Self {
+            bounds: checkpoint.bounds,
+            fish: checkpoint.fish,
+            obstacles: checkpoint.obstacles,
+            tick: checkpoint.tick,
+            seed: checkpoint.seed,
+        })
     }
     pub fn fish(&self) -> &[Fish] {
         &self.fish
@@ -127,7 +209,7 @@ impl World {
         Ok(())
     }
 
-    pub fn spawn_fish(&mut self, id: u64, position: Point, speed: f32) -> Result<(), SimError> {
+    pub fn spawn_fish(&mut self, id: u128, position: Point, speed: f32) -> Result<(), SimError> {
         if self.fish.len() >= MAX_FISH {
             return Err(SimError::FishLimit);
         }
@@ -159,7 +241,7 @@ impl World {
         Ok(())
     }
 
-    pub fn set_target(&mut self, id: u64, target: Point) -> Result<(), SimError> {
+    pub fn set_target(&mut self, id: u128, target: Point) -> Result<(), SimError> {
         if !target.x.is_finite()
             || !target.y.is_finite()
             || !self.bounds.contains(target, FISH_RADIUS)
@@ -281,6 +363,13 @@ fn point_blocked(point: Point, obstacles: &[Circle]) -> bool {
     })
 }
 
+fn valid_point(point: Point, bounds: Bounds, obstacles: &[Circle]) -> bool {
+    point.x.is_finite()
+        && point.y.is_finite()
+        && bounds.contains(point, FISH_RADIUS)
+        && !point_blocked(point, obstacles)
+}
+
 fn segment_clear(start: Point, end: Point, obstacles: &[Circle]) -> bool {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
@@ -303,7 +392,7 @@ fn segment_clear(start: Point, end: Point, obstacles: &[Circle]) -> bool {
 fn plan_waypoint(
     start: Point,
     target: Point,
-    id: u64,
+    id: u128,
     bounds: Bounds,
     obstacles: &[Circle],
 ) -> Option<Point> {
@@ -349,11 +438,12 @@ fn choose_target(
     bounds: Bounds,
     obstacles: &[Circle],
     seed: u64,
-    id: u64,
+    id: u128,
     generation: u32,
 ) -> Option<Point> {
+    let folded_id = id as u64 ^ ((id >> 64) as u64).rotate_left(29);
     let mut state = seed
-        ^ id.wrapping_mul(0x9e3779b97f4a7c15)
+        ^ folded_id.wrapping_mul(0x9e3779b97f4a7c15)
         ^ (generation as u64).wrapping_mul(0xbf58476d1ce4e5b9);
     for _ in 0..16 {
         state = xorshift(state);
@@ -413,7 +503,7 @@ mod tests {
             if point_blocked(position, world.obstacles()) {
                 world
                     .spawn_fish(
-                        index,
+                        index as u128,
                         Point {
                             x: position.x,
                             y: 2.5,
@@ -422,7 +512,7 @@ mod tests {
                     )
                     .unwrap();
             } else {
-                world.spawn_fish(index, position, 1.0).unwrap();
+                world.spawn_fish(index as u128, position, 1.0).unwrap();
             }
         }
         assert_eq!(
@@ -486,5 +576,50 @@ mod tests {
             }),
             Err(SimError::InvalidObstacle)
         );
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_preserves_route_and_rejects_corruption() {
+        let mut original = World::new(bounds(), 91).unwrap();
+        original
+            .add_obstacle(Circle {
+                center: Point { x: 0.0, y: 0.0 },
+                radius: 1.0,
+            })
+            .unwrap();
+        let fish_id = u64::MAX as u128 + 7;
+        original
+            .spawn_fish(fish_id, Point { x: -3.0, y: 0.0 }, 1.2)
+            .unwrap();
+        original
+            .set_target(fish_id, Point { x: 3.0, y: 0.0 })
+            .unwrap();
+        for _ in 0..30 {
+            original.step();
+        }
+        let saved = serde_json::to_vec(&original.checkpoint()).unwrap();
+        let decoded: WorldCheckpoint = serde_json::from_slice(&saved).unwrap();
+        let through_json_value: WorldCheckpoint =
+            serde_json::from_value(serde_json::to_value(original.checkpoint()).unwrap()).unwrap();
+        assert_eq!(through_json_value.fish[0].id, fish_id);
+        let mut restored = World::restore(decoded.clone()).unwrap();
+        assert_eq!(restored.tick_number(), 30);
+        for _ in 0..100 {
+            original.step();
+            restored.step();
+            assert_eq!(original.checkpoint(), restored.checkpoint());
+        }
+        let mut corrupted = decoded.clone();
+        corrupted.fish.push(decoded.fish[0]);
+        assert!(matches!(
+            World::restore(corrupted),
+            Err(SimError::InvalidCheckpoint)
+        ));
+        let mut corrupted = decoded;
+        corrupted.fish[0].position = Point { x: 99.0, y: 0.0 };
+        assert!(matches!(
+            World::restore(corrupted),
+            Err(SimError::InvalidCheckpoint)
+        ));
     }
 }
