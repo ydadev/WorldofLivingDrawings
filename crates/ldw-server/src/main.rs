@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pin_key: [u8; 32] = key_bytes
         .try_into()
         .map_err(|_| "PIN key must be 32 bytes")?;
+    let simulation_pool = pool.clone();
     let access = AccessStore::new(pool, pin_key);
 
     match command.as_str() {
@@ -58,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let listener = tokio::net::TcpListener::bind(address).await?;
             access.bump_active_epochs().await?;
             let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            let simulation_task = tokio::spawn(simulation::run(access.pool().clone(), shutdown_rx));
+            let simulation_task = tokio::spawn(simulation::run(simulation_pool, shutdown_rx));
             let app = router(AppState {
                 access,
                 public_origin: Arc::from(origin),
