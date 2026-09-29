@@ -43,7 +43,7 @@ try:
     victims = module.expired_bundles(root, now)
     victim_names = {child.name for child in victims}
     assert newest not in victim_names
-    assert extra in victim_names  # One completed backup per day is retained.
+    assert extra not in victim_names  # Recent manual recovery points survive.
     for days in range(7):
         assert (now - timedelta(days=days)).strftime("%Y%m%dT%H%M%SZ") not in victim_names
     assert (now - timedelta(days=35)).strftime("%Y%m%dT%H%M%SZ") in victim_names
@@ -52,7 +52,7 @@ try:
     assert all(child.parent == root for child in victims)
     assert len(victims) > 30
     assert {child.name for child in module.prune(root, now, apply=True)} == victim_names
-    assert not (root / extra).exists()
+    assert (root / extra).is_dir()
     assert (root / newest).is_dir()
     assert (root / ".incomplete.partial").is_dir()
     assert (root / "notes").read_text() == "do not remove"

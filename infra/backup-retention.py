@@ -38,14 +38,12 @@ def expired_bundles(root: Path, now: datetime) -> list[Path]:
     bundles.sort(reverse=True)
 
     keep: set[Path] = set()
-    daily_dates = set()
     weekly_weeks = set()
     for created, child in bundles:
         if now - created > MAX_AGE:
             continue
-        day = created.date()
-        if day not in daily_dates and len(daily_dates) < 7:
-            daily_dates.add(day)
+        # Keep manual recovery points too; several may be taken on one day.
+        if now - created < timedelta(days=7):
             keep.add(child)
         week = created.isocalendar()[:2]
         if week not in weekly_weeks and len(weekly_weeks) < 4:
