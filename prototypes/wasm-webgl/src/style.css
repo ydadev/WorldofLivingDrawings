@@ -34,10 +34,14 @@ a { color: #92d9f0; }
 .live-approve label:first-child { display: grid; gap: .2rem; }
 .live-approve input[name="code"] { padding: .5rem; font: inherit; width: 9rem; }
 .live-stage { position: relative; width: 100%; margin-top: .5rem; }
+.live-editor { margin: 1rem 0; }
+.live-editor iframe { display: block; width: 100%; height: min(78vh, 850px); border: 1px solid #5891a6; border-radius: 8px; background: #092d3b; }
+.live-editor button { margin: .6rem .5rem .4rem 0; min-height: 44px; }
 #world-canvas { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; max-height: 78vh; touch-action: none; }
 .live-crosshair { position: absolute; transform: translate(-50%, -50%); pointer-events: none;
   color: #fff; text-shadow: 0 0 4px #062b39; font-size: 2rem; line-height: 1; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button[aria-pressed="true"] { background: #267d76; border-color: #b6ffe8; }
 @media (max-width: 600px) { .live-main { padding: .7rem; }
-  #world-canvas { max-height: none; } .interaction-controls button { flex: 1 1 42%; min-height: 44px; } }
+  #world-canvas { max-height: none; } .interaction-controls button { flex: 1 1 42%; min-height: 44px; }
+  .live-editor iframe { height: 75vh; } }

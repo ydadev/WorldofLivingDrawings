@@ -3,6 +3,7 @@ import type { RendererAdapter, RendererFactory } from '@ldw/renderer';
 import { SceneConnection, type ConnectionState } from '@ldw/transport';
 
 type Action = 'feed' | 'boat';
+type Selection = Action | 'fish';
 
 export interface WorldUiElements {
   canvas: HTMLCanvasElement;
@@ -13,6 +14,7 @@ export interface WorldUiElements {
   status: HTMLElement;
   crosshair: HTMLElement;
   toggle?: HTMLButtonElement;
+  placeFish?: HTMLButtonElement;
 }
 
 export interface WorldUiOptions {
@@ -25,6 +27,7 @@ export interface WorldUiOptions {
   /** Controller opens the view only when requested and releases its GPU resources on close. */
   onDemand?: boolean;
   rendererFactory: RendererFactory;
+  onPlaceFish?: (point: Point2) => void;
   createSocket?: (url: string) => WebSocket;
 }
 
@@ -45,7 +48,7 @@ const REASONS: Record<string, string> = {
 export class WorldInteractionUi {
   private readonly connection: SceneConnection;
   private renderer: RendererAdapter | null = null;
-  private selected: Action | null = null;
+  private selected: Selection | null = null;
   private pending: { id: string; action: Action; accepted: boolean; absentInSnapshot: boolean } | null = null;
   private pointer: { id: number; x: number; y: number; at: number } | null = null;
   private keyboardPoint: Point2 = { x: 0, y: 0 };
@@ -61,6 +64,7 @@ export class WorldInteractionUi {
     elements.feed.addEventListener('click', this.onFeed);
     elements.boat.addEventListener('click', this.onBoat);
     elements.cancel.addEventListener('click', this.onCancel);
+    elements.placeFish?.addEventListener('click', this.onPlaceFish);
     elements.canvas.addEventListener('pointerdown', this.onPointerDown);
     elements.canvas.addEventListener('pointerup', this.onPointerUp);
     elements.canvas.addEventListener('pointercancel', this.onPointerCancel);
@@ -131,6 +135,7 @@ export class WorldInteractionUi {
     elements.feed.removeEventListener('click', this.onFeed);
     elements.boat.removeEventListener('click', this.onBoat);
     elements.cancel.removeEventListener('click', this.onCancel);
+    elements.placeFish?.removeEventListener('click', this.onPlaceFish);
     elements.canvas.removeEventListener('pointerdown', this.onPointerDown);
     elements.canvas.removeEventListener('pointerup', this.onPointerUp);
     elements.canvas.removeEventListener('pointercancel', this.onPointerCancel);
@@ -141,19 +146,22 @@ export class WorldInteractionUi {
 
   private readonly onFeed = (): void => this.choose('feed');
   private readonly onBoat = (): void => this.choose('boat');
+  private readonly onPlaceFish = (): void => this.choose('fish');
   private readonly onCancel = (): void => this.cancelSelection();
   private readonly onToggle = (): void => { if (this.opened) this.close(); else this.open(); };
   private readonly onVisibility = (): void => {
     if (this.options.onDemand && document.visibilityState === 'hidden') this.close();
   };
 
-  private choose(action: Action): void {
+  private choose(action: Selection): void {
     if (!this.canInteract()) return;
+    if (action === 'fish' && !this.options.onPlaceFish) return;
     this.selected = action;
     this.pointer = null;
     this.keyboardPoint = { x: 0, y: 0 };
     this.showCrosshair();
-    this.setStatus(`Укажите место для ${action === 'feed' ? 'корма' : 'лодки'} в воде. Стрелки и Enter тоже работают.`);
+    const label = action === 'feed' ? 'корма' : action === 'boat' ? 'лодки' : 'рыбки';
+    this.setStatus(`Укажите место для ${label} в воде. Стрелки и Enter тоже работают.`);
     this.updateControls();
   }
 
@@ -215,6 +223,11 @@ export class WorldInteractionUi {
     const action = this.selected;
     this.selected = null;
     this.options.elements.crosshair.hidden = true;
+    if (action === 'fish') {
+      this.options.onPlaceFish?.(point);
+      this.updateControls();
+      return;
+    }
     const id = this.connection.sendInteraction(action, point);
     if (!id) {
       this.setStatus('Связь прервалась. Дождитесь подключения.');
@@ -285,8 +298,12 @@ export class WorldInteractionUi {
   }
 
   private updateControls(): void {
-    const { feed, boat, cancel, crosshair } = this.options.elements;
+    const { feed, boat, cancel, crosshair, placeFish } = this.options.elements;
     feed.disabled = boat.disabled = !this.canInteract();
+    if (placeFish) {
+      placeFish.disabled = !this.canInteract();
+      placeFish.setAttribute('aria-pressed', String(this.selected === 'fish'));
+    }
     cancel.disabled = !this.selected;
     feed.setAttribute('aria-pressed', String(this.selected === 'feed'));
     boat.setAttribute('aria-pressed', String(this.selected === 'boat'));

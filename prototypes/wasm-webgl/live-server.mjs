@@ -15,7 +15,7 @@ const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
   '.glb': 'model/gltf-binary', '.png': 'image/png' };
 const csp = ["default-src 'none'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self'",
   "img-src 'self' data: blob:", `connect-src 'self' ws://127.0.0.1:${port}`, "worker-src 'self'", "object-src 'none'",
-  "base-uri 'none'", "frame-ancestors 'none'"].join('; ');
+  "base-uri 'none'", "frame-src 'self'", "frame-ancestors 'self'"].join('; ');
 const state = { revision: 0, actions: [], commands: [], outcomes: new Map(), viewerRole: null };
 const json = (response, status, value) => response.writeHead(status,
   { 'Content-Type': 'application/json' }).end(JSON.stringify(value));

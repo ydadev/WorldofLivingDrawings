@@ -27,8 +27,19 @@
         <div id="action-panel" class="interaction-controls">
           <button type="button" id="action-feed">Корм</button>
           <button type="button" id="action-boat">Подводная лодка</button>
+          <button type="button" id="paint-open">Нарисовать рыбку</button>
+          <button type="button" id="capture-open">Фото бумажной рыбки</button>
+          <button type="button" id="fish-place" hidden>Выбрать место рыбки</button>
+          <button type="button" id="publish-edit" hidden>Вернуться к рисунку</button>
+          <button type="button" id="publish-retry" hidden>Повторить сохранение</button>
           <button type="button" id="action-cancel">Отмена</button>
         </div>
+        <p id="publish-status" role="status" aria-live="polite"></p>
+        <section id="editor-shell" class="live-editor" hidden>
+          <iframe id="editor-frame" title="Редактор рыбки" referrerpolicy="no-referrer"></iframe>
+          <button type="button" id="editor-pick">Оживить: выбрать место в мире</button>
+          <button type="button" id="editor-close">Закрыть редактор</button>
+        </section>
         <p id="interaction-status" role="status" aria-live="polite"></p>
         <div id="world-stage" class="live-stage">
           <canvas id="world-canvas" aria-label="Подводный мир; выбор точки действия"></canvas>

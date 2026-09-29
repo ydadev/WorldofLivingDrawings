@@ -1,7 +1,7 @@
 use std::{
     net::SocketAddr,
     sync::{Arc, LazyLock},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -445,6 +445,7 @@ struct SceneResponse {
     world_version: i32,
     scene_epoch: i64,
     revision: i64,
+    server_time_ms: u64,
 }
 
 async fn scene(
@@ -473,6 +474,10 @@ async fn scene(
         world_version: summary.world_version,
         scene_epoch: summary.scene_epoch,
         revision: summary.revision,
+        server_time_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
     }))
 }
 

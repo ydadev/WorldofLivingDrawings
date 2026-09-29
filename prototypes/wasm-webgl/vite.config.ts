@@ -7,9 +7,10 @@ const csp = [
   "img-src 'self' data: blob:",
   "connect-src 'self'",
   "worker-src 'self'",
+  "frame-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
-  "frame-ancestors 'none'",
+  "frame-ancestors 'self'",
 ].join('; ');
 
 export default defineConfig({

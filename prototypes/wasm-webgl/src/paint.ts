@@ -43,7 +43,13 @@ scene.clearColor = new Color4(0.04, 0.2, 0.28, 1);
 const camera = new ArcRotateCamera('paint-preview', Math.PI / 2, Math.PI / 2, 6.3, Vector3.Zero(), scene);
 scene.activeCamera = camera;
 new HemisphericLight('paint-light', new Vector3(0, 1, 0), scene).intensity = 1.7;
-engine.runRenderLoop(() => scene.render());
+let previewActive = true;
+engine.runRenderLoop(() => { if (previewActive) scene.render(); });
+window.addEventListener('message', event => {
+  if (event.origin === location.origin && event.source === window.parent &&
+      event.data?.type === 'ldw-preview' && typeof event.data.active === 'boolean')
+    previewActive = event.data.active;
+});
 window.addEventListener('resize', () => engine.resize());
 
 let documentState: PaintDocument | undefined;

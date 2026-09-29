@@ -52,7 +52,9 @@ scene.clearColor = new Color4(0.04, .2, .28, 1);
 const camera = new ArcRotateCamera('capture-preview', Math.PI / 2, Math.PI / 2, 6.3, Vector3.Zero(), scene);
 scene.activeCamera = camera;
 new HemisphericLight('capture-light', new Vector3(0, 1, 0), scene).intensity = 1.7;
+let previewActive = true;
 engine.runRenderLoop(() => {
+  if (!previewActive) return;
   scene.render();
   if (window.captureProbe?.status === 'PASS') {
     window.captureProbe.frames = (window.captureProbe.frames ?? 0) + 1;
@@ -64,6 +66,11 @@ engine.runRenderLoop(() => {
       window.captureProbe.modelPixel = Array.from(pixel);
     }
   }
+});
+window.addEventListener('message', event => {
+  if (event.origin === location.origin && event.source === window.parent &&
+      event.data?.type === 'ldw-preview' && typeof event.data.active === 'boolean')
+    previewActive = event.data.active;
 });
 window.addEventListener('resize', () => engine.resize());
 let roots: Awaited<ReturnType<typeof ImportMeshAsync>>['meshes'] = [];

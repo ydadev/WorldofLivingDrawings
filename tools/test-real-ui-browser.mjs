@@ -36,7 +36,8 @@ const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascr
   '.glb': 'model/gltf-binary', '.png': 'image/png' };
 const csp = ["default-src 'none'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self'",
   "img-src 'self' data: blob:", "connect-src 'self' wss://127.0.0.1:9443",
-  "worker-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"].join('; ');
+  "worker-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-src 'self'",
+  "frame-ancestors 'self'"].join('; ');
 
 const proxy = createServer({ key: readFileSync(keyPath), cert: readFileSync(certPath) },
   async (request, response) => {
@@ -155,6 +156,29 @@ try {
     null, { timeout: 20000 });
   const sessionId = (await owner.locator('#session-id').textContent()).trim();
   assert(/^[0-9a-f-]{36}$/.test(sessionId), 'Real backend did not create a session');
+  await owner.locator('#paint-open').click();
+  const editor = owner.frameLocator('#editor-frame');
+  await editor.locator('#paint-sheet').waitFor({ state: 'visible', timeout: 20000 });
+  await owner.waitForFunction(() => document.querySelector('#editor-frame')?.contentWindow?.paintProbe?.status === 'PASS',
+    null, { timeout: 20000 });
+  await editor.locator('#paint-tool').selectOption('fill');
+  await editor.locator('#paint-sheet').click({ position: { x: 240, y: 240 } });
+  await owner.locator('#editor-pick').click();
+  await owner.locator('#fish-place').waitFor({ state: 'visible', timeout: 20000 });
+  await owner.waitForFunction(() => !document.querySelector('#fish-place').disabled,
+    null, { timeout: 20000 });
+  await owner.locator('#fish-place').click();
+  await point(owner, .5, .5);
+  await owner.waitForFunction(() => /Рыбка сохранена/.test(document.querySelector('#publish-status')?.textContent ?? ''),
+    null, { timeout: 20000 });
+  const published = await waitFrame(ownerFrames, frame => frame.type === 'delta' &&
+    frame.event?.type === 'entity_published', 20000);
+  assert(published.event.entity.definitionId === 'coral-fish', 'Wrong fish definition published');
+  assert(Math.abs(published.event.entity.position.x) < .05 &&
+    Math.abs(published.event.entity.position.y) < .05, 'Wrong fish position published');
+  const paintResponse = await ownerContext.request.get(`${origin}/api/sessions/${sessionId}/paint/${published.event.entity.paintBlobId}`);
+  assert(paintResponse.status() === 200 && paintResponse.headers()['content-type'] === 'image/png',
+    'Owner could not fetch published private PNG');
   await owner.locator('#invite').click();
   await owner.waitForFunction(() => /Код подключения: \d{6}/.test(document.querySelector('#invitation')?.textContent ?? ''));
   const invitation = await owner.locator('#invitation').textContent();
@@ -208,7 +232,7 @@ try {
     frame.actionPositions?.some(action => action.id.startsWith('boat-')));
 
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
-  console.log('CORE-04 real backend UI: HTTPS cookies, PostgreSQL, Owner, Viewer, Controller, feed and boat: PASS');
+  console.log('CORE-04 real backend UI: HTTPS cookies, PostgreSQL, drawn fish publication, Owner, Viewer, Controller, feed and boat: PASS');
 } finally {
   await browser?.close();
   if (proxy.listening) {
