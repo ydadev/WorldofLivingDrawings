@@ -4,7 +4,13 @@
 use ldw_sim::{Bounds, World, WorldCheckpoint};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::{collections::HashSet, time::Duration};
 use thiserror::Error;
+use tokio::{
+    sync::watch,
+    task::JoinSet,
+    time::{MissedTickBehavior, interval},
+};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -110,10 +116,109 @@ pub async fn save_checkpoint(
     }
 }
 
+/// Run active scenes with a checkpoint. A newly created empty scene has no work
+/// until a fish is published with its first checkpoint by the creation flow.
+pub async fn run(pool: PgPool, mut shutdown: watch::Receiver<bool>) -> Result<(), SimulationError> {
+    let mut scan = interval(Duration::from_secs(1));
+    scan.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut workers = JoinSet::new();
+    let mut active = HashSet::new();
+    loop {
+        tokio::select! {
+            _ = scan.tick() => {
+                while let Some(result) = workers.try_join_next() {
+                    if let Ok((scene_id, outcome)) = result {
+                        active.remove(&scene_id);
+                        if let Err(error) = outcome {
+                            eprintln!("simulation scene {scene_id}: {error}");
+                        }
+                    }
+                }
+                let scenes: Vec<Uuid> = match sqlx::query_scalar(
+                    "SELECT c.id FROM scenes c JOIN sessions s ON s.active_scene_id = c.id \
+                     WHERE s.status = 'running' AND c.state ? 'simulation' \
+                     ORDER BY c.id LIMIT 3",
+                )
+                .fetch_all(&pool)
+                .await {
+                    Ok(scenes) => scenes,
+                    Err(error) => {
+                        eprintln!("simulation scan: {error}");
+                        continue;
+                    }
+                };
+                for scene_id in scenes {
+                    if active.insert(scene_id) {
+                        let pool = pool.clone();
+                        let shutdown = shutdown.clone();
+                        workers.spawn(async move {
+                            (scene_id, run_scene(pool, scene_id, shutdown, Duration::from_millis(50)).await)
+                        });
+                    }
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
+            }
+        }
+    }
+    while let Some(result) = workers.join_next().await {
+        if let Ok((scene_id, outcome)) = result {
+            if let Err(error) = outcome {
+                eprintln!("simulation scene {scene_id}: {error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_scene(
+    pool: PgPool,
+    scene_id: Uuid,
+    mut shutdown: watch::Receiver<bool>,
+    period: Duration,
+) -> Result<(), SimulationError> {
+    let mut scene = load_scene(&pool, scene_id).await?;
+    let mut timer = interval(period);
+    timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = timer.tick() => {
+                if scene.world.tick_number() % 20 == 0 {
+                    let running: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM scenes c JOIN sessions s \
+                         ON s.active_scene_id = c.id WHERE c.id = $1 \
+                         AND c.scene_epoch = $2 AND s.status = 'running')",
+                    )
+                    .bind(scene_id)
+                    .bind(scene.epoch)
+                    .fetch_one(&pool)
+                    .await?;
+                    if !running { break; }
+                }
+                scene.world.step();
+                if scene.world.tick_number() % 100 == 0
+                    && !save_checkpoint(&pool, scene_id, &mut scene).await?
+                {
+                    return Ok(());
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
+            }
+        }
+    }
+    if scene.world.tick_number() > scene.persisted_tick as u64 {
+        let _ = save_checkpoint(&pool, scene_id, &mut scene).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ldw_sim::Point;
+    use tokio::time::{sleep, timeout};
 
     #[tokio::test]
     async fn checkpoint_survives_database_roundtrip_and_rejects_stale_worker() {
@@ -182,5 +287,59 @@ mod tests {
             load_scene(&pool, incomplete).await,
             Err(SimulationError::InvalidScene)
         ));
+
+        let ticking = Uuid::new_v4();
+        let mut initial = World::new(underwater_bounds().unwrap(), 42).unwrap();
+        initial
+            .spawn_fish(ticking.as_u128(), Point { x: -3.0, y: 0.0 }, 1.2)
+            .unwrap();
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version, state) VALUES ($1, $2, 'underwater', 1, $3)")
+            .bind(ticking)
+            .bind(session)
+            .bind(serde_json::json!({"simulation": initial.checkpoint()}))
+            .execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(ticking)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (stop, receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_scene(
+            pool.clone(),
+            ticking,
+            receiver,
+            Duration::from_millis(1),
+        ));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let tick: i64 =
+                    sqlx::query_scalar("SELECT simulation_tick FROM scenes WHERE id = $1")
+                        .bind(ticking)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if tick >= 100 {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("100 logical ticks should save one checkpoint");
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        let restored = load_scene(&pool, ticking).await.unwrap();
+        assert!(restored.persisted_tick >= 100);
+        assert_eq!(restored.world.tick_number(), restored.persisted_tick as u64);
+        let revision: i64 = sqlx::query_scalar("SELECT revision FROM scenes WHERE id = $1")
+            .bind(ticking)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            revision, 0,
+            "position checkpoints must not create durable revisions"
+        );
     }
 }

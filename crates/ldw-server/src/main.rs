@@ -3,9 +3,10 @@ use std::{env, error::Error, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 use ldw_server::{
     access::AccessStore,
     http::{AppState, router},
-    migrate,
+    migrate, simulation,
 };
 use sqlx::PgPool;
+use tokio::sync::watch;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -56,6 +57,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let address: SocketAddr = env::var("LDW_BIND_ADDR")?.parse()?;
             let listener = tokio::net::TcpListener::bind(address).await?;
             access.bump_active_epochs().await?;
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let simulation_task = tokio::spawn(simulation::run(access.pool().clone(), shutdown_rx));
             let app = router(AppState {
                 access,
                 public_origin: Arc::from(origin),
@@ -64,7 +67,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
             )
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
             .await?;
+            let _ = shutdown_tx.send(true);
+            simulation_task.await??;
         }
         _ => return Err("expected serve or bootstrap-admin".into()),
     }
