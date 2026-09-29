@@ -10,6 +10,23 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
 }
 
 #[cfg(test)]
+pub(crate) async fn test_pool() -> PgPool {
+    static POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+    POOL.get_or_init(|| async {
+        let database_url = std::env::var("DATABASE_URL").expect("isolated test database");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect test PostgreSQL");
+        migrate(&pool)
+            .await
+            .expect("apply migrations once before parallel tests");
+        pool
+    })
+    .await
+    .clone()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{
@@ -23,12 +40,7 @@ mod tests {
 
     #[tokio::test]
     async fn migration_keeps_active_scene_inside_its_session() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL for isolated test database");
-        let pool = PgPool::connect(&database_url)
-            .await
-            .expect("connect test PostgreSQL");
-        migrate(&pool).await.expect("apply migrations");
+        let pool = test_pool().await;
         migrate(&pool).await.expect("migrations are repeatable");
 
         let owner = Uuid::new_v4();

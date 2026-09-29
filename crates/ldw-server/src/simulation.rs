@@ -592,10 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_fish_join_running_world_and_survive_restart() {
-        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("isolated test database"))
-            .await
-            .unwrap();
-        crate::migrate(&pool).await.unwrap();
+        let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
         let session = Uuid::new_v4();
         let scene_id = Uuid::new_v4();
@@ -792,10 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_survives_database_roundtrip_and_rejects_stale_worker() {
-        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("isolated test database"))
-            .await
-            .unwrap();
-        crate::migrate(&pool).await.unwrap();
+        let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
         let session = Uuid::new_v4();
         let scene_id = Uuid::new_v4();
