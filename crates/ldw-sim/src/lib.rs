@@ -7,6 +7,10 @@ pub const MAX_FISH: usize = 100;
 pub const MAX_OBSTACLES: usize = 16;
 pub const TICKS_PER_SECOND: u64 = 20;
 const FISH_RADIUS: f32 = 0.18;
+const FEED_DETECTION_RADIUS: f32 = 3.75;
+const FEED_EATING_RADIUS: f32 = 0.3;
+const FEED_DURATION_TICKS: u64 = 300;
+const MAX_FEED_SOURCES: usize = 3;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
@@ -50,7 +54,7 @@ pub struct Circle {
     pub radius: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fish {
     #[serde(with = "hex_u128")]
     pub id: u128,
@@ -62,6 +66,18 @@ pub struct Fish {
     waypoint: Option<Point>,
     target_generation: u32,
     stuck_ticks: u16,
+    #[serde(default)]
+    pub feeding: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeedSource {
+    pub id: String,
+    pub position: Point,
+    pub remaining: u8,
+    pub expires_at_tick: u64,
+    /// Each fish can consume at most one portion from this source.
+    pub fed_fish: Vec<String>,
 }
 
 mod hex_u128 {
@@ -91,6 +107,9 @@ pub enum SimError {
     InvalidObstacle,
     UnknownFish,
     InvalidCheckpoint,
+    InvalidFeedId,
+    FeedLimit,
+    DuplicateFeed,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,6 +120,8 @@ pub struct WorldCheckpoint {
     pub obstacles: Vec<Circle>,
     pub tick: u64,
     pub seed: u64,
+    #[serde(default)]
+    pub feed_sources: Vec<FeedSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +131,7 @@ pub struct World {
     obstacles: Vec<Circle>,
     tick: u64,
     seed: u64,
+    feed_sources: Vec<FeedSource>,
 }
 
 impl World {
@@ -123,6 +145,7 @@ impl World {
             obstacles: Vec::new(),
             tick: 0,
             seed,
+            feed_sources: Vec::new(),
         })
     }
 
@@ -138,6 +161,7 @@ impl World {
             obstacles: self.obstacles.clone(),
             tick: self.tick,
             seed: self.seed,
+            feed_sources: self.feed_sources.clone(),
         }
     }
 
@@ -146,6 +170,7 @@ impl World {
             || !checkpoint.bounds.valid()
             || checkpoint.fish.len() > MAX_FISH
             || checkpoint.obstacles.len() > MAX_OBSTACLES
+            || checkpoint.feed_sources.len() > MAX_FEED_SOURCES
         {
             return Err(SimError::InvalidCheckpoint);
         }
@@ -158,6 +183,24 @@ impl World {
             }
         }
         let mut seen = std::collections::HashSet::with_capacity(checkpoint.fish.len());
+        let mut feed_ids = std::collections::HashSet::new();
+        for source in &checkpoint.feed_sources {
+            let mut fed = std::collections::HashSet::new();
+            if !valid_feed_id(&source.id)
+                || !feed_ids.insert(source.id.as_str())
+                || !valid_point(source.position, checkpoint.bounds, &checkpoint.obstacles)
+                || source.remaining == 0
+                || source.remaining > 10
+                || source.expires_at_tick <= checkpoint.tick
+                || source.fed_fish.len() + source.remaining as usize != 10
+                || source
+                    .fed_fish
+                    .iter()
+                    .any(|id| !valid_feed_id(id) || !fed.insert(id))
+            {
+                return Err(SimError::InvalidCheckpoint);
+            }
+        }
         for fish in &checkpoint.fish {
             if !seen.insert(fish.id)
                 || !fish.speed.is_finite()
@@ -169,6 +212,10 @@ impl World {
                 })
                 || !fish.heading.x.is_finite()
                 || !fish.heading.y.is_finite()
+                || fish
+                    .feeding
+                    .as_ref()
+                    .is_some_and(|id| !feed_ids.contains(id.as_str()))
             {
                 return Err(SimError::InvalidCheckpoint);
             }
@@ -179,6 +226,7 @@ impl World {
             obstacles: checkpoint.obstacles,
             tick: checkpoint.tick,
             seed: checkpoint.seed,
+            feed_sources: checkpoint.feed_sources,
         })
     }
     pub fn fish(&self) -> &[Fish] {
@@ -186,6 +234,32 @@ impl World {
     }
     pub fn obstacles(&self) -> &[Circle] {
         &self.obstacles
+    }
+    pub fn feed_sources(&self) -> &[FeedSource] {
+        &self.feed_sources
+    }
+
+    pub fn start_feed(&mut self, id: &str, position: Point) -> Result<(), SimError> {
+        if !valid_feed_id(id) {
+            return Err(SimError::InvalidFeedId);
+        }
+        if !valid_point(position, self.bounds, &self.obstacles) {
+            return Err(SimError::InvalidPosition);
+        }
+        if self.feed_sources.iter().any(|source| source.id == id) {
+            return Err(SimError::DuplicateFeed);
+        }
+        if self.feed_sources.len() >= MAX_FEED_SOURCES {
+            return Err(SimError::FeedLimit);
+        }
+        self.feed_sources.push(FeedSource {
+            id: id.to_owned(),
+            position,
+            remaining: 10,
+            expires_at_tick: self.tick.saturating_add(FEED_DURATION_TICKS),
+            fed_fish: Vec::new(),
+        });
+        Ok(())
     }
 
     pub fn add_obstacle(&mut self, obstacle: Circle) -> Result<(), SimError> {
@@ -237,6 +311,7 @@ impl World {
             waypoint: None,
             target_generation: 0,
             stuck_ticks: 0,
+            feeding: None,
         });
         Ok(())
     }
@@ -262,8 +337,62 @@ impl World {
 
     pub fn step(&mut self) {
         self.tick = self.tick.saturating_add(1);
+        self.feed_sources
+            .retain(|source| source.remaining > 0 && source.expires_at_tick > self.tick);
+        let mut assignments = vec![None; self.fish.len()];
+        for (source_index, source) in self.feed_sources.iter().enumerate() {
+            let mut candidates: Vec<_> = self
+                .fish
+                .iter()
+                .enumerate()
+                .filter(|(index, fish)| {
+                    assignments[*index].is_none()
+                        && !source.fed_fish.contains(&fish_id(fish.id))
+                        && fish.position.distance_squared(source.position)
+                            <= FEED_DETECTION_RADIUS.powi(2)
+                        && (segment_clear(fish.position, source.position, &self.obstacles)
+                            || plan_waypoint(
+                                fish.position,
+                                source.position,
+                                fish.id,
+                                self.bounds,
+                                &self.obstacles,
+                            )
+                            .is_some())
+                })
+                .map(|(index, fish)| {
+                    (
+                        index,
+                        fish.position.distance_squared(source.position),
+                        fish.id,
+                    )
+                })
+                .collect();
+            candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
+            for (index, _, _) in candidates.into_iter().take(source.remaining as usize) {
+                assignments[index] = Some(source_index);
+            }
+        }
+        for (index, assigned) in assignments.iter().enumerate() {
+            let fish = &mut self.fish[index];
+            fish.feeding = assigned.map(|source_index| self.feed_sources[source_index].id.clone());
+            if let Some(source_index) = assigned {
+                let source = &self.feed_sources[*source_index];
+                fish.target = feeding_target(
+                    fish.position,
+                    source.position,
+                    fish.id,
+                    self.bounds,
+                    &self.obstacles,
+                )
+                .unwrap_or(source.position);
+                fish.waypoint = None;
+            }
+        }
         for fish in &mut self.fish {
-            if fish.position.distance_squared(fish.target) < 0.04 || fish.stuck_ticks > 80 {
+            if fish.feeding.is_none()
+                && (fish.position.distance_squared(fish.target) < 0.04 || fish.stuck_ticks > 80)
+            {
                 fish.target_generation = fish.target_generation.wrapping_add(1);
                 if let Some(target) = choose_target(
                     self.bounds,
@@ -354,7 +483,74 @@ impl World {
                 fish.stuck_ticks = fish.stuck_ticks.saturating_add(1);
             }
         }
+        for fish in &mut self.fish {
+            let Some(source) = self.feed_sources.iter_mut().find(|source| {
+                fish.feeding.as_deref() == Some(source.id.as_str())
+                    && fish.position.distance_squared(source.position) <= FEED_EATING_RADIUS.powi(2)
+            }) else {
+                continue;
+            };
+            if source.remaining > 0 && !source.fed_fish.contains(&fish_id(fish.id)) {
+                source.remaining -= 1;
+                source.fed_fish.push(fish_id(fish.id));
+                fish.feeding = None;
+            }
+        }
+        self.feed_sources.retain(|source| source.remaining > 0);
+        for fish in &mut self.fish {
+            if fish
+                .feeding
+                .as_ref()
+                .is_some_and(|id| !self.feed_sources.iter().any(|source| &source.id == id))
+            {
+                fish.feeding = None;
+            }
+        }
     }
+}
+
+fn fish_id(id: u128) -> String {
+    format!("{id:032x}")
+}
+
+fn valid_feed_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn feeding_target(
+    from: Point,
+    position: Point,
+    id: u128,
+    bounds: Bounds,
+    obstacles: &[Circle],
+) -> Option<Point> {
+    let directions = [
+        (1.0, 0.0),
+        (0.70710677, 0.70710677),
+        (0.0, 1.0),
+        (-0.70710677, 0.70710677),
+        (-1.0, 0.0),
+        (-0.70710677, -0.70710677),
+        (0.0, -1.0),
+        (0.70710677, -0.70710677),
+    ];
+    for offset in 0..directions.len() {
+        let (dx, dy) = directions[(id as usize + offset) % directions.len()];
+        let target = Point {
+            x: position.x + dx * 0.24,
+            y: position.y + dy * 0.24,
+        };
+        if valid_point(target, bounds, obstacles)
+            && (segment_clear(from, target, obstacles)
+                || plan_waypoint(from, target, id, bounds, obstacles).is_some())
+        {
+            return Some(target);
+        }
+    }
+    None
 }
 
 fn point_blocked(point: Point, obstacles: &[Circle]) -> bool {
@@ -602,6 +798,17 @@ mod tests {
         let through_json_value: WorldCheckpoint =
             serde_json::from_value(serde_json::to_value(original.checkpoint()).unwrap()).unwrap();
         assert_eq!(through_json_value.fish[0].id, fish_id);
+        let mut previous_format = serde_json::to_value(original.checkpoint()).unwrap();
+        previous_format
+            .as_object_mut()
+            .unwrap()
+            .remove("feed_sources");
+        previous_format["fish"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("feeding");
+        let old: WorldCheckpoint = serde_json::from_value(previous_format).unwrap();
+        assert!(World::restore(old).unwrap().feed_sources().is_empty());
         let mut restored = World::restore(decoded.clone()).unwrap();
         assert_eq!(restored.tick_number(), 30);
         for _ in 0..100 {
@@ -610,7 +817,7 @@ mod tests {
             assert_eq!(original.checkpoint(), restored.checkpoint());
         }
         let mut corrupted = decoded.clone();
-        corrupted.fish.push(decoded.fish[0]);
+        corrupted.fish.push(decoded.fish[0].clone());
         assert!(matches!(
             World::restore(corrupted),
             Err(SimError::InvalidCheckpoint)
@@ -621,5 +828,97 @@ mod tests {
             World::restore(corrupted),
             Err(SimError::InvalidCheckpoint)
         ));
+    }
+
+    #[test]
+    fn feed_assigns_nearby_fish_consumes_once_and_replays_after_checkpoint() {
+        let mut world = World::new(bounds(), 31).unwrap();
+        world.spawn_fish(1, Point { x: -2.0, y: 0.0 }, 1.2).unwrap();
+        world.spawn_fish(2, Point { x: 2.0, y: 0.0 }, 1.2).unwrap();
+        world.spawn_fish(3, Point { x: 6.0, y: 0.0 }, 1.2).unwrap();
+        let id = "000000000000000000000000000000ab";
+        world.start_feed(id, Point { x: 0.0, y: 0.0 }).unwrap();
+        assert_eq!(
+            world.start_feed(id, Point { x: 0.0, y: 0.0 }),
+            Err(SimError::DuplicateFeed)
+        );
+        for _ in 0..10 {
+            world.step();
+        }
+        assert!(world.fish()[0].feeding.is_some());
+        assert!(world.fish()[1].feeding.is_some());
+        assert_eq!(world.fish()[2].feeding, None);
+        let encoded = serde_json::to_vec(&world.checkpoint()).unwrap();
+        let mut recovered = World::restore(serde_json::from_slice(&encoded).unwrap()).unwrap();
+        for _ in 0..90 {
+            world.step();
+            recovered.step();
+            assert_eq!(world.checkpoint(), recovered.checkpoint());
+        }
+        assert_eq!(world.feed_sources()[0].remaining, 8);
+        assert_eq!(world.feed_sources()[0].fed_fish.len(), 2);
+        for _ in 0..200 {
+            world.step();
+        }
+        assert!(world.feed_sources().is_empty());
+        assert!(world.fish().iter().all(|fish| fish.feeding.is_none()));
+    }
+
+    #[test]
+    fn feed_rejects_invalid_points_enforces_three_sources_and_expires_without_fish() {
+        let mut world = World::new(bounds(), 2).unwrap();
+        for index in 0..3 {
+            world
+                .start_feed(
+                    &format!("{index:032x}"),
+                    Point {
+                        x: index as f32,
+                        y: 0.0,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            world.start_feed("00000000000000000000000000000004", Point { x: 3.0, y: 0.0 }),
+            Err(SimError::FeedLimit)
+        );
+        assert_eq!(
+            world.start_feed("invalid", Point { x: 0.0, y: 0.0 }),
+            Err(SimError::InvalidFeedId)
+        );
+        assert_eq!(
+            world.start_feed(
+                "00000000000000000000000000000005",
+                Point { x: 99.0, y: 0.0 }
+            ),
+            Err(SimError::InvalidPosition)
+        );
+        for _ in 0..FEED_DURATION_TICKS {
+            world.step();
+        }
+        assert!(world.feed_sources().is_empty());
+        world
+            .start_feed("00000000000000000000000000000004", Point { x: 0.0, y: 0.0 })
+            .unwrap();
+    }
+
+    #[test]
+    fn feeding_fish_routes_around_obstacle_without_crossing_it() {
+        let mut world = World::new(bounds(), 11).unwrap();
+        world
+            .add_obstacle(Circle {
+                center: Point { x: 0.0, y: 0.0 },
+                radius: 0.8,
+            })
+            .unwrap();
+        world.spawn_fish(7, Point { x: -1.5, y: 0.0 }, 1.5).unwrap();
+        world
+            .start_feed("00000000000000000000000000000001", Point { x: 1.5, y: 0.0 })
+            .unwrap();
+        for _ in 0..180 {
+            world.step();
+            assert!(!point_blocked(world.fish()[0].position, world.obstacles()));
+        }
+        assert_eq!(world.feed_sources()[0].remaining, 9);
     }
 }
