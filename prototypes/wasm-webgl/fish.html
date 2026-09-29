@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RISK-02: две рыбы и одна раскраска на обе стороны</title>
+  </head>
+  <body>
+    <main class="fish-main">
+      <h1>Проверка двух моделей и боковой раскраски</h1>
+      <p>Это технический просмотр шаблонов и объёмных моделей.</p>
+      <nav aria-label="Выбор тестового вида">
+        <button type="button" data-fish="coral">Круглая рыбка</button>
+        <button type="button" data-fish="stream">Быстрая рыбка</button>
+      </nav>
+      <nav aria-label="Проверка обеих сторон модели">
+        <button type="button" data-side="near">Первая сторона</button>
+        <button type="button" data-side="far">Обратная сторона</button>
+        <button type="button" data-side="edge">Проверка спины и торцов</button>
+      </nav>
+      <p id="fish-status" role="status">Загрузка модели…</p>
+      <div class="fish-grid">
+        <canvas id="fish-scene" aria-label="Тестовая объёмная рыба"></canvas>
+        <section>
+          <h2>Один боковой шаблон</h2>
+          <img id="fish-template" alt="Шаблон рыбы для печати и рисования">
+          <p><a id="print-template" download>Скачать шаблон SVG</a></p>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="/src/fish.ts"></script>
+  </body>
+</html>

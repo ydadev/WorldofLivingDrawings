@@ -1,4 +1,4 @@
-name: RISK-01 browser probe
+name: RISK-01 and RISK-02 browser probes
 on:
   push:
     paths:
@@ -8,6 +8,7 @@ on:
       - 'prototypes/**'
       - 'tools/build-wasm.mjs'
       - 'tools/test-risk-browser.mjs'
+      - 'tools/test-fish-browser.mjs'
   pull_request:
     paths:
       - '.github/workflows/risk-01.yml'
@@ -16,6 +17,7 @@ on:
       - 'prototypes/**'
       - 'tools/build-wasm.mjs'
       - 'tools/test-risk-browser.mjs'
+      - 'tools/test-fish-browser.mjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -40,6 +42,11 @@ jobs:
       - name: Build Rust and TypeScript
         working-directory: prototypes/wasm-webgl
         run: npm run build
+      - name: Check generated fish files are current
+        run: git diff --exit-code -- prototypes/fish-assets/generated
       - name: Run Chrome browser probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:browser
+      - name: Run Chrome fish UV and model probe
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:fish

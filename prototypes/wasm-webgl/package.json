@@ -3,17 +3,23 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": "24.18.0" },
+  "engines": {
+    "node": "24.18.0"
+  },
   "scripts": {
     "build:wasm": "node ../../tools/build-wasm.mjs",
-    "build": "npm run build:wasm && tsc --noEmit && vite build",
+    "build:fish": "node ../fish-assets/generate.mjs && node verify-fish.mjs",
+    "build": "npm run build:wasm && npm run build:fish && tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --strictPort",
-    "test:browser": "node ../../tools/test-risk-browser.mjs"
+    "test:browser": "node ../../tools/test-risk-browser.mjs",
+    "test:fish": "node ../../tools/test-fish-browser.mjs"
   },
   "dependencies": {
-    "@babylonjs/core": "9.28.0"
+    "@babylonjs/core": "9.28.0",
+    "@babylonjs/loaders": "9.28.0"
   },
   "devDependencies": {
+    "gltf-validator": "2.0.0-dev.3.10",
     "playwright-core": "1.63.0",
     "typescript": "6.0.3",
     "vite": "8.3.1"

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "projection": "orthographic-side",
+  "textureSize": [
+    512,
+    512
+  ],
+  "species": [
+    {
+      "id": "coral",
+      "templateVersion": 1,
+      "layoutHash": "65c5bc5ba7ed7eb5e92c68c1e8f4c97ae4cf8112c2a0a2532a8e0e7c22f4509b",
+      "modelSha256": "cc411e88ee77d3645eed34002fbbc26dfe809d84ed34e8922c2e38e3fe5728d9",
+      "templateSha256": "41fd6927b91276d4b744170ef2f1b98c9ea85591911a80ff577cdcb60494a5c1",
+      "paintVertexCount": 266
+    },
+    {
+      "id": "stream",
+      "templateVersion": 1,
+      "layoutHash": "d239842c3929987516f2c7b5a4f33e6fdc5aad29025c9156bfdf796f161d71a4",
+      "modelSha256": "6f1e10871e6baed33393d853962315235287f2c3082007db736c6ae7e9f8fdee",
+      "templateSha256": "8e9b9c49c9e7e32c91065158574535bb4370364cf93acb2ace0db962937bdc89",
+      "paintVertexCount": 266
+    }
+  ]
+}

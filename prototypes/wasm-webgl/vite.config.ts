@@ -4,7 +4,7 @@ const csp = [
   "default-src 'none'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self'",
-  "img-src 'self' data:",
+  "img-src 'self' data: blob:",
   "connect-src 'self'",
   "worker-src 'self'",
   "object-src 'none'",
@@ -14,7 +14,7 @@ const csp = [
 
 export default defineConfig({
   base: './',
-  build: { target: 'es2020' },
+  build: { target: 'es2020', rolldownOptions: { input: ['index.html', 'fish.html'] } },
   server: { headers: { 'Content-Security-Policy': csp } },
   preview: {
     port: 4173,
