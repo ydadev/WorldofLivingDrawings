@@ -14,6 +14,7 @@
 node_modules/
 target/
 dist/
+prototypes/wasm-webgl/public/sim.wasm
 coverage/
 .DS_Store
 Thumbs.db

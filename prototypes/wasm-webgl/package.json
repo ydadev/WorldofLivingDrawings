@@ -1,0 +1,21 @@
+{
+  "name": "ldw-risk-01-wasm-webgl",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": "24.18.0" },
+  "scripts": {
+    "build:wasm": "node ../../tools/build-wasm.mjs",
+    "build": "npm run build:wasm && tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --strictPort",
+    "test:browser": "node ../../tools/test-risk-browser.mjs"
+  },
+  "dependencies": {
+    "@babylonjs/core": "9.28.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.1"
+  }
+}

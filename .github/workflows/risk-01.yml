@@ -1,0 +1,45 @@
+name: RISK-01 browser probe
+on:
+  push:
+    paths:
+      - '.github/workflows/risk-01.yml'
+      - 'rust-toolchain.toml'
+      - '.node-version'
+      - 'prototypes/**'
+      - 'tools/build-wasm.mjs'
+      - 'tools/test-risk-browser.mjs'
+  pull_request:
+    paths:
+      - '.github/workflows/risk-01.yml'
+      - 'rust-toolchain.toml'
+      - '.node-version'
+      - 'prototypes/**'
+      - 'tools/build-wasm.mjs'
+      - 'tools/test-risk-browser.mjs'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wasm-webgl-csp:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install minimal WebAssembly target
+        run: rustup target add wasm32v1-none --toolchain 1.98.1
+      - name: Install locked dependencies
+        working-directory: prototypes/wasm-webgl
+        run: npm ci --no-audit --no-fund
+      - name: Build Rust and TypeScript
+        working-directory: prototypes/wasm-webgl
+        run: npm run build
+      - name: Run Chrome browser probe
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:browser

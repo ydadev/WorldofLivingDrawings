@@ -35,3 +35,11 @@ MemTotal после reboot 5173120 kB ≈ 4,9 GiB. В boot log ядро изна
 Первый коммит `1ec6fc0e002b2c49a4a45a11a261e75e5755a1ba` опубликован в main. Author/committer — ydadev и служебный noreply; всё сообщение — `2026-09-28`. Проверка всей истории — PASS. [GitHub CI первого коммита](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36438957809) завершился success: policy/metadata и shell syntax — PASS. Ключи, инвентарь и backup не входят в tracked files.
 
 Подготовлены AGENTS, DEVELOPMENT, STATUS, TASKS, WORKLOG, DECISIONS, INFRASTRUCTURE, RUNBOOK и CONTINUE. Последний запрос о папке backup отражён в operating-rules и ADR-013. Добавлен безопасный образец runtime.env. PREP-01/02 и INFRA-01…04 завершены; следующий разрешённый шаг разработки — RISK-01. Открыты INFRA-05 (внешнее хранение позже), INFRA-06 (выделенная RAM), RISK-TV (реальное устройство). Продуктовая разработка в эту подготовительную поставку не включена.
+
+## 2026-09-29 — технический стенд RISK-01
+
+Зафиксированы Rust 1.98.1, цель `wasm32v1-none`, Node 24.18.0, TypeScript 6.0.3, Babylon.js 9.28.0, Vite 8.3.1 и Playwright Core 1.63.0. Созданы Cargo/npm lockfiles и небольшая Rust-функция с экспортом в WebAssembly. Стенд загружает этот модуль в браузере, получает `0.25` из контрольного вызова, запускает Worker и рисует сферу через Babylon.js с WebGL 2 под CSP `script-src 'self' 'wasm-unsafe-eval'`. Проверка ограничения JS-кода выполняется внутри страницы.
+
+Локальные результаты на Windows/Chrome 153.0.8010.55 с программным GPU: `npm ci` — PASS; Rust release build с `--locked` — PASS; TypeScript/Vite production build — PASS; Node instantiate WASM — PASS; Chrome production preview — PASS. Зафиксированы WebGL version 2, 54 кадра, цвет центрального пикселя сферы `[255,255,180,255]`, ответ Worker `ready`, блокировка `Function(...)` CSP и итог функции WASM `0.25`. Скриншот осмотрен; он хранится только в `.local/`.
+
+Первые прогоны выявили несовместимый с `no_std` метод числа, две ошибки строгой типизации TypeScript и тест CSP через DevTools, обходивший ограничения страницы. После исправления проверки повторены успешно. GitHub CI для воспроизводимой сборки и теста Chrome добавлен, итог удалённого запуска ожидается. Реальный телевизор и измерение FPS — NOT_RUN.
