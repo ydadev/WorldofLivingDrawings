@@ -1,6 +1,7 @@
 use sqlx::{PgPool, migrate::MigrateError};
 pub mod access;
 pub mod http;
+pub mod paint_image;
 pub mod realtime;
 pub mod simulation;
 
