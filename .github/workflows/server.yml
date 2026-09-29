@@ -66,7 +66,9 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check server crate and migration constraints
-        run: cargo test -p ldw-server --locked
+        # These integration tests share one PostgreSQL database; one test
+        # deliberately bumps every active scene epoch to emulate restart.
+        run: cargo test -p ldw-server --locked -- --test-threads=1
       - name: Check concurrent simulation admission in a fresh database
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ldw_capacity'
