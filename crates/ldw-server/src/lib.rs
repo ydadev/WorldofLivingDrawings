@@ -989,6 +989,8 @@ mod tests {
                 id: format!("fish-{:032x}", Uuid::new_v4().as_u128()),
                 position: ldw_sim::Point { x: 1.0, y: -1.0 },
                 heading: ldw_sim::Point { x: 1.0, y: 0.0 },
+                depth: -0.5,
+                heading_depth: -0.25,
             }],
             action_positions: vec![],
         });

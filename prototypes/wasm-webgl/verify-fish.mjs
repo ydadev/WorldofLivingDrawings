@@ -28,6 +28,11 @@ for (const fish of species) {
     `${fish.id}: paint binding is missing`);
   check(gltf.meshes[0].primitives.slice(1).every(p => !p.attributes.TEXCOORD_0 && gltf.materials[p.material].name.startsWith('eye-')),
     `${fish.id}: eyes must use protected, unpainted materials`);
+  const tailNode = gltf.nodes.find(node => node.name === 'tail-pivot');
+  check(tailNode && tailNode.mesh === 1 && tailNode.translation?.length === 3 &&
+    gltf.nodes[0].children.includes(gltf.nodes.indexOf(tailNode)) &&
+    gltf.meshes[1]?.primitives.length === 1 && gltf.meshes[1].primitives[0].material === paint.material,
+    `${fish.id}: animated painted tail is missing`);
   const layout = JSON.parse(readFileSync(path.join(assets, `${fish.id}.layout.json`)));
   const { contentHash, ...source } = layout;
   check(contentHash === digest(JSON.stringify(source)) && contentHash === gltf.extras.layoutHash,
@@ -79,6 +84,17 @@ for (const fish of species) {
   const matched = [...sidePairs.values()].filter(pair => pair.front && pair.back).length;
   check(front > 80 && back > 80 && matched > 80 && edges >= 24,
     `${fish.id}: matching painted sides or colored edges are incomplete`);
+  const tail = gltf.meshes[1].primitives[0];
+  const tailPositions = floats(tail.attributes.POSITION, 3);
+  const tailUVs = floats(tail.attributes.TEXCOORD_0, 2);
+  check(tailPositions.length === tailUVs.length && tailPositions.length >= 24,
+    `${fish.id}: tail paint geometry is incomplete`);
+  for (let i = 0; i < tailPositions.length; i++) {
+    const [x, y] = tailPositions[i];
+    const expected = paintUV(fish, x + tailNode.translation[0], y);
+    check(tailUVs[i].every((value, axis) => Math.abs(value - expected[axis]) < .00001),
+      `${fish.id}: animated tail lost paint alignment at vertex ${i}`);
+  }
   console.log(`${fish.id}: glTF valid; ${positions.length} paint vertices; ${matched} mirrored UV pairs; ${edges} edge vertices; template ${contentHash.slice(0, 12)}`);
 }
 console.log('RISK-02 geometry and template validation: PASS');

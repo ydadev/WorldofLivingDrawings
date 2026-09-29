@@ -126,7 +126,9 @@
           "required": ["id", "position", "heading"],
           "properties": { "id": { "$ref": "#/$defs/id" },
             "position": { "$ref": "#/$defs/point" },
-            "heading": { "$ref": "#/$defs/point" } }
+            "heading": { "$ref": "#/$defs/point" },
+            "depth": { "type": "number", "minimum": -1.5, "maximum": 1.5 },
+            "headingDepth": { "type": "number", "minimum": -1, "maximum": 1 } }
         } },
         "actionPositions": { "type": "array", "maxItems": 1, "items": {
           "type": "object", "additionalProperties": false,

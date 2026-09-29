@@ -112,10 +112,27 @@ try {
   await desktop.evaluate(() => window.coreAdapter.applyPositions({
     type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
     revision: 1, simulationTick: 10,
-    positions: [{ id: 'fish-1', position: { x: 3, y: -1 }, heading: { x: 1, y: 0 } }],
+    positions: [{ id: 'fish-1', position: { x: 3, y: -1 }, depth: 1.2,
+      heading: { x: .92, y: 0 }, headingDepth: .38 }],
   }));
-  await desktop.waitForFunction(() => Math.abs(window.coreAdapter.scene.getTransformNodeByName('fish-1')?.position.x - 3) < .01,
+  await desktop.waitForFunction(() => {
+    const marker = window.coreAdapter.scene.getTransformNodeByName('fish-1');
+    return Math.abs(marker?.position.x - 3) < .01 && Math.abs(marker?.position.z - 1.2) < .01;
+  },
     null, { timeout: 3000 });
+  const depthVisual = await desktop.evaluate(async () => {
+    const scene = window.coreAdapter.scene;
+    const marker = scene.getTransformNodeByName('fish-1');
+    const tail = scene.getNodeByName('fish-1/tail-pivot');
+    const first = tail?.rotation.y;
+    await new Promise(resolve => setTimeout(resolve, 170));
+    return { depth: marker.position.z, scale: marker.scaling.x, yaw: marker.rotation.y,
+      tailPresent: !!tail, tailMoved: Math.abs(tail?.rotation.y - first) > .02,
+      tailNames: scene.meshes.concat(scene.transformNodes).filter(node => node.name.includes('tail')).map(node => node.name) };
+  });
+  assert(Math.abs(depthVisual.depth - 1.2) < .01 && depthVisual.scale < .9 &&
+    Math.abs(depthVisual.yaw) > .1 && depthVisual.tailPresent && depthVisual.tailMoved,
+    `Depth, turn and tail must animate: ${JSON.stringify(depthVisual)}`);
   const afterStale = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyPositions({ type: 'positions', schemaVersion: 1, sceneId: 'scene-1',
@@ -228,7 +245,7 @@ try {
   });
   await desktop.waitForFunction(() => window.coreAdapter.scene.meshes.filter(mesh =>
     mesh.name.startsWith('fish-load-') && mesh.material?.name.endsWith('/paint') &&
-    mesh.material.albedoTexture?.isReady()).length === 100,
+    mesh.material.albedoTexture?.isReady()).length === 200,
   null, { timeout: 30000 });
   const profile = await desktop.evaluate(async () => {
     const scene = window.coreAdapter.scene;
@@ -243,8 +260,8 @@ try {
     await new Promise(resolve => setTimeout(resolve, 5000));
     scene.onAfterRenderObservable.remove(observer);
     const sorted = samples.slice(5).sort((a, b) => a - b);
-    return { fish: scene.meshes.filter(mesh => mesh.name.startsWith('fish-load-') &&
-      mesh.material?.name.endsWith('/paint')).length,
+    return { fish: new Set(scene.meshes.filter(mesh => mesh.name.startsWith('fish-load-') &&
+      mesh.material?.name.endsWith('/paint')).map(mesh => mesh.name.split('/')[0])).size,
       meshes: scene.meshes.length, materials: scene.materials.length,
       frames: sorted.length, p95FrameMs: sorted[Math.floor(sorted.length * .95)] ?? null,
       width: window.coreAdapter.engine.getRenderWidth(),

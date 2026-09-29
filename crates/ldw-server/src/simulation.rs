@@ -107,6 +107,9 @@ pub struct EntityPosition {
     pub id: String,
     pub position: ldw_sim::Point,
     pub heading: ldw_sim::Point,
+    pub depth: f32,
+    #[serde(rename = "headingDepth")]
+    pub heading_depth: f32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -131,6 +134,8 @@ fn position_frame(scene_id: Uuid, scene: &LoadedScene) -> PositionFrame {
                 id: format!("fish-{:032x}", fish.id),
                 position: fish.position,
                 heading: fish.heading,
+                depth: fish.depth,
+                heading_depth: fish.heading_depth,
             })
             .collect(),
         action_positions: scene

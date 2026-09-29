@@ -7,6 +7,9 @@ pub const MAX_FISH: usize = 100;
 pub const MAX_OBSTACLES: usize = 16;
 pub const TICKS_PER_SECOND: u64 = 20;
 const FISH_RADIUS: f32 = 0.18;
+pub const MIN_DEPTH: f32 = -1.5;
+pub const MAX_DEPTH: f32 = 1.5;
+const DEPTH_SPEED: f32 = 0.55;
 const FEED_DETECTION_RADIUS: f32 = 3.75;
 const FEED_EATING_RADIUS: f32 = 0.3;
 const FEED_DURATION_TICKS: u64 = 300;
@@ -69,6 +72,13 @@ pub struct Fish {
     /// World units per second, before the fixed 20 Hz tick.
     pub speed: f32,
     pub heading: Point,
+    /// Signed distance from the center of the aquarium; negative is nearer the camera.
+    #[serde(default)]
+    pub depth: f32,
+    #[serde(default)]
+    pub depth_target: f32,
+    #[serde(default)]
+    pub heading_depth: f32,
     waypoint: Option<Point>,
     target_generation: u32,
     stuck_ticks: u16,
@@ -251,6 +261,12 @@ impl World {
                 })
                 || !fish.heading.x.is_finite()
                 || !fish.heading.y.is_finite()
+                || !fish.depth.is_finite()
+                || !(MIN_DEPTH..=MAX_DEPTH).contains(&fish.depth)
+                || !fish.depth_target.is_finite()
+                || !(MIN_DEPTH..=MAX_DEPTH).contains(&fish.depth_target)
+                || !fish.heading_depth.is_finite()
+                || !(-1.0..=1.0).contains(&fish.heading_depth)
                 || fish
                     .feeding
                     .as_ref()
@@ -403,6 +419,9 @@ impl World {
             target,
             speed,
             heading: Point { x: 1.0, y: 0.0 },
+            depth: 0.0,
+            depth_target: choose_depth(self.seed, id, 0),
+            heading_depth: 0.0,
             waypoint: None,
             target_generation: 0,
             stuck_ticks: 0,
@@ -493,6 +512,7 @@ impl World {
                 )
             {
                 fish.target = target;
+                fish.depth_target = MAX_DEPTH - 0.2;
                 fish.waypoint = None;
                 fish.stuck_ticks = 0;
             }
@@ -547,13 +567,16 @@ impl World {
                     &self.obstacles,
                 )
                 .unwrap_or(source.position);
+                fish.depth_target = 0.0;
                 fish.waypoint = None;
             }
         }
         for fish in &mut self.fish {
             if fish.feeding.is_none()
                 && !fish.fleeing
-                && (fish.position.distance_squared(fish.target) < 0.04 || fish.stuck_ticks > 80)
+                && ((fish.position.distance_squared(fish.target) < 0.04
+                    && (fish.depth - fish.depth_target).abs() < 0.12)
+                    || fish.stuck_ticks > 80)
             {
                 fish.target_generation = fish.target_generation.wrapping_add(1);
                 if let Some(target) = choose_target(
@@ -564,6 +587,7 @@ impl World {
                     fish.target_generation,
                 ) {
                     fish.target = target;
+                    fish.depth_target = choose_depth(self.seed, fish.id, fish.target_generation);
                 }
                 fish.waypoint = None;
                 fish.stuck_ticks = 0;
@@ -591,14 +615,21 @@ impl World {
                 y: destination.y - fish.position.y,
             };
             let distance = (delta.x * delta.x + delta.y * delta.y).sqrt();
+            let depth_heading = advance_depth(fish);
+            let step_budget = fish.speed / TICKS_PER_SECOND as f32;
+            fish.heading_depth = depth_heading;
             if distance <= f32::EPSILON {
+                if depth_heading != 0.0 {
+                    fish.heading = Point { x: 0.0, y: 0.0 };
+                }
                 continue;
             }
             let desired = Point {
                 x: delta.x / distance,
                 y: delta.y / distance,
             };
-            let step = (fish.speed / TICKS_PER_SECOND as f32).min(distance);
+            let step =
+                (step_budget * (1.0 - depth_heading * depth_heading).max(0.0).sqrt()).min(distance);
             let left_first = fish.id & 1 == 0;
             let directions = if left_first {
                 [
@@ -635,7 +666,10 @@ impl World {
                     && segment_clear(fish.position, next, &self.obstacles)
                 {
                     fish.position = next;
-                    fish.heading = direction;
+                    fish.heading = Point {
+                        x: direction.x * step / step_budget,
+                        y: direction.y * step / step_budget,
+                    };
                     fish.stuck_ticks = 0;
                     moved = true;
                     break;
@@ -649,6 +683,7 @@ impl World {
             let Some(source) = self.feed_sources.iter_mut().find(|source| {
                 fish.feeding.as_deref() == Some(source.id.as_str())
                     && fish.position.distance_squared(source.position) <= FEED_EATING_RADIUS.powi(2)
+                    && fish.depth.abs() <= 0.35
             }) else {
                 continue;
             };
@@ -908,6 +943,25 @@ fn choose_target(
     None
 }
 
+fn choose_depth(seed: u64, id: u128, generation: u32) -> f32 {
+    let folded_id = id as u64 ^ ((id >> 64) as u64).rotate_left(29);
+    let state = xorshift(seed ^ folded_id ^ (generation as u64).wrapping_mul(0x94d049bb133111eb));
+    let fraction = (state as u32) as f32 / u32::MAX as f32;
+    let sign = if (generation as u64 + (folded_id & 1)) & 1 == 0 {
+        1.0
+    } else {
+        -1.0
+    };
+    sign * (0.65 + fraction * 0.75)
+}
+
+fn advance_depth(fish: &mut Fish) -> f32 {
+    let step = DEPTH_SPEED.min(fish.speed * 0.6) / TICKS_PER_SECOND as f32;
+    let change = (fish.depth_target - fish.depth).clamp(-step, step);
+    fish.depth = (fish.depth + change).clamp(MIN_DEPTH, MAX_DEPTH);
+    change / (fish.speed / TICKS_PER_SECOND as f32)
+}
+
 fn xorshift(mut value: u64) -> u64 {
     if value == 0 {
         value = 0x6a09e667f3bcc909;
@@ -977,6 +1031,48 @@ mod tests {
             }
         }
         assert_eq!(world.tick_number(), 200);
+    }
+
+    #[test]
+    fn fish_swim_in_depth_with_a_bounded_three_dimensional_step() {
+        let mut world = World::new(bounds(), 42).unwrap();
+        world.spawn_fish(1, Point { x: 0.0, y: 0.0 }, 1.2).unwrap();
+        let mut seen_near = false;
+        let mut seen_far = false;
+        for _ in 0..1200 {
+            let before = world.fish()[0].clone();
+            world.step();
+            let after = &world.fish()[0];
+            let displacement = ((after.position.x - before.position.x).powi(2)
+                + (after.position.y - before.position.y).powi(2)
+                + (after.depth - before.depth).powi(2))
+            .sqrt();
+            assert!(displacement <= after.speed / TICKS_PER_SECOND as f32 + 0.00001);
+            assert!((MIN_DEPTH..=MAX_DEPTH).contains(&after.depth));
+            seen_near |= after.depth < -0.5;
+            seen_far |= after.depth > 0.5;
+        }
+        assert!(seen_near && seen_far, "fish should visit both depth layers");
+    }
+
+    #[test]
+    fn fish_must_reach_feed_depth_before_eating() {
+        let mut world = World::new(bounds(), 31).unwrap();
+        world.spawn_fish(1, Point { x: 0.0, y: 0.0 }, 1.2).unwrap();
+        let mut checkpoint = world.checkpoint();
+        checkpoint.fish[0].depth = 1.2;
+        checkpoint.fish[0].depth_target = 1.2;
+        world = World::restore(checkpoint).unwrap();
+        world
+            .start_feed("000000000000000000000000000000ab", Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        let portions = world.feed_sources()[0].remaining;
+        world.step();
+        assert_eq!(world.feed_sources()[0].remaining, portions);
+        for _ in 0..100 {
+            world.step();
+        }
+        assert_eq!(world.feed_sources()[0].remaining, portions - 1);
     }
 
     #[test]
@@ -1063,6 +1159,12 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("fleeing");
+        for field in ["depth", "depth_target", "heading_depth"] {
+            previous_format["fish"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
         let old: WorldCheckpoint = serde_json::from_value(previous_format).unwrap();
         assert!(World::restore(old).unwrap().feed_sources().is_empty());
         let mut restored = World::restore(decoded.clone()).unwrap();

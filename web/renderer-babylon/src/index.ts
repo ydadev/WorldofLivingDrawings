@@ -1,4 +1,6 @@
 import '@babylonjs/loaders/glTF';
+import '@babylonjs/core/Shaders/default.vertex';
+import '@babylonjs/core/Shaders/default.fragment';
 import type { AssetContainer, InstantiatedEntries } from '@babylonjs/core/assetContainer';
 import '@babylonjs/core/Culling/ray';
 import { Camera } from '@babylonjs/core/Cameras/camera';
@@ -18,6 +20,7 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { Scene } from '@babylonjs/core/scene';
 import type { ActiveAction, Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
+import { addAquarium } from './aquarium';
 
 const modelByDefinition: Record<string, string> = {
   'coral-fish': 'coral.glb',
@@ -41,16 +44,21 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly paintTextures = new Map<string, Texture>();
   private readonly paintMaterials = new Map<string, PBRMaterial[]>();
   private readonly entityVersions = new Map<string, string>();
-  private readonly movement = new Map<string, { from: Point2; to: Point2; started: number }>();
+  private readonly movement = new Map<string, { from: Point2 & { depth: number };
+    to: Point2 & { depth: number }; started: number }>();
+  private readonly fishMotion = new Map<string, { yaw: number; targetYaw: number;
+    pitch: number; targetPitch: number; phase: number; tail?: TransformNode }>();
   private readonly boatMovement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
   private world?: WorldDefinition;
+  private aquariumAdded = false;
   private sceneEpoch = 0;
   private revision = 0;
   private simulationTick = 0;
   private disposed = false;
   private renderScale = 1;
+  private lastAnimationTime = performance.now();
 
   constructor(private readonly canvas: HTMLCanvasElement,
     private readonly assetBaseUrl = '/content/underwater/assets/',
@@ -65,7 +73,9 @@ export class BabylonRendererAdapter implements RendererAdapter {
     new HemisphericLight('ambient', new Vector3(0, 1, -1), this.scene).intensity = 1.2;
     this.fallbackMaterial = new StandardMaterial('fish-loading', this.scene);
     this.fallbackMaterial.diffuseColor = new Color3(.9, .72, .28);
-    this.engine.runRenderLoop(() => { this.interpolate(); this.animateFeed(); this.scene.render(); });
+    this.engine.runRenderLoop(() => {
+      this.interpolate(); this.animateFish(); this.animateFeed(); this.scene.render();
+    });
     this.resizeObserver = new ResizeObserver(() => this.resizeToBudget());
     this.resizeObserver.observe(canvas);
     requestAnimationFrame(() => this.resizeToBudget());
@@ -88,6 +98,10 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.camera.orthoRight = width / 2;
     this.camera.orthoTop = height / 2;
     this.camera.orthoBottom = -height / 2;
+    if (!this.aquariumAdded) {
+      addAquarium(this.scene, width, height);
+      this.aquariumAdded = true;
+    }
   }
 
   applySnapshot(snapshot: SceneSnapshot): void {
@@ -120,11 +134,23 @@ export class BabylonRendererAdapter implements RendererAdapter {
     for (const item of frame.positions) {
       const marker = this.markers.get(item.id);
       if (!marker) continue;
+      if (!Number.isFinite(item.position.x) || !Number.isFinite(item.position.y) ||
+          (item.depth !== undefined && (!Number.isFinite(item.depth) || Math.abs(item.depth) > 1.5))) continue;
       this.movement.set(item.id, {
-        from: { x: marker.position.x, y: marker.position.y },
-        to: item.position,
+        from: { x: marker.position.x, y: marker.position.y, depth: marker.position.z },
+        to: { ...item.position, depth: item.depth ?? marker.position.z },
         started: now,
       });
+      const visual = this.fishMotion.get(item.id);
+      if (visual && Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y)) {
+        const headingDepth = item.headingDepth ?? 0;
+        if (Number.isFinite(headingDepth) && Math.abs(headingDepth) <= 1) {
+          if (Math.hypot(item.heading.x, headingDepth) > .01)
+            visual.targetYaw = Math.atan2(-headingDepth, item.heading.x);
+          visual.targetPitch = Math.max(-.32, Math.min(.32,
+            Math.atan2(item.heading.y, Math.max(.3, Math.abs(item.heading.x))) * .28));
+        }
+      }
     }
     for (const item of frame.actionPositions ?? []) {
       const marker = this.boatMarkers.get(item.id);
@@ -173,6 +199,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
       loading.material = this.fallbackMaterial;
       this.loadingMarkers.set(entity.id, loading);
       this.markers.set(entity.id, marker);
+      this.fishMotion.set(entity.id, { yaw: 0, targetYaw: 0, pitch: 0, targetPitch: 0,
+        phase: [...entity.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) * .31 });
       this.entityVersions.set(entity.id, version);
       if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])
         throw new Error('UNSUPPORTED_ENTITY_DEFINITION');
@@ -187,6 +215,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private removeMarker(id: string): void {
     this.movement.delete(id);
     this.entityVersions.delete(id);
+    this.fishMotion.delete(id);
     this.paintTextures.get(id)?.dispose();
     this.paintTextures.delete(id);
     this.loadingMarkers.get(id)?.dispose();
@@ -312,13 +341,19 @@ export class BabylonRendererAdapter implements RendererAdapter {
     const container = await pending;
     if (this.disposed || this.markers.get(entity.id) !== marker) return;
     for (const material of container.materials) {
-      if (material instanceof PBRMaterial) material.unlit = true;
+      if (material instanceof PBRMaterial) material.unlit = material.name !== 'paint';
     }
     const entries = container.instantiateModelsToScene(name => `${entity.id}/${name}`, false,
       { doNotInstantiate: true });
     if (this.disposed || this.markers.get(entity.id) !== marker) { entries.dispose(); return; }
     for (const root of entries.rootNodes) root.parent = marker;
     this.modelEntries.set(entity.id, entries);
+    const visual = this.fishMotion.get(entity.id);
+    if (visual) for (const root of entries.rootNodes) {
+      for (const node of root.getDescendants(false)) {
+        if (node instanceof TransformNode && node.name.endsWith('/tail-pivot')) visual.tail = node;
+      }
+    }
     if (entity.paintBlobId) {
       const texture = new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true);
       this.paintTextures.set(entity.id, texture);
@@ -330,7 +365,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
             let material = clonedMaterials.get(node.material);
             if (!material) {
               material = node.material.clone(`${entity.id}/paint`);
-              material.unlit = true;
+              material.unlit = false;
               material.albedoColor = Color3.White();
               material.albedoTexture = texture;
               clonedMaterials.set(node.material, material);
@@ -352,6 +387,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
       const progress = Math.min(1, (now - move.started) / 500);
       marker.position.x = move.from.x + (move.to.x - move.from.x) * progress;
       marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
+      marker.position.z = move.from.depth + (move.to.depth - move.from.depth) * progress;
+      marker.scaling.setAll(1 - marker.position.z * .16);
       if (progress === 1) this.movement.delete(id);
     }
     for (const [id, move] of this.boatMovement) {
@@ -361,6 +398,24 @@ export class BabylonRendererAdapter implements RendererAdapter {
       marker.position.x = move.from.x + (move.to.x - move.from.x) * progress;
       marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
       if (progress === 1) this.boatMovement.delete(id);
+    }
+  }
+
+  private animateFish(): void {
+    const now = performance.now();
+    const step = Math.min(.05, (now - this.lastAnimationTime) / 1000);
+    this.lastAnimationTime = now;
+    for (const [id, visual] of this.fishMotion) {
+      const marker = this.markers.get(id);
+      if (!marker) continue;
+      const turn = Math.atan2(Math.sin(visual.targetYaw - visual.yaw),
+        Math.cos(visual.targetYaw - visual.yaw));
+      visual.yaw += Math.max(-step * 2.8, Math.min(step * 2.8, turn));
+      visual.pitch += Math.max(-step * .9, Math.min(step * .9, visual.targetPitch - visual.pitch));
+      const stroke = Math.sin(now * .007 + visual.phase);
+      marker.rotation.y = visual.yaw + stroke * .035;
+      marker.rotation.z = visual.pitch;
+      if (visual.tail) visual.tail.rotation.y = stroke * .48;
     }
   }
 

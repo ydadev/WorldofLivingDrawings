@@ -93,6 +93,9 @@ const positions = { type: 'positions', schemaVersion: 1, sceneId: 'scene-uuid',
   positions: [{ id: 'fish-00000000000000000000000000000001',
     position: { x: 1, y: -1 }, heading: { x: 1, y: 0 } }] };
 valid('scenePositions', positions);
+valid('scenePositions', { ...positions, positions: [{ ...positions.positions[0],
+  depth: -0.75, headingDepth: 0.2 }] });
+invalid('scenePositions', { ...positions, positions: [{ ...positions.positions[0], depth: 2 }] });
 const boat = { id: 'boat-00000000000000000000000000000002', interactionId: 'boat',
   point: { x: 1, y: 0 }, position: { x: -5, y: 0 },
   entry: { x: -7.05, y: 0 }, exit: { x: 7.05, y: 0 }, expiresAtTick: 600 };

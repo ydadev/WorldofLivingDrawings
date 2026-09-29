@@ -134,7 +134,8 @@ export interface ScenePositions {
   sceneEpoch: number;
   revision: number;
   simulationTick: number;
-  positions: { id: string; position: Point2; heading: Point2 }[];
+  positions: { id: string; position: Point2; heading: Point2;
+    depth?: number; headingDepth?: number }[];
   actionPositions?: { id: string; position: Point2 }[];
 }
 export interface RealtimeCommand {
