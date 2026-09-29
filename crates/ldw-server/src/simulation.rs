@@ -1021,20 +1021,7 @@ mod tests {
                 "entities": entities,
                 "simulation": world.checkpoint(),
                 "activeActions": [],
-                "pendingInteractions": [
-                    {
-                        "type": "interaction_requested",
-                        "commandId": Uuid::new_v4(),
-                        "interactionId": "feed",
-                        "point": {"x": 0.0, "y": 0.0},
-                    },
-                    {
-                        "type": "interaction_requested",
-                        "commandId": Uuid::new_v4(),
-                        "interactionId": "boat",
-                        "point": {"x": 1.0, "y": 2.0},
-                    },
-                ],
+                "pendingInteractions": [],
             });
             sqlx::query("UPDATE scenes SET state = $1::jsonb WHERE id = $2")
                 .bind(state)
@@ -1068,7 +1055,13 @@ mod tests {
         });
         let mut controllers = tokio::task::JoinSet::new();
         let client_start = Arc::new(tokio::sync::Barrier::new(31));
+        let command_times = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            Uuid,
+            tokio::time::Instant,
+        >::new()));
         for &(scene_number, session_id, scene_id) in &scenes {
+            let feed_command_id = Uuid::new_v4();
+            let boat_command_id = Uuid::new_v4();
             let url = format!("ws://{address}/api/sessions/{session_id}/ws");
             for controller_number in 0..10 {
                 let token = format!("load-controller-{}", Uuid::new_v4());
@@ -1124,11 +1117,38 @@ mod tests {
                     ldw_sim::MAX_FISH
                 );
                 let client_start = client_start.clone();
+                let command_times = command_times.clone();
                 controllers.spawn(async move {
                     client_start.wait().await;
                     let mut count = 0;
                     let mut last_tick = 0;
+                    let mut accepted = 0;
+                    let mut action_latencies = std::collections::HashMap::new();
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+                    if controller_number == 0 {
+                        sleep(Duration::from_secs(1)).await;
+                        for (command_id, interaction_id, point) in [
+                            (feed_command_id, "feed", realtime::Point { x: 0.0, y: 0.0 }),
+                            (boat_command_id, "boat", realtime::Point { x: 1.0, y: 2.0 }),
+                        ] {
+                            let command = InteractionCommand {
+                                kind: "command".into(),
+                                command_id,
+                                session_id,
+                                scene_id,
+                                scene_epoch: 1,
+                                interaction_id: interaction_id.into(),
+                                point,
+                                expires_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as i64 + 8_000,
+                            };
+                            command_times.lock().unwrap().insert(command_id, tokio::time::Instant::now());
+                            socket.send(ClientMessage::text(serde_json::to_string(&command).unwrap()))
+                                .await.unwrap();
+                        }
+                    }
                     while let Some(remaining) =
                         deadline.checked_duration_since(tokio::time::Instant::now())
                     {
@@ -1152,6 +1172,19 @@ mod tests {
                                     assert!(tick > last_tick);
                                     last_tick = tick;
                                     count += 1;
+                                } else if value["type"] == "ack" && controller_number == 0 {
+                                    assert_eq!(value["accepted"], true, "{value}");
+                                    accepted += 1;
+                                } else if value["type"] == "delta" {
+                                    assert_eq!(value["sceneId"], scene_id.to_string());
+                                    if let Some(applied) = value["event"]["appliedCommandIds"].as_array() {
+                                        for command_id in [feed_command_id, boat_command_id] {
+                                            if applied.iter().any(|id| id == &command_id.to_string()) {
+                                                let sent = command_times.lock().unwrap()[&command_id];
+                                                action_latencies.entry(command_id).or_insert(sent.elapsed());
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             ClientMessage::Ping(payload) => {
@@ -1163,7 +1196,7 @@ mod tests {
                             _ => {}
                         }
                     }
-                    (scene_number, controller_number, count, last_tick)
+                    (scene_number, controller_number, count, last_tick, accepted, action_latencies)
                 });
             }
         }
@@ -1191,16 +1224,41 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut client_frames = 0;
+        let mut action_latencies = Vec::new();
         while let Some(result) = controllers.join_next().await {
-            let (scene_number, controller_number, count, last_tick) = result.unwrap();
+            let (scene_number, controller_number, count, last_tick, accepted, observed) =
+                result.unwrap();
             assert!(
                 count >= 18 && last_tick >= 180,
                 "scene {scene_number} Controller {controller_number} received {count} frames, last tick {last_tick}"
             );
             client_frames += count;
+            assert_eq!(
+                observed.len(),
+                2,
+                "scene {scene_number} Controller {controller_number} missed an applied action"
+            );
+            if controller_number == 0 {
+                assert_eq!(
+                    accepted, 2,
+                    "scene {scene_number} did not accept both commands"
+                );
+            }
+            action_latencies.extend(observed.into_values());
         }
         server.abort();
         println!("30 Controllers received {client_frames} position frames");
+        action_latencies.sort_unstable();
+        assert_eq!(action_latencies.len(), 60);
+        let p95 = action_latencies[(action_latencies.len() * 95).div_ceil(100) - 1];
+        println!(
+            "60 feed/boat application deliveries: p95={p95:?}, max={:?}",
+            action_latencies.last().unwrap()
+        );
+        assert!(
+            p95 <= Duration::from_millis(500),
+            "local action delivery exceeded the p95 target"
+        );
         for (scene_number, _, scene_id) in scenes {
             let count = frame_counts.get(&scene_id).copied().unwrap_or_default();
             let last = last_ticks.get(&scene_id).copied().unwrap_or_default();
