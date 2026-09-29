@@ -1,4 +1,5 @@
 use sqlx::{PgPool, migrate::MigrateError};
+pub mod access;
 
 /// The server uses versioned, embedded migrations; no database credentials live in source.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
@@ -41,5 +42,28 @@ mod tests {
         let found: Uuid = sqlx::query_scalar("SELECT active_scene_id FROM sessions WHERE id = $1")
             .bind(session_a).fetch_one(&pool).await.expect("read own scene");
         assert_eq!(found, scene_a);
+
+        let store = access::AccessStore::new(pool.clone(), [7u8; 32]);
+        let admin_password = Uuid::new_v4().to_string();
+        store.bootstrap_admin("ci-admin", &admin_password).await.expect("bootstrap admin once");
+        assert!(store.bootstrap_admin("other-admin", &admin_password).await.is_err());
+        assert!(store.login("ci-admin", "wrong-password").await.is_err());
+        let admin = store.login("ci-admin", &admin_password).await.expect("admin login");
+        let first_password = Uuid::new_v4().to_string();
+        let second_password = Uuid::new_v4().to_string();
+        store.create_owner(&admin.token, "ci-owner-one", &first_password).await.expect("first owner");
+        store.create_owner(&admin.token, "ci-owner-two", &second_password).await.expect("second owner");
+        let first = store.login("ci-owner-one", &first_password).await.expect("first login");
+        let second = store.login("ci-owner-two", &second_password).await.expect("second login");
+        assert!(store.create_owner(&first.token, "unauthorized-owner", &first_password).await.is_err());
+        assert!(store.create_session(&first.token, &second.csrf).await.is_err());
+        let first_scene = store.create_session(&first.token, &first.csrf).await.expect("first session");
+        let second_scene = store.create_session(&second.token, &second.csrf).await.expect("second session");
+        assert_eq!(store.owner_scene(&first.token, first_scene.session_id).await.expect("own scene").scene_id,
+            first_scene.scene_id);
+        assert!(store.owner_scene(&first.token, second_scene.session_id).await.is_err(),
+            "owner token cannot read another owner's scene");
+        assert_eq!(store.owner_scene(&admin.token, second_scene.session_id).await.expect("admin access").scene_id,
+            second_scene.scene_id);
     }
 }

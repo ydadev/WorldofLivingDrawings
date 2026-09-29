@@ -5,15 +5,17 @@ edition = "2024"
 publish = false
 
 [dependencies]
-argon2 = "=0.6.0"
+argon2 = { version = "=0.6.0", features = ["getrandom"] }
 axum = { version = "=0.8.9", features = ["json"] }
 axum-extra = { version = "=0.12.6", features = ["cookie"] }
 base64 = "=0.23.1"
 getrandom = "=0.4.3"
+hmac = "=0.13.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "time", "migrate", "macros"] }
 time = "=0.3.55"
 tokio = { version = "=1.53.1", features = ["full"] }
+thiserror = "=2.0.21"
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }

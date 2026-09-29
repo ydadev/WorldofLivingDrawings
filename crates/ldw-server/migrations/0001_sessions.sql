@@ -52,6 +52,7 @@ CREATE TABLE device_grants (
     participant_id uuid,
     role text NOT NULL CHECK (role IN ('viewer', 'viewer_interact', 'controller')),
     token_hash bytea NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
+    csrf_hash bytea NOT NULL CHECK (octet_length(csrf_hash) = 32),
     issued_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz NOT NULL,
     last_activity_at timestamptz NOT NULL DEFAULT now(),
