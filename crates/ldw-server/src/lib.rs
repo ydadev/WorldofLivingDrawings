@@ -1039,8 +1039,9 @@ mod tests {
             serde_json::from_str(writer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(ack["accepted"], true);
         assert_eq!(ack["revision"], 2);
+        let acknowledged_at = tokio::time::Instant::now();
         let writer_delta: serde_json::Value = serde_json::from_str(
-            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
+            tokio::time::timeout(std::time::Duration::from_millis(500), writer.next())
                 .await
                 .unwrap()
                 .unwrap()
@@ -1050,7 +1051,7 @@ mod tests {
         )
         .unwrap();
         let reader_delta: serde_json::Value = serde_json::from_str(
-            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
+            tokio::time::timeout(std::time::Duration::from_millis(500), reader.next())
                 .await
                 .unwrap()
                 .unwrap()
@@ -1062,6 +1063,10 @@ mod tests {
         assert_eq!(writer_delta, reader_delta);
         assert_eq!(writer_delta["type"], "delta");
         assert_eq!(writer_delta["revision"], 2);
+        assert!(
+            acknowledged_at.elapsed() <= std::time::Duration::from_millis(500),
+            "committed interaction must reach both connected screens promptly"
+        );
         let publication_scene = store
             .create_session(&first.token, &first.csrf)
             .await

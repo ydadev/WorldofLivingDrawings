@@ -69,12 +69,14 @@ pub struct LoadedScene {
 #[derive(Clone)]
 pub struct SimulationHub {
     sender: broadcast::Sender<PositionFrame>,
+    changes: broadcast::Sender<Uuid>,
 }
 
 impl Default for SimulationHub {
     fn default() -> Self {
         let (sender, _) = broadcast::channel(32);
-        Self { sender }
+        let (changes, _) = broadcast::channel(64);
+        Self { sender, changes }
     }
 }
 
@@ -85,6 +87,14 @@ impl SimulationHub {
 
     pub fn publish(&self, frame: PositionFrame) {
         let _ = self.sender.send(frame);
+    }
+
+    pub fn subscribe_changes(&self) -> broadcast::Receiver<Uuid> {
+        self.changes.subscribe()
+    }
+
+    pub fn notify_change(&self, scene_id: Uuid) {
+        let _ = self.changes.send(scene_id);
     }
 }
 
@@ -863,12 +873,15 @@ async fn run_scene(
     period: Duration,
 ) -> Result<(), SimulationError> {
     let mut scene = load_scene(&pool, scene_id).await?;
+    let mut changes = hub.subscribe_changes();
+    let mut pending_wakeup = false;
     let mut timer = interval(period);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = timer.tick() => {
-                if scene.world.tick_number() % 20 == 0 {
+                if scene.world.tick_number() % 20 == 0 || pending_wakeup {
+                    pending_wakeup = false;
                     let running: bool = sqlx::query_scalar(
                         "SELECT EXISTS(SELECT 1 FROM scenes c JOIN sessions s \
                          ON s.active_scene_id = c.id WHERE c.id = $1 \
@@ -882,8 +895,12 @@ async fn run_scene(
                     if !apply_pending_fish(&pool, scene_id, &mut scene).await? {
                         return Ok(());
                     }
+                    let prior_revision = scene.revision;
                     if !apply_pending_interactions(&pool, scene_id, &mut scene).await? {
                         return Ok(());
+                    }
+                    if scene.revision != prior_revision {
+                        hub.notify_change(scene_id);
                     }
                 }
                 let food_before = scene.world.feed_sources().to_vec();
@@ -895,6 +912,10 @@ async fn run_scene(
                 {
                     return Ok(());
                 }
+                if scene.world.feed_sources() != food_before
+                    || scene.world.boat().is_some() != boat_before {
+                    hub.notify_change(scene_id);
+                }
                 if scene.world.tick_number() % 10 == 0 {
                     hub.publish(position_frame(scene_id, &scene));
                 }
@@ -903,6 +924,13 @@ async fn run_scene(
                     && !save_checkpoint(&pool, scene_id, &mut scene).await?
                 {
                     return Ok(());
+                }
+            }
+            changed = changes.recv() => {
+                match changed {
+                    Ok(changed_scene) if changed_scene == scene_id => pending_wakeup = true,
+                    Err(broadcast::error::RecvError::Lagged(_)) => pending_wakeup = true,
+                    _ => {}
                 }
             }
             changed = shutdown.changed() => {

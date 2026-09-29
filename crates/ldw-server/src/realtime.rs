@@ -311,6 +311,7 @@ async fn serve(
         return;
     };
     let mut positions = hub.subscribe();
+    let mut changes = hub.subscribe_changes();
     let Ok((snapshot, mut cursor)) = load_snapshot(store.pool(), &access).await else {
         return;
     };
@@ -347,7 +348,7 @@ async fn serve(
                     Message::Pong(_) => last_pong = Instant::now(),
                     Message::Text(text) => {
                         if text.len() > MAX_MESSAGE_BYTES { break; }
-                        let response = handle_message(&store, kind, &token, session_id, &text).await;
+                        let response = handle_message(&store, &hub, kind, &token, session_id, &text).await;
                         if send_json(&mut socket, &response).await.is_err() { break; }
                     }
                     Message::Close(_) => break,
@@ -363,7 +364,19 @@ async fn serve(
                 { break; }
                 if socket.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
             }
-            _ = poll.tick() => {
+            _ = async {
+                loop {
+                    tokio::select! {
+                        _ = poll.tick() => break,
+                        change = changes.recv() => match change {
+                            Ok(scene_id) if scene_id == access.scene.scene_id => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            _ => {}
+                        }
+                    }
+                }
+            } => {
                 let Ok(current) = store.scene_access(kind, &token, session_id).await else { break };
                 if current.scene.scene_id != access.scene.scene_id
                     || current.scene.scene_epoch != access.scene.scene_epoch {
@@ -409,6 +422,7 @@ async fn send_json(socket: &mut WebSocket, value: &Value) -> Result<(), axum::Er
 
 async fn handle_message(
     store: &AccessStore,
+    hub: &SimulationHub,
     kind: GrantKind,
     token: &str,
     session_id: Uuid,
@@ -423,7 +437,12 @@ async fn handle_message(
                 return json!({"type":"error","code":"INVALID_COMMAND"});
             };
             match process_command(store, kind, token, session_id, &command).await {
-                Ok(outcome) => outcome,
+                Ok(outcome) => {
+                    if outcome.get("accepted").and_then(Value::as_bool) == Some(true) {
+                        hub.notify_change(command.scene_id);
+                    }
+                    outcome
+                }
                 Err(AccessError::Forbidden) => json!({"type":"error","code":"ACCESS_DENIED"}),
                 Err(_) => json!({"type":"error","code":"SERVER_ERROR"}),
             }
