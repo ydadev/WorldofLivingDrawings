@@ -96,7 +96,7 @@ impl From<AccessError> for ApiError {
             AccessError::OwnerApprovalRequired => {
                 Self(StatusCode::FORBIDDEN, "OWNER_APPROVAL_REQUIRED")
             }
-            AccessError::Crypto | AccessError::Database(_) => {
+            AccessError::Crypto | AccessError::SceneState | AccessError::Database(_) => {
                 Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
             }
         }
