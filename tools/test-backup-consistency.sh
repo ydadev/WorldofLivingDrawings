@@ -63,4 +63,17 @@ rows=$("${db_exec[@]}" psql -X -A -t -q -w -U postgres -d ldw_backup_restore_tes
 "${db_exec[@]}" dropdb -w -U postgres ldw_backup_restore_test
 [[ "$(tar -tzf "$root/blobs.tar.gz")" == *'blobs/fixture'* ]]
 [[ "$(tar -xOzf "$root/blobs.tar.gz" blobs/fixture)" == 'private PNG fixture' ]]
+mkdir "$root/config"
+printf 'test configuration\n' > "$root/config/example"
+tar -C "$root/config" -czf "$root/config.tar.gz" example
+source infra/backup-manifest.sh
+postgres_version=$("${db_exec[@]}" psql -X -A -t -q -w -U postgres -d postgres -c 'SHOW server_version')
+write_backup_manifest "$root" 20260929T031500Z "$postgres_version" unknown
+verify_backup_manifest "$root"
+[[ "$(jq -r '.versions.postgres' "$root/manifest.json")" == "$postgres_version" ]]
+printf 'corruption\n' >> "$root/config.tar.gz"
+if verify_backup_manifest "$root" >/dev/null 2>&1; then
+  printf 'Corrupted backup passed verification\n' >&2
+  exit 1
+fi
 printf 'Consistent DB/blob backup test passed\n'
