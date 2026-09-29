@@ -261,6 +261,39 @@ try {
   await page.locator('#draft-status[data-state="saved"]').waitFor();
   if (!red(await colorAt(256, 256))) throw new Error('Saving after explicit delete lost the drawing');
 
+  const giantId = await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('ldw-paint-drafts', 1);
+      open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+    });
+    const example = await new Promise((resolve, reject) => {
+      const get = db.transaction('drafts').objectStore('drafts').getAll();
+      get.onsuccess = () => resolve(get.result[0]); get.onerror = () => reject(get.error);
+    });
+    const id = crypto.randomUUID();
+    const image = new Blob([new Uint8Array(64 * 1024 * 1024)], { type: 'image/png' });
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction('drafts', 'readwrite');
+      const store = tx.objectStore('drafts');
+      store.clear();
+      store.put({ ...example, id, image });
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    return id;
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await clickAt(256, 256);
+  await page.locator('#draft-save').click();
+  await page.locator('#draft-status[data-state="limit"]').waitFor();
+  if (!red(await colorAt(256, 256))) throw new Error('64 MiB limit lost the in-memory drawing');
+  await page.locator('#draft-list').selectOption(giantId);
+  await page.locator('#draft-delete').click();
+  await page.waitForFunction(id => ![...document.querySelector('#draft-list').options].some(option => option.value === id), giantId);
+  await page.locator('#draft-save').click();
+  await page.locator('#draft-status[data-state="saved"]').waitFor();
+
   const unavailable = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await unavailable.addInitScript(() => Object.defineProperty(window, 'indexedDB', { value: undefined }));
   const unavailablePage = await unavailable.newPage();
@@ -272,8 +305,34 @@ try {
   if (await unavailablePage.locator('#paint-download').isDisabled())
     throw new Error('Download unavailable when IndexedDB is blocked');
   await unavailable.close();
+
+  const mobile = await browser.newContext({ viewport: { width: 390, height: 844 },
+    isMobile: true, hasTouch: true });
+  const mobilePage = await mobile.newPage();
+  mobilePage.on('pageerror', error => errors.push(error.message));
+  await mobilePage.goto('http://127.0.0.1:4173/paint.html', { waitUntil: 'networkidle' });
+  await mobilePage.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  const mobileCanvas = mobilePage.locator('#paint-sheet');
+  await mobilePage.locator('#paint-tool').selectOption('fill');
+  await mobileCanvas.scrollIntoViewIfNeeded();
+  const mobileBox = await mobileCanvas.boundingBox();
+  await mobilePage.touchscreen.tap(mobileBox.x + mobileBox.width / 2,
+    mobileBox.y + mobileBox.height / 2);
+  const mobileColor = () => mobilePage.evaluate(() => [...document.querySelector('#paint-sheet')
+    .getContext('2d').getImageData(512, 512, 1, 1).data]);
+  if (!red(await mobileColor())) throw new Error('Mobile touch did not color the fish');
+  await mobilePage.locator('#draft-save').click();
+  await mobilePage.locator('#draft-status[data-state="saved"]').waitFor();
+  const mobileId = await mobilePage.locator('#draft-list').inputValue();
+  await mobilePage.reload({ waitUntil: 'networkidle' });
+  await mobilePage.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  await mobilePage.locator('#draft-list').selectOption(mobileId);
+  await mobilePage.locator('#draft-open').click();
+  await mobilePage.locator('#draft-status[data-state="saved"]').waitFor();
+  if (!red(await mobileColor())) throw new Error('Mobile draft did not restore');
+  await mobile.close();
   if (errors.length) throw new Error(`Draft browser errors: ${errors.join(' | ')}`);
-  console.log('MVP-02 drafts: opt-in, reload, conflict/copy, count limit and unavailable storage: PASS');
+  console.log('MVP-02 drafts: opt-in, reload, conflict/copy, 10/64 MiB limits, unavailable storage and mobile touch: PASS');
 } finally {
   await browser?.close();
   server.kill();

@@ -182,6 +182,27 @@ try {
     null, { timeout: 20000 });
   await editor.locator('#paint-tool').selectOption('fill');
   await editor.locator('#paint-sheet').click({ position: { x: 240, y: 240 } });
+  const pixelBeforeSave = await editor.locator('#paint-sheet').evaluate(canvas =>
+    [...canvas.getContext('2d').getImageData(512, 512, 1, 1).data]);
+  assert(pixelBeforeSave[0] > 170 && pixelBeforeSave[1] < 120 && pixelBeforeSave[2] < 120,
+    `Digital paint was not visible before draft save: ${pixelBeforeSave}`);
+  await editor.locator('#draft-save').click();
+  await editor.locator('#draft-status[data-state="saved"]').waitFor({ timeout: 20000 });
+  const draftId = await editor.locator('#draft-list').inputValue();
+  assert(draftId, 'Saved digital draft was not listed');
+  await owner.locator('#editor-frame').evaluate(frame => new Promise(resolve => {
+    frame.addEventListener('load', () => resolve(), { once: true });
+    frame.contentWindow.location.reload();
+  }));
+  await owner.waitForFunction(() => document.querySelector('#editor-frame')?.contentWindow?.paintProbe?.status === 'PASS',
+    null, { timeout: 20000 });
+  await editor.locator('#draft-list').selectOption(draftId);
+  await editor.locator('#draft-open').click();
+  await editor.locator('#draft-status[data-state="saved"]').waitFor({ timeout: 20000 });
+  const pixelAfterRestore = await editor.locator('#paint-sheet').evaluate(canvas =>
+    [...canvas.getContext('2d').getImageData(512, 512, 1, 1).data]);
+  assert(pixelAfterRestore[0] > 170 && pixelAfterRestore[1] < 120 && pixelAfterRestore[2] < 120,
+    `Digital paint was lost after draft restore: ${pixelAfterRestore}`);
   await owner.locator('#editor-pick').click();
   await owner.locator('#fish-place').waitFor({ state: 'visible', timeout: 20000 });
   await owner.waitForFunction(() => !document.querySelector('#fish-place').disabled,
