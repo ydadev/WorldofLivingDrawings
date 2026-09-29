@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     access::{GrantKind, SceneAccess},
+    blob_gc::BLOB_CATALOG_LOCK,
     blob_store::{BlobStore, BlobStoreError},
     simulation::{self, SimulationError},
 };
@@ -528,7 +529,8 @@ pub async fn finalize_upload(
 
     // All scene writers hold the scene lock above. One global advisory lock
     // serializes physical blob-quota decisions across independent scenes.
-    sqlx::query("SELECT pg_advisory_xact_lock(72111401)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(BLOB_CATALOG_LOCK)
         .execute(&mut *tx)
         .await?;
     let existing_size: Option<i32> =

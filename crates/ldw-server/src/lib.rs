@@ -1,5 +1,6 @@
 use sqlx::{PgPool, migrate::MigrateError};
 pub mod access;
+pub mod blob_gc;
 pub mod blob_store;
 pub mod http;
 pub mod paint_image;

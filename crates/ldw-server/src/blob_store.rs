@@ -3,8 +3,9 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use sha2::{Digest, Sha256};
@@ -127,6 +128,89 @@ impl BlobStore {
     pub fn read(&self, id: &str) -> Result<Vec<u8>, BlobStoreError> {
         let path = self.path(id)?;
         verify_existing(&path, id, None)
+    }
+
+    /// Only canonical, old, regular files below the private digest tree are
+    /// candidates. The catalog must be checked separately under its DB lock.
+    pub(crate) fn old_blob_ids(&self, cutoff: SystemTime) -> Result<Vec<String>, BlobStoreError> {
+        if !private_directory(&self.root)? {
+            return Err(BlobStoreError::InvalidPath);
+        }
+        let digest_root = self.root.join("sha256");
+        match fs::symlink_metadata(&digest_root) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+            Ok(_) if !private_directory(&digest_root)? => return Err(BlobStoreError::InvalidPath),
+            Ok(_) => {}
+        }
+        let mut ids = Vec::new();
+        for prefix in fs::read_dir(digest_root)? {
+            let prefix = prefix?;
+            let name = prefix.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.len() != 2
+                || !name
+                    .bytes()
+                    .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+            {
+                continue;
+            }
+            if !private_directory(&prefix.path())? {
+                return Err(BlobStoreError::InvalidPath);
+            }
+            for file in fs::read_dir(prefix.path())? {
+                let file = file?;
+                let filename = file.file_name();
+                let Some(id) = filename
+                    .to_str()
+                    .and_then(|value| value.strip_suffix(".png"))
+                else {
+                    continue;
+                };
+                if !id.starts_with(name) || self.path(id).ok().as_ref() != Some(&file.path()) {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(file.path())?;
+                if metadata.file_type().is_file() && metadata.modified()? <= cutoff {
+                    ids.push(id.to_owned());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Call while holding the same advisory lock as finalization. A missing
+    /// file still permits removal of an otherwise unreferenced catalog row.
+    pub(crate) fn remove_blob_if_old(
+        &self,
+        id: &str,
+        cutoff: SystemTime,
+    ) -> Result<bool, BlobStoreError> {
+        let path = self.path(id)?;
+        if !private_directory(&self.root)? {
+            return Err(BlobStoreError::InvalidPath);
+        }
+        let digest_root = self.root.join("sha256");
+        let prefix = path.parent().ok_or(BlobStoreError::InvalidPath)?;
+        for directory in [&digest_root, prefix] {
+            match fs::symlink_metadata(directory) {
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+                Err(error) => return Err(error.into()),
+                Ok(_) if !private_directory(directory)? => return Err(BlobStoreError::InvalidPath),
+                Ok(_) => {}
+            }
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_file() || metadata.modified()? > cutoff {
+            return Ok(false);
+        }
+        fs::remove_file(&path)?;
+        sync_directory(path.parent().ok_or(BlobStoreError::InvalidPath)?)?;
+        Ok(true)
     }
 }
 
