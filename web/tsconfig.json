@@ -8,5 +8,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["contracts/src/**/*.ts", "renderer/src/**/*.ts", "renderer-babylon/src/**/*.ts"]
+  "include": ["contracts/src/**/*.ts", "renderer/src/**/*.ts", "renderer-babylon/src/**/*.ts", "transport/src/**/*.ts"]
 }

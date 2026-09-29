@@ -69,8 +69,14 @@ invalid('assetManifest', { ...manifest, assets: [{ ...manifest.assets[0], sha256
 const snapshot = { schemaVersion: 1, sceneEpoch: 1, revision: 0, simulationTick: 0,
   worldId: world.id, worldVersion: world.version, entities: [] };
 valid('sceneSnapshot', snapshot);
+const requested = { type: 'interaction_requested', commandId: '00000000-0000-4000-8000-000000000001',
+  interactionId: 'feed', point: { x: 2, y: -1 } };
+valid('sceneSnapshot', { ...snapshot, type: 'snapshot', sceneId: 'scene-uuid', simulationVersion: 1,
+  serverTime: 1, activeActions: [], pendingInteractions: [requested], resources: {}, reservations: [] });
 valid('sceneDelta', { schemaVersion: 1, sceneEpoch: 1, revision: 1,
   simulationTick: 1, upsert: [], remove: [] });
+valid('sceneDelta', { type: 'delta', sceneId: 'scene-uuid', schemaVersion: 1,
+  sceneEpoch: 1, revision: 1, simulationTick: 0, upsert: [], remove: [], event: requested });
 invalid('sceneDelta', { schemaVersion: 1, sceneEpoch: 1, revision: 0,
   simulationTick: 1, upsert: [], remove: [] });
 valid('interactionIntent', { schemaVersion: 1, commandId: 'command-1', sceneEpoch: 1,

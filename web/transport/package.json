@@ -1,0 +1,8 @@
+{
+  "name": "@ldw/transport",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": { "@ldw/contracts": "0.1.0" }
+}

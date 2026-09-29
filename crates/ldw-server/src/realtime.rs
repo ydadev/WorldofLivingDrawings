@@ -184,7 +184,8 @@ async fn serve(
                         break;
                     }
                     let delta = json!({"type":"delta", "sceneId":access.scene.scene_id,
-                        "sceneEpoch":epoch, "revision":revision, "event":event});
+                        "schemaVersion":1, "sceneEpoch":epoch, "revision":revision,
+                        "simulationTick":0, "upsert":[], "remove":[], "event":event});
                     if send_json(&mut socket, &delta).await.is_err() { return; }
                     cursor = revision;
                 }

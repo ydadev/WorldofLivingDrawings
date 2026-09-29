@@ -85,20 +85,38 @@
       "type": "object", "additionalProperties": false,
       "required": ["schemaVersion", "sceneEpoch", "revision", "simulationTick", "worldId", "worldVersion", "entities"],
       "properties": {
+        "type": { "const": "snapshot" }, "sceneId": { "type": "string" },
         "schemaVersion": { "const": 1 }, "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
         "revision": { "$ref": "#/$defs/nonnegativeInt" }, "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
+        "simulationVersion": { "$ref": "#/$defs/positiveInt" },
+        "serverTime": { "type": "integer" },
         "worldId": { "$ref": "#/$defs/id" }, "worldVersion": { "$ref": "#/$defs/positiveInt" },
-        "entities": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } }
+        "entities": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
+        "activeActions": { "type": "array" },
+        "pendingInteractions": { "type": "array", "items": { "$ref": "#/$defs/interactionRequested" } },
+        "resources": { "type": "object" }, "reservations": { "type": "array" }
       }
     },
     "sceneDelta": {
       "type": "object", "additionalProperties": false,
       "required": ["schemaVersion", "sceneEpoch", "revision", "simulationTick", "upsert", "remove"],
       "properties": {
+        "type": { "const": "delta" }, "sceneId": { "type": "string" },
         "schemaVersion": { "const": 1 }, "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
         "revision": { "$ref": "#/$defs/positiveInt" }, "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
         "upsert": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
-        "remove": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+        "remove": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "event": { "$ref": "#/$defs/interactionRequested" }
+      }
+    },
+    "interactionRequested": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "commandId", "interactionId", "point"],
+      "properties": {
+        "type": { "const": "interaction_requested" },
+        "commandId": { "type": "string" },
+        "interactionId": { "$ref": "#/$defs/id" },
+        "point": { "$ref": "#/$defs/point" }
       }
     },
     "assetManifest": {
