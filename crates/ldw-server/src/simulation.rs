@@ -1096,7 +1096,7 @@ mod tests {
                 .unwrap();
                 socket
                     .send(ClientMessage::text(
-                        json!({"type":"hello","csrf":csrf}).to_string(),
+                        json!({"type":"hello","csrf":csrf.clone()}).to_string(),
                     ))
                     .await
                     .unwrap();
@@ -1118,13 +1118,16 @@ mod tests {
                 );
                 let client_start = client_start.clone();
                 let command_times = command_times.clone();
+                let reconnect_url = url.clone();
                 controllers.spawn(async move {
                     client_start.wait().await;
                     let mut count = 0;
                     let mut last_tick = 0;
                     let mut accepted = 0;
+                    let mut reconnected = false;
                     let mut action_latencies = std::collections::HashMap::new();
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+                    let reconnect_at = tokio::time::Instant::now() + Duration::from_secs(6);
                     if controller_number == 0 {
                         sleep(Duration::from_secs(1)).await;
                         for (command_id, interaction_id, point) in [
@@ -1152,6 +1155,43 @@ mod tests {
                     while let Some(remaining) =
                         deadline.checked_duration_since(tokio::time::Instant::now())
                     {
+                        if controller_number == 9
+                            && !reconnected
+                            && tokio::time::Instant::now() >= reconnect_at
+                        {
+                            assert_eq!(action_latencies.len(), 2);
+                            socket.close(None).await.unwrap();
+                            sleep(Duration::from_millis(300)).await;
+                            let mut request = reconnect_url.as_str().into_client_request().unwrap();
+                            request.headers_mut().insert("origin", "https://world.example.test".parse().unwrap());
+                            request.headers_mut().insert(
+                                "cookie",
+                                format!("__Host-ldw-controller={token}").parse().unwrap(),
+                            );
+                            let (replacement, _) = timeout(
+                                Duration::from_secs(3),
+                                tokio_tungstenite::connect_async(request),
+                            ).await.unwrap().unwrap();
+                            socket = replacement;
+                            socket.send(ClientMessage::text(
+                                json!({"type":"hello","csrf":csrf}).to_string(),
+                            )).await.unwrap();
+                            let snapshot: Value = serde_json::from_str(
+                                timeout(Duration::from_secs(3), socket.next())
+                                    .await.unwrap().unwrap().unwrap().to_text().unwrap(),
+                            ).unwrap();
+                            assert_eq!(snapshot["type"], "snapshot");
+                            assert_eq!(snapshot["sceneId"], scene_id.to_string());
+                            assert_eq!(snapshot["sceneEpoch"], 1);
+                            assert!(snapshot["revision"].as_i64().unwrap() >= 3);
+                            assert_eq!(snapshot["entities"].as_array().unwrap().len(), ldw_sim::MAX_FISH);
+                            assert!(snapshot["pendingInteractions"].as_array().unwrap().is_empty());
+                            let actions = snapshot["activeActions"].as_array().unwrap();
+                            assert!(actions.iter().any(|action| action["interactionId"] == "boat"));
+                            last_tick = snapshot["simulationTick"].as_u64().unwrap();
+                            reconnected = true;
+                            continue;
+                        }
                         let message = match timeout(remaining, socket.next()).await {
                             Ok(Some(Ok(message))) => message,
                             Ok(other) => panic!(
@@ -1196,7 +1236,7 @@ mod tests {
                             _ => {}
                         }
                     }
-                    (scene_number, controller_number, count, last_tick, accepted, action_latencies)
+                    (scene_number, controller_number, count, last_tick, accepted, reconnected, action_latencies)
                 });
             }
         }
@@ -1226,8 +1266,15 @@ mod tests {
         let mut client_frames = 0;
         let mut action_latencies = Vec::new();
         while let Some(result) = controllers.join_next().await {
-            let (scene_number, controller_number, count, last_tick, accepted, observed) =
-                result.unwrap();
+            let (
+                scene_number,
+                controller_number,
+                count,
+                last_tick,
+                accepted,
+                reconnected,
+                observed,
+            ) = result.unwrap();
             assert!(
                 count >= 18 && last_tick >= 180,
                 "scene {scene_number} Controller {controller_number} received {count} frames, last tick {last_tick}"
@@ -1242,6 +1289,12 @@ mod tests {
                 assert_eq!(
                     accepted, 2,
                     "scene {scene_number} did not accept both commands"
+                );
+            }
+            if controller_number == 9 {
+                assert!(
+                    reconnected,
+                    "scene {scene_number} missed Controller reconnect"
                 );
             }
             action_latencies.extend(observed.into_values());
