@@ -9,11 +9,11 @@ install -d -m 0700 "$target"
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 partial="$target/.${stamp}.partial"
 mkdir "$partial"
+compose=(docker compose --env-file /etc/ldw/runtime.env -f /opt/ldw/infra/compose.yaml)
 trap 'printf "Backup incomplete: %s\n" "$partial" >&2' ERR
-docker compose --env-file /etc/ldw/runtime.env -f /opt/ldw/infra/compose.yaml \
-  exec -T db pg_dump -U postgres -d ldw -Fc > "$partial/database.dump"
-# Product is not deployed yet. Once writes exist, quiesce them for DB/blob consistency.
-tar -C /var/lib/ldw -czf "$partial/blobs.tar.gz" blobs
+source /opt/ldw/infra/backup-consistent.sh
+consistent_db_blob_backup ldw "$partial/database.dump" /var/lib/ldw \
+  "$partial/blobs.tar.gz" "${compose[@]}" exec -T db
 tar -C /etc -czf "$partial/config.tar.gz" ldw
 (cd "$partial" && sha256sum database.dump blobs.tar.gz config.tar.gz > SHA256SUMS)
 mv "$partial" "$target/$stamp"

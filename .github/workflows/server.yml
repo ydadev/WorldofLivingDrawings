@@ -14,6 +14,8 @@ on:
       - 'content/**'
       - 'prototypes/wasm-webgl/**'
       - 'tools/test-real-ui-browser.mjs'
+      - 'tools/test-backup-consistency.sh'
+      - 'infra/backup-*.sh'
   pull_request:
     paths:
       - '.github/workflows/server.yml'
@@ -28,6 +30,8 @@ on:
       - 'content/**'
       - 'prototypes/wasm-webgl/**'
       - 'tools/test-real-ui-browser.mjs'
+      - 'tools/test-backup-consistency.sh'
+      - 'infra/backup-*.sh'
   workflow_dispatch:
 permissions:
   contents: read
@@ -61,6 +65,8 @@ jobs:
         run: cargo test -p ldw-server --locked
       - name: Check deterministic simulation core
         run: cargo test -p ldw-sim --locked
+      - name: Check consistent DB and blob backup
+        run: bash tools/test-backup-consistency.sh
       - name: Check browser WebAssembly target for simulation core
         run: rustup target add wasm32-unknown-unknown --toolchain 1.98.1 && cargo build -p ldw-sim --target wasm32-unknown-unknown --locked
       - name: Install pinned Node
