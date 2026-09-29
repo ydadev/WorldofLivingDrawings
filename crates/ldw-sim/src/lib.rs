@@ -1185,9 +1185,19 @@ mod tests {
         let portions = world.feed_sources()[0].remaining;
         world.step();
         assert_eq!(world.feed_sources()[0].remaining, portions);
+        let mut ate = false;
         for _ in 0..100 {
             world.step();
+            if world.feed_sources()[0].remaining < portions {
+                let fish = &world.fish()[0];
+                assert!(fish.feeding.is_none());
+                assert_eq!(fish.target, fish.position);
+                assert_eq!(fish.depth_target, fish.depth);
+                ate = true;
+                break;
+            }
         }
+        assert!(ate, "the fish should reach and consume one portion");
         assert_eq!(world.feed_sources()[0].remaining, portions - 1);
     }
 
