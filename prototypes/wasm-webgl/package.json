@@ -12,7 +12,8 @@
     "build": "npm run build:wasm && npm run build:fish && tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --strictPort",
     "test:browser": "node ../../tools/test-risk-browser.mjs",
-    "test:fish": "node ../../tools/test-fish-browser.mjs"
+    "test:fish": "node ../../tools/test-fish-browser.mjs",
+    "test:paint": "node ../../tools/test-paint-browser.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "9.28.0",

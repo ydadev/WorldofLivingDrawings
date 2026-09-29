@@ -10,3 +10,11 @@ button { border: 1px solid #80bccb; border-radius: 6px; background: #184655; col
 button:hover { background: #24728b; }
 a { color: #92d9f0; }
 @media (max-width: 760px) { .fish-grid { grid-template-columns: 1fr; } .fish-grid canvas { height: 430px; } }
+.paint-main { max-width: 1300px; margin: 0 auto; padding: 1rem; color: #e7f5f7; }
+.paint-controls { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; margin: 1rem 0; }
+.paint-controls label { display: inline-flex; align-items: center; gap: .3rem; }
+.paint-grid { display: grid; grid-template-columns: minmax(250px, 1fr) minmax(250px, 1fr); gap: 1rem; }
+.paint-sheet { width: 100%; max-width: 560px; }
+#paint-sheet { display: block; width: 100%; height: auto; background: white; border-radius: .5rem; touch-action: none; cursor: crosshair; }
+#paint-model { display: block; width: 100%; height: min(60vh, 560px); border-radius: .5rem; }
+@media (max-width: 760px) { .paint-grid { grid-template-columns: 1fr; } #paint-model { height: 300px; } }

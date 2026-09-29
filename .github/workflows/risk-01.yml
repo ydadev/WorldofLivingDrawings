@@ -1,4 +1,4 @@
-name: RISK-01 and RISK-02 browser probes
+name: Browser risk probes
 on:
   push:
     paths:
@@ -9,6 +9,7 @@ on:
       - 'tools/build-wasm.mjs'
       - 'tools/test-risk-browser.mjs'
       - 'tools/test-fish-browser.mjs'
+      - 'tools/test-paint-browser.mjs'
   pull_request:
     paths:
       - '.github/workflows/risk-01.yml'
@@ -18,6 +19,7 @@ on:
       - 'tools/build-wasm.mjs'
       - 'tools/test-risk-browser.mjs'
       - 'tools/test-fish-browser.mjs'
+      - 'tools/test-paint-browser.mjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -50,3 +52,6 @@ jobs:
       - name: Run Chrome fish UV and model probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:fish
+      - name: Run Chrome browser painting probe
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:paint

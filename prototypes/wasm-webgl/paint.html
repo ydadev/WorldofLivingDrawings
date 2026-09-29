@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Браузерная раскраска рыбы</title>
+  </head>
+  <body>
+    <main class="paint-main">
+      <h1>Раскрась рыбку</h1>
+      <p>Выбери рыбку, рисуй мышью или пальцем и посмотри результат на объёмной модели.</p>
+      <div class="paint-controls">
+        <label>Рыбка <select id="paint-species"><option value="coral">Круглая</option><option value="stream">Быстрая</option></select></label>
+        <label>Инструмент <select id="paint-tool"><option value="stroke">Кисть</option><option value="fill">Заливка</option><option value="erase">Ластик</option><option value="pick">Пипетка</option></select></label>
+        <label>Цвет <input id="paint-color" type="color" value="#e9463a"></label>
+        <label>Толщина <input id="paint-size" type="range" min="2" max="48" value="16"></label>
+        <button id="paint-undo" type="button">Отменить</button>
+        <button id="paint-redo" type="button">Повторить</button>
+        <button id="paint-clear" type="button">Очистить</button>
+        <button id="paint-download" type="button">Скачать PNG</button>
+      </div>
+      <p id="paint-status" role="status">Загрузка…</p>
+      <div class="paint-grid">
+        <div class="paint-sheet"><canvas id="paint-sheet" width="1024" height="1024" aria-label="Раскраска рыбы"></canvas></div>
+        <div><canvas id="paint-model" aria-label="Объёмная рыба с текущей раскраской"></canvas><p>Один рисунок виден с обеих сторон рыбы.</p></div>
+      </div>
+    </main>
+    <script type="module" src="/src/paint.ts"></script>
+  </body>
+</html>

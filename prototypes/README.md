@@ -30,3 +30,8 @@ Paint Canvas — 512×512, ортографический боковой вид.
 `npm run build` генерирует файлы и запускает glTF Validator, проверяет хеши, диапазоны UV, 100 совпадающих пар вершин двух сторон и 66 вершин рёбер на каждом виде. `npm run test:fish` в Chrome открывает [fish.html](wasm-webgl/fish.html), проверяет GLB обеих рыб с обеих сторон и под углом сверху. Красный участок головы и синий хвост считываются из пикселей WebGL с зеркальным порядком на обратной стороне. Скриншоты шести видов остаются только в `.local/`. Переключение диагностических ракурсов есть только на странице проверки моделей; пользовательская камера подводного мира остаётся фиксированной.
 
 Этот набор ещё не содержит печатных маркеров и не проходил проверку физической печати/съёмки — это RISK-03. Цифровой редактор с маской и штрихами — RISK-04. Для релиза также понадобятся оптимизация/LOD и измерение на реальном TV.
+# Browser painting probe (RISK-04)
+
+After `npm run build`, open `paint.html` through the Vite preview. This separate technical page uses the versioned `PaintLayout` from the two fish assets to draw a 1024×1024 working canvas. Brush, fill, eraser, eyedropper, clear and undo/redo are restricted to the fish mask, with the eye protected. The same colors are reduced to a 512×512 sRGB PNG `PaintResult` and shown on the GLB model. `npm run test:paint` checks mouse and touch input, fill/mask, undo/redo, both species and the exported PNG in Chrome. It also saves screenshots only in ignored `.local/`.
+
+This is an editor risk probe, not the final Controller. The MVP editor still needs zoom/pan gestures, bounded history, explicit local drafts, production accessibility/error handling, authorization and submission to a scene.
