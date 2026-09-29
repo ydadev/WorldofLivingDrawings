@@ -147,22 +147,20 @@ impl AccessStore {
             .fetch_optional(&self.pool)
             .await?,
             GrantKind::Controller | GrantKind::Viewer => {
-                let role_predicate = if kind == GrantKind::Controller {
-                    "g.role = 'controller'"
-                } else {
-                    "g.role IN ('viewer', 'viewer_interact')"
-                };
-                let sql = format!(
+                let requested_role = if kind == GrantKind::Controller { "controller" } else { "viewer" };
+                sqlx::query_as(
                     "SELECT s.id, c.id, c.world_id, c.world_version, c.scene_epoch, c.revision, g.id, g.role \
                      FROM device_grants g JOIN sessions s ON s.id = g.session_id \
                      JOIN scenes c ON c.id = s.active_scene_id \
-                     WHERE s.id = $1 AND g.token_hash = $2 AND {role_predicate} \
+                     WHERE s.id = $1 AND g.token_hash = $2 \
+                     AND (($3 = 'controller' AND g.role = 'controller') OR \
+                          ($3 = 'viewer' AND g.role IN ('viewer', 'viewer_interact'))) \
                      AND g.revoked_at IS NULL AND g.expires_at > now() AND s.status != 'closed' \
                      AND (g.role != 'controller' OR g.last_activity_at > now() - interval '2 hours')"
-                );
-                sqlx::query_as(&sql)
+                )
                     .bind(session_id)
                     .bind(token_hash)
+                    .bind(requested_role)
                     .fetch_optional(&self.pool)
                     .await?
             }
@@ -203,22 +201,20 @@ impl AccessStore {
             .fetch_optional(&self.pool)
             .await?,
             GrantKind::Controller | GrantKind::Viewer => {
-                let role_predicate = if kind == GrantKind::Controller {
-                    "g.role = 'controller'"
-                } else {
-                    "g.role IN ('viewer', 'viewer_interact')"
-                };
-                let sql = format!(
+                let requested_role = if kind == GrantKind::Controller { "controller" } else { "viewer" };
+                sqlx::query_scalar(
                     "SELECT 1 FROM device_grants g JOIN sessions s ON s.id = g.session_id \
                      WHERE s.id = $1 AND g.token_hash = $2 AND g.csrf_hash = $3 \
-                     AND {role_predicate} AND g.revoked_at IS NULL AND g.expires_at > now() \
+                     AND (($4 = 'controller' AND g.role = 'controller') OR \
+                          ($4 = 'viewer' AND g.role IN ('viewer', 'viewer_interact'))) \
+                     AND g.revoked_at IS NULL AND g.expires_at > now() \
                      AND s.status != 'closed' \
                      AND (g.role != 'controller' OR g.last_activity_at > now() - interval '2 hours')"
-                );
-                sqlx::query_scalar(&sql)
+                )
                     .bind(session_id)
                     .bind(hash_token(token).to_vec())
                     .bind(hash_token(csrf).to_vec())
+                    .bind(requested_role)
                     .fetch_optional(&self.pool)
                     .await?
             }

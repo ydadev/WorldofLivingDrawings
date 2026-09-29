@@ -640,8 +640,159 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(
-            app.oneshot(controller_foreign).await.unwrap().status(),
+            app.clone()
+                .oneshot(controller_foreign)
+                .await
+                .unwrap()
+                .status(),
             StatusCode::FORBIDDEN
         );
+
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let url = format!("ws://{address}/api/sessions/{}/ws", first_scene.session_id);
+        let mut read_request = url.as_str().into_client_request().unwrap();
+        read_request
+            .headers_mut()
+            .insert("origin", "https://world.example.test".parse().unwrap());
+        read_request.headers_mut().insert(
+            "cookie",
+            format!("__Host-ldw-viewer={}", read_only.token)
+                .parse()
+                .unwrap(),
+        );
+        let (mut reader, _) = tokio_tungstenite::connect_async(read_request)
+            .await
+            .unwrap();
+        reader
+            .send(ClientMessage::text(
+                serde_json::json!({"type":"hello","csrf":read_only.csrf}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let reader_snapshot: serde_json::Value =
+            serde_json::from_str(reader.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(reader_snapshot["type"], "snapshot");
+        assert_eq!(reader_snapshot["revision"], 1);
+        assert_eq!(
+            reader_snapshot["pendingInteractions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut interactive_request = url.as_str().into_client_request().unwrap();
+        interactive_request
+            .headers_mut()
+            .insert("origin", "https://world.example.test".parse().unwrap());
+        interactive_request.headers_mut().insert(
+            "cookie",
+            format!("__Host-ldw-viewer={}", interactive.token)
+                .parse()
+                .unwrap(),
+        );
+        let (mut writer, _) = tokio_tungstenite::connect_async(interactive_request)
+            .await
+            .unwrap();
+        writer
+            .send(ClientMessage::text(
+                serde_json::json!({"type":"hello","csrf":interactive.csrf}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let writer_snapshot: serde_json::Value =
+            serde_json::from_str(writer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(writer_snapshot["revision"], reader_snapshot["revision"]);
+        let command = realtime::InteractionCommand {
+            command_id: Uuid::new_v4(),
+            scene_epoch: 2,
+            interaction_id: "boat".to_owned(),
+            expires_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+                + 8000,
+            ..interaction.clone()
+        };
+        writer
+            .send(ClientMessage::text(
+                serde_json::to_string(&command).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let ack: serde_json::Value =
+            serde_json::from_str(writer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(ack["accepted"], true);
+        assert_eq!(ack["revision"], 2);
+        let writer_delta: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        let reader_delta: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(writer_delta, reader_delta);
+        assert_eq!(writer_delta["type"], "delta");
+        assert_eq!(writer_delta["revision"], 2);
+        drop(reader);
+        let mut reconnect_request = url.as_str().into_client_request().unwrap();
+        reconnect_request
+            .headers_mut()
+            .insert("origin", "https://world.example.test".parse().unwrap());
+        reconnect_request.headers_mut().insert(
+            "cookie",
+            format!("__Host-ldw-viewer={}", read_only.token)
+                .parse()
+                .unwrap(),
+        );
+        let (mut reader_again, _) = tokio_tungstenite::connect_async(reconnect_request)
+            .await
+            .unwrap();
+        reader_again
+            .send(ClientMessage::text(
+                serde_json::json!({"type":"hello","csrf":read_only.csrf}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let recovered: serde_json::Value = serde_json::from_str(
+            reader_again
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered["revision"], 2);
+        assert_eq!(
+            recovered["pendingInteractions"].as_array().unwrap().len(),
+            2
+        );
+        server.abort();
     }
 }
