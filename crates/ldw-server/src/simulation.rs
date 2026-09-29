@@ -632,7 +632,10 @@ async fn apply_pending_interactions(
             continue;
         }
         let interaction = entry.get("interactionId").and_then(Value::as_str);
-        if !matches!(interaction, Some("feed" | "boat")) {
+        if !matches!(
+            interaction,
+            Some("feed" | "boat" | "cancel_feed" | "cancel_boat")
+        ) {
             remaining.push(entry);
             continue;
         }
@@ -641,20 +644,38 @@ async fn apply_pending_interactions(
             .and_then(Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok())
             .ok_or(SimulationError::InvalidScene)?;
-        let point: Point = serde_json::from_value(
-            entry
-                .get("point")
-                .cloned()
-                .ok_or(SimulationError::InvalidScene)?,
-        )?;
-        if interaction == Some("feed") {
-            candidate
-                .start_feed(&id.simple().to_string(), point)
-                .map_err(|_| SimulationError::InvalidScene)?;
+        if matches!(interaction, Some("cancel_feed" | "cancel_boat")) {
+            let prefix = if interaction == Some("cancel_feed") {
+                "feed-"
+            } else {
+                "boat-"
+            };
+            let target = entry
+                .get("targetActionId")
+                .and_then(Value::as_str)
+                .and_then(|value| value.strip_prefix(prefix))
+                .ok_or(SimulationError::InvalidScene)?;
+            if interaction == Some("cancel_feed") {
+                candidate.cancel_feed(target);
+            } else {
+                candidate.cancel_boat(target);
+            }
         } else {
-            candidate
-                .start_boat(&id.simple().to_string(), point)
-                .map_err(|_| SimulationError::InvalidScene)?;
+            let point: Point = serde_json::from_value(
+                entry
+                    .get("point")
+                    .cloned()
+                    .ok_or(SimulationError::InvalidScene)?,
+            )?;
+            if interaction == Some("feed") {
+                candidate
+                    .start_feed(&id.simple().to_string(), point)
+                    .map_err(|_| SimulationError::InvalidScene)?;
+            } else {
+                candidate
+                    .start_boat(&id.simple().to_string(), point)
+                    .map_err(|_| SimulationError::InvalidScene)?;
+            }
         }
         applied.push(id);
     }
@@ -1177,6 +1198,7 @@ mod tests {
                                 scene_epoch: 1,
                                 interaction_id: interaction_id.into(),
                                 point,
+                                target_action_id: None,
                                 expires_at: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
@@ -1340,6 +1362,7 @@ mod tests {
                     scene_epoch: 1,
                     interaction_id: "feed".into(),
                     point: realtime::Point { x: 0.0, y: 0.0 },
+                    target_action_id: None,
                     expires_at: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -1777,6 +1800,7 @@ mod tests {
             scene_epoch: 1,
             interaction_id: "feed".into(),
             point: realtime::Point { x: 0.0, y: 0.0 },
+            target_action_id: None,
             expires_at,
         };
         let rejected =
@@ -1882,6 +1906,7 @@ mod tests {
             scene_epoch: 1,
             interaction_id: "boat".into(),
             point: realtime::Point { x: 1.0, y: 0.0 },
+            target_action_id: None,
             expires_at: now_ms + 8_000,
         };
         let ack = realtime::process_command(&store, GrantKind::Owner, &token, session, &command)
@@ -1998,6 +2023,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_cancels_pending_feed_once_and_controller_cannot_cancel_it() {
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scene_id = Uuid::new_v4();
+        let owner_token = Uuid::new_v4().to_string();
+        let owner_hash: [u8; 32] = Sha256::digest(owner_token.as_bytes()).into();
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("cancel-{owner}")).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+                     VALUES ($1, $2, $3, $3, now() + interval '1 day')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(owner_hash.to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+            .bind(session)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version) VALUES ($1, $2, 'underwater', 1)")
+            .bind(scene_id).bind(session).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let controller_token = Uuid::new_v4().to_string();
+        let controller_hash: [u8; 32] = Sha256::digest(controller_token.as_bytes()).into();
+        sqlx::query(
+            "INSERT INTO device_grants \
+            (id, session_id, participant_id, role, token_hash, csrf_hash, expires_at) \
+            VALUES ($1, $2, $3, 'controller', $4, $4, now() + interval '1 day')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(session)
+        .bind(Uuid::new_v4())
+        .bind(controller_hash.to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let store = AccessStore::new(pool.clone(), [31; 32]);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let start = InteractionCommand {
+            kind: "command".into(),
+            command_id: Uuid::new_v4(),
+            session_id: session,
+            scene_id,
+            scene_epoch: 1,
+            interaction_id: "feed".into(),
+            point: realtime::Point { x: 0.0, y: 0.0 },
+            target_action_id: None,
+            expires_at: now_ms + 8_000,
+        };
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &owner_token, session, &start)
+                .await
+                .unwrap()["accepted"],
+            true
+        );
+        let target = format!("feed-{}", start.command_id.simple());
+        let cancel = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            interaction_id: "cancel_feed".into(),
+            target_action_id: Some(target.clone()),
+            ..start.clone()
+        };
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                GrantKind::Controller,
+                &controller_token,
+                session,
+                &cancel
+            )
+            .await
+            .unwrap()["code"],
+            "OWNER_REQUIRED"
+        );
+        let accepted =
+            realtime::process_command(&store, GrantKind::Owner, &owner_token, session, &cancel)
+                .await
+                .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &owner_token, session, &cancel)
+                .await
+                .unwrap(),
+            accepted
+        );
+        let second_cancel = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            ..cancel.clone()
+        };
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                GrantKind::Owner,
+                &owner_token,
+                session,
+                &second_cancel
+            )
+            .await
+            .unwrap()["code"],
+            "ACTION_NOT_ACTIVE"
+        );
+        let (stop, receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver,
+            SimulationHub::default(),
+            Duration::from_millis(5),
+        ));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if state["pendingInteractions"]
+                    .as_array()
+                    .is_some_and(|pending| pending.is_empty())
+                {
+                    assert!(state["activeActions"].as_array().unwrap().is_empty());
+                    break;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        assert!(
+            load_scene(&pool, scene_id)
+                .await
+                .unwrap()
+                .world
+                .feed_sources()
+                .is_empty()
+        );
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                GrantKind::Owner,
+                &owner_token,
+                session,
+                &second_cancel
+            )
+            .await
+            .unwrap()["code"],
+            "ACTION_NOT_ACTIVE"
+        );
+    }
+
+    #[tokio::test]
     async fn accepted_feed_is_applied_once_consumed_and_restored() {
         let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
@@ -2045,6 +2237,7 @@ mod tests {
             scene_epoch: 1,
             interaction_id: "feed".into(),
             point: realtime::Point { x: 0.0, y: 0.0 },
+            target_action_id: None,
             expires_at: now_ms + 8_000,
         };
         let outside = InteractionCommand {

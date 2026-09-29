@@ -67,6 +67,22 @@ fn validate_interaction(
     if access.scene.world_id != world.id || access.scene.world_version != world.version {
         return Some("UNSUPPORTED_WORLD");
     }
+    if matches!(
+        command.interaction_id.as_str(),
+        "cancel_feed" | "cancel_boat"
+    ) {
+        if !command.point.x.is_finite() || !command.point.y.is_finite() {
+            return Some("INVALID_COMMAND");
+        }
+        return if cancellation_target(command).is_some() {
+            None
+        } else {
+            Some("INVALID_ACTION_TARGET")
+        };
+    }
+    if command.target_action_id.is_some() {
+        return Some("INVALID_ACTION_TARGET");
+    }
     let Some(definition) = interactions
         .iter()
         .find(|item| item.id == command.interaction_id)
@@ -88,6 +104,24 @@ fn validate_interaction(
         return Some("OUTSIDE_WATER");
     }
     None
+}
+
+fn cancellation_target(command: &InteractionCommand) -> Option<&str> {
+    let prefix = match command.interaction_id.as_str() {
+        "cancel_feed" => "feed-",
+        "cancel_boat" => "boat-",
+        _ => return None,
+    };
+    let id = command.target_action_id.as_deref()?.strip_prefix(prefix)?;
+    if id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        Some(id)
+    } else {
+        None
+    }
 }
 
 fn feed_limit_code(
@@ -211,6 +245,8 @@ pub struct InteractionCommand {
     pub scene_epoch: i64,
     pub interaction_id: String,
     pub point: Point,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_action_id: Option<String>,
     /// Unix milliseconds; a new interaction expires within ten seconds.
     pub expires_at: i64,
 }
@@ -592,6 +628,10 @@ pub async fn process_command(
         .map_err(|_| AccessError::Crypto)?
         .as_millis() as i64;
     let mut initial_checkpoint = None;
+    let cancelling = matches!(
+        command.interaction_id.as_str(),
+        "cancel_feed" | "cancel_boat"
+    );
     let mut code = if command.kind != "command" || command.session_id != session_id {
         Some("INVALID_COMMAND")
     } else if command.scene_id != access.scene.scene_id || command.scene_epoch != epoch {
@@ -600,6 +640,8 @@ pub async fn process_command(
         Some("EXPIRED_COMMAND")
     } else if !access.may_interact() {
         Some("READ_ONLY")
+    } else if cancelling && kind != GrantKind::Owner {
+        Some("OWNER_REQUIRED")
     } else if status != "running" {
         Some("SCENE_NOT_RUNNING")
     } else if let Some(reason) = validate_interaction(&access, command) {
@@ -607,6 +649,54 @@ pub async fn process_command(
     } else {
         None
     };
+    if code.is_none() && cancelling {
+        let id = cancellation_target(command).ok_or(AccessError::SceneState)?;
+        let target = command
+            .target_action_id
+            .as_deref()
+            .ok_or(AccessError::SceneState)?;
+        let active = if let Some(value) = state.get("simulation") {
+            let checkpoint: WorldCheckpoint =
+                serde_json::from_value(value.clone()).map_err(|_| AccessError::SceneState)?;
+            if checkpoint.tick != persisted_tick as u64 {
+                return Err(AccessError::SceneState);
+            }
+            let world = World::restore(checkpoint).map_err(|_| AccessError::SceneState)?;
+            if command.interaction_id == "cancel_feed" {
+                world.feed_sources().iter().any(|source| source.id == id)
+            } else {
+                world.boat().is_some_and(|boat| boat.id == id)
+            }
+        } else {
+            false
+        };
+        let pending = match state.get("pendingInteractions") {
+            None => &[][..],
+            Some(Value::Array(entries)) => entries.as_slice(),
+            _ => return Err(AccessError::SceneState),
+        };
+        let start_kind = if command.interaction_id == "cancel_feed" {
+            "feed"
+        } else {
+            "boat"
+        };
+        let awaiting_start = pending.iter().any(|entry| {
+            entry.get("interactionId").and_then(Value::as_str) == Some(start_kind)
+                && entry
+                    .get("commandId")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .is_some_and(|value| value.simple().to_string() == id)
+        });
+        let already_cancelling = pending.iter().any(|entry| {
+            entry.get("targetActionId").and_then(Value::as_str) == Some(target)
+                && entry.get("interactionId").and_then(Value::as_str)
+                    == Some(command.interaction_id.as_str())
+        });
+        if (!active && !awaiting_start) || already_cancelling {
+            code = Some("ACTION_NOT_ACTIVE");
+        }
+    }
     if code.is_none() && matches!(command.interaction_id.as_str(), "feed" | "boat") {
         let mut world = if let Some(value) = state.get("simulation") {
             let checkpoint: WorldCheckpoint =
@@ -673,8 +763,11 @@ pub async fn process_command(
         "accepted":code.is_none(),"code":code.unwrap_or("ACCEPTED"),
         "sceneId":access.scene.scene_id,"sceneEpoch":epoch,"revision":new_revision});
     if code.is_none() {
-        let event = json!({"type":"interaction_requested","commandId":command.command_id,
+        let mut event = json!({"type":"interaction_requested","commandId":command.command_id,
             "interactionId":command.interaction_id,"point":command.point});
+        if let Some(target) = &command.target_action_id {
+            event["targetActionId"] = json!(target);
+        }
         let object = state.as_object_mut().ok_or(AccessError::SceneState)?;
         object
             .entry("pendingInteractions")

@@ -75,6 +75,7 @@ export interface InteractionRequested {
   commandId: string;
   interactionId: string;
   point: Point2;
+  targetActionId?: string;
 }
 export interface EntityPublished {
   type: 'entity_published';
@@ -146,6 +147,7 @@ export interface RealtimeCommand {
   sceneEpoch: number;
   interactionId: string;
   point: Point2;
+  targetActionId?: string;
   expiresAt: number;
 }
 export interface RealtimeAck {

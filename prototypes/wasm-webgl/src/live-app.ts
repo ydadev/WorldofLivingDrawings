@@ -263,6 +263,7 @@ function mount(): void {
   ui = new WorldInteractionUi({
     world, sessionId, csrf, origin: location.origin, interactive,
     onDemand: controller,
+    canCancelActions: role === 'owner',
     elements: {
       canvas: document.querySelector<HTMLCanvasElement>('#world-canvas')!,
       stage: document.querySelector<HTMLElement>('#world-stage')!,
@@ -273,6 +274,7 @@ function mount(): void {
       cancel: document.querySelector<HTMLButtonElement>('#action-cancel')!,
       toggle: document.querySelector<HTMLButtonElement>('#view-toggle') ?? undefined,
       placeFish: document.querySelector<HTMLButtonElement>('#fish-place') ?? undefined,
+      activeActions: document.querySelector<HTMLElement>('#active-actions') ?? undefined,
     },
     onPlaceFish: role === 'viewer' ? undefined : placeFish,
     rendererFactory: canvas => {

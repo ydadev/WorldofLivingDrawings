@@ -53,6 +53,9 @@ a { color: #92d9f0; }
 .live-approve { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; margin: 1rem 0; }
 .live-approve label:first-child { display: grid; gap: .2rem; }
 .live-approve input[name="code"] { padding: .5rem; font: inherit; width: 9rem; }
+.active-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.active-action { display: flex; align-items: center; gap: .6rem; padding: .4rem .6rem;
+  border: 1px solid #5891a6; border-radius: .5rem; }
 .live-stage { position: relative; width: 100%; margin-top: .5rem; }
 .live-editor { margin: 1rem 0; }
 .live-editor iframe { display: block; width: 100%; height: min(78vh, 850px); border: 1px solid #5891a6; border-radius: 8px; background: #092d3b; }

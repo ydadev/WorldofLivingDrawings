@@ -373,6 +373,20 @@ impl World {
         Ok(())
     }
 
+    pub fn cancel_feed(&mut self, id: &str) -> bool {
+        let before = self.feed_sources.len();
+        self.feed_sources.retain(|source| source.id != id);
+        if self.feed_sources.len() == before {
+            return false;
+        }
+        for fish in &mut self.fish {
+            if fish.feeding.as_deref() == Some(id) {
+                fish.feeding = None;
+            }
+        }
+        true
+    }
+
     pub fn add_obstacle(&mut self, obstacle: Circle) -> Result<(), SimError> {
         if self.obstacles.len() >= MAX_OBSTACLES {
             return Err(SimError::ObstacleLimit);
@@ -1280,6 +1294,25 @@ mod tests {
             assert!(!point_blocked(world.fish()[0].position, world.obstacles()));
         }
         assert_eq!(world.feed_sources()[0].remaining, 9);
+    }
+
+    #[test]
+    fn cancelling_feed_releases_only_its_fish_assignments() {
+        let mut world = World::new(bounds(), 31).unwrap();
+        world.spawn_fish(7, Point { x: -1.0, y: 0.0 }, 1.0).unwrap();
+        let first = "00000000000000000000000000000001";
+        let second = "00000000000000000000000000000002";
+        world.start_feed(first, Point { x: 1.0, y: 0.0 }).unwrap();
+        world.start_feed(second, Point { x: 5.0, y: 0.0 }).unwrap();
+        world.step();
+        assert_eq!(world.fish()[0].feeding.as_deref(), Some(first));
+        assert!(!world.cancel_feed("00000000000000000000000000000003"));
+        assert!(world.cancel_feed(first));
+        assert_eq!(world.fish()[0].feeding, None);
+        assert_eq!(world.feed_sources().len(), 1);
+        assert_eq!(world.feed_sources()[0].id, second);
+        assert!(!world.cancel_feed(first));
+        World::restore(world.checkpoint()).unwrap();
     }
 
     #[test]

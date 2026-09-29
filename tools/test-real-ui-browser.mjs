@@ -312,6 +312,19 @@ try {
     frame.event.activeActions?.some(action => action.interactionId === 'feed'));
   await owner.waitForFunction(() => !document.querySelector('#action-feed').disabled,
     null, { timeout: 20000 });
+  const feedCancel = owner.locator('#active-actions button[data-action-id^="feed-"]');
+  await feedCancel.waitFor({ state: 'visible', timeout: 20000 });
+  await feedCancel.click();
+  const feedCancelRequested = await waitFrame(ownerFrames, frame => frame.type === 'delta' &&
+    frame.event?.type === 'interaction_requested' && frame.event.interactionId === 'cancel_feed');
+  assert(feedCancelRequested.event.targetActionId.startsWith('feed-'),
+    'Owner did not name the active feed source');
+  await waitFrame(mobileFrames, frame => frame.type === 'delta' &&
+    frame.event?.type === 'interaction_state' &&
+    frame.event.appliedCommandIds.includes(feedCancelRequested.event.commandId) &&
+    !frame.event.activeActions.some(action => action.id === feedCancelRequested.event.targetActionId));
+  assert(await mobile.locator('#active-actions').count() === 0,
+    'Controller gained Owner-only cancellation controls');
 
   await mobile.locator('#action-boat').click();
   await point(mobile, .25, .75, true);
@@ -325,11 +338,24 @@ try {
     frame.event.activeActions?.some(action => action.interactionId === 'boat'));
   await waitFrame(ownerFrames, frame => frame.type === 'positions' &&
     frame.actionPositions?.some(action => action.id.startsWith('boat-')));
+  const boatCancel = owner.locator('#active-actions button[data-action-id^="boat-"]');
+  await boatCancel.waitFor({ state: 'visible', timeout: 20000 });
+  await boatCancel.click();
+  const boatCancelRequested = await waitFrame(ownerFrames, frame => frame.type === 'delta' &&
+    frame.event?.type === 'interaction_requested' && frame.event.interactionId === 'cancel_boat');
+  assert(boatCancelRequested.event.targetActionId.startsWith('boat-'),
+    'Owner did not name the active boat');
+  await waitFrame(mobileFrames, frame => frame.type === 'delta' &&
+    frame.event?.type === 'interaction_state' &&
+    frame.event.appliedCommandIds.includes(boatCancelRequested.event.commandId) &&
+    !frame.event.activeActions.some(action => action.id === boatCancelRequested.event.targetActionId));
+  await owner.waitForFunction(() => !document.querySelector('#active-actions button'),
+    null, { timeout: 20000 });
 
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
   await verifyRecoveredScene(sessionId, published.event.entity.paintBlobId,
     paperPublished.event.entity.paintBlobId);
-  console.log('CORE-04 real backend UI: HTTPS cookies, PostgreSQL, drawn and paper fish publication, Owner, Viewer, Controller, feed and boat: PASS');
+  console.log('MVP-03 real backend UI: Owner, Viewer, Controller, fish publication, feed and boat with Owner cancellation: PASS');
 } finally {
   await browser?.close();
   if (proxy.listening) {

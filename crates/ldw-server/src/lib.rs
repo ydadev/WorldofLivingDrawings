@@ -230,6 +230,7 @@ mod tests {
             scene_epoch: 1,
             interaction_id: "boat".to_owned(),
             point: realtime::Point { x: 1.0, y: -1.0 },
+            target_action_id: None,
             expires_at: now_ms + 8000,
         };
         let rejected = realtime::process_command(

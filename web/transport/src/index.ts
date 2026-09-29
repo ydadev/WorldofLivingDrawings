@@ -83,13 +83,14 @@ export class SceneConnection {
     this.open();
   }
 
-  sendInteraction(interactionId: string, point: Point2): string | null {
+  sendInteraction(interactionId: string, point: Point2, targetActionId?: string): string | null {
     if (this.state !== 'ready' || !this.socket || !this.sceneId ||
         !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
     const command: RealtimeCommand = {
       type: 'command', commandId: crypto.randomUUID(), sessionId: this.options.sessionId,
       sceneId: this.sceneId, sceneEpoch: this.sceneEpoch,
-      interactionId, point, expiresAt: this.now() + this.serverOffsetMs + 10_000,
+      interactionId, point, ...(targetActionId ? { targetActionId } : {}),
+      expiresAt: this.now() + this.serverOffsetMs + 10_000,
     };
     this.pending.set(command.commandId, command);
     try { this.socket.send(JSON.stringify(command)); }

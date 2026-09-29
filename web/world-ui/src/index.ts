@@ -1,8 +1,9 @@
-import type { Point2, RealtimeAck, RealtimeDelta, RealtimeSnapshot, WorldDefinition } from '@ldw/contracts';
+import type { ActiveAction, Point2, RealtimeAck, RealtimeDelta, RealtimeSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter, RendererFactory } from '@ldw/renderer';
 import { SceneConnection, type ConnectionState } from '@ldw/transport';
 
 type Action = 'feed' | 'boat';
+type CancelAction = 'cancel_feed' | 'cancel_boat';
 type Selection = Action | 'fish';
 
 export interface WorldUiElements {
@@ -15,6 +16,7 @@ export interface WorldUiElements {
   crosshair: HTMLElement;
   toggle?: HTMLButtonElement;
   placeFish?: HTMLButtonElement;
+  activeActions?: HTMLElement;
 }
 
 export interface WorldUiOptions {
@@ -28,6 +30,7 @@ export interface WorldUiOptions {
   onDemand?: boolean;
   rendererFactory: RendererFactory;
   onPlaceFish?: (point: Point2) => void;
+  canCancelActions?: boolean;
   createSocket?: (url: string) => WebSocket;
 }
 
@@ -44,13 +47,18 @@ const REASONS: Record<string, string> = {
   SCENE_NOT_RUNNING: 'Сцена сейчас остановлена.',
   SIMULATED_SESSION_LIMIT: 'Уже работают три мира. Повторите, когда один из них остановится.',
   EXPIRED_COMMAND: 'Команда устарела. Выберите точку ещё раз.',
+  OWNER_REQUIRED: 'Отменять активные события может только владелец мира.',
+  ACTION_NOT_ACTIVE: 'Это событие уже завершилось. Сцена обновлена.',
+  INVALID_ACTION_TARGET: 'Не удалось определить событие для отмены.',
 };
 
 export class WorldInteractionUi {
   private readonly connection: SceneConnection;
   private renderer: RendererAdapter | null = null;
   private selected: Selection | null = null;
-  private pending: { id: string; action: Action; accepted: boolean; absentInSnapshot: boolean } | null = null;
+  private pending: { id: string; action: Action | CancelAction; targetActionId?: string;
+    accepted: boolean; absentInSnapshot: boolean } | null = null;
+  private activeActions: ActiveAction[] = [];
   private pointer: { id: number; x: number; y: number; at: number } | null = null;
   private keyboardPoint: Point2 = { x: 0, y: 0 };
   private state: ConnectionState = 'offline';
@@ -239,6 +247,45 @@ export class WorldInteractionUi {
     this.updateControls();
   }
 
+  private cancelActiveAction(action: ActiveAction): void {
+    if (!this.options.canCancelActions || !this.canInteract()) return;
+    const kind: CancelAction = action.interactionId === 'feed' ? 'cancel_feed' : 'cancel_boat';
+    const id = this.connection.sendInteraction(kind, action.point, action.id);
+    if (!id) {
+      this.setStatus('Связь прервалась. Дождитесь подключения.');
+      return;
+    }
+    this.pending = { id, action: kind, targetActionId: action.id,
+      accepted: false, absentInSnapshot: false };
+    this.setStatus('Отмена отправлена. Ждём решение сервера…');
+    this.updateControls();
+  }
+
+  private renderActiveActions(): void {
+    const container = this.options.elements.activeActions;
+    if (!container || !this.options.canCancelActions) return;
+    container.replaceChildren();
+    if (!this.activeActions.length) {
+      container.textContent = 'Активных событий нет.';
+      return;
+    }
+    for (const action of this.activeActions) {
+      const row = document.createElement('div');
+      row.className = 'active-action';
+      const label = document.createElement('span');
+      label.textContent = action.interactionId === 'feed'
+        ? `Корм: осталось ${action.remaining} порций` : 'Подводная лодка плывёт';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.actionId = action.id;
+      button.textContent = action.interactionId === 'feed' ? 'Убрать корм' : 'Убрать лодку';
+      button.disabled = !this.canInteract();
+      button.addEventListener('click', () => this.cancelActiveAction(action));
+      row.append(label, button);
+      container.append(row);
+    }
+  }
+
   private onState(state: ConnectionState): void {
     this.state = state;
     if (state === 'offline') this.setStatus('Связь прервалась. Подключаемся снова…');
@@ -250,9 +297,16 @@ export class WorldInteractionUi {
 
   private onSnapshot(snapshot: RealtimeSnapshot): void {
     this.renderer?.applySnapshot(snapshot);
+    this.activeActions = snapshot.activeActions;
+    this.renderActiveActions();
     if (this.pending) {
       const id = this.pending.id.replace(/-/g, '');
-      if (snapshot.activeActions.some(action => action.id.endsWith(id))) {
+      if (this.pending.targetActionId &&
+          !snapshot.activeActions.some(action => action.id === this.pending?.targetActionId)) {
+        this.pending = null;
+        this.setStatus('Событие отменено.');
+      } else if (!this.pending.targetActionId &&
+          snapshot.activeActions.some(action => action.id.endsWith(id))) {
         this.pending = null;
         this.setStatus('Действие началось.');
       } else if (snapshot.pendingInteractions.some(item => item.commandId === this.pending?.id)) {
@@ -267,8 +321,11 @@ export class WorldInteractionUi {
   private onDelta(delta: RealtimeDelta): void {
     this.renderer?.applyDelta(delta);
     if (delta.event.type !== 'interaction_state') return;
+    this.activeActions = delta.event.activeActions;
+    this.renderActiveActions();
     if (this.pending && delta.event.appliedCommandIds.includes(this.pending.id)) {
-      this.setStatus(this.pending.action === 'feed' ? 'Корм появился в мире.' : 'Лодка появилась в мире.');
+      this.setStatus(this.pending.targetActionId ? 'Событие отменено.' :
+        this.pending.action === 'feed' ? 'Корм появился в мире.' : 'Лодка появилась в мире.');
       this.pending = null;
       this.updateControls();
     }
@@ -288,7 +345,9 @@ export class WorldInteractionUi {
         this.setStatus('Действие подтверждено. Сцена синхронизирована.');
       } else {
         this.pending.accepted = true;
-        this.setStatus('Принято сервером. Ждём появления события…');
+        this.setStatus(this.pending.targetActionId
+          ? 'Отмена принята сервером. Ждём обновления сцены…'
+          : 'Принято сервером. Ждём появления события…');
       }
     }
     this.updateControls();
@@ -306,6 +365,9 @@ export class WorldInteractionUi {
       placeFish.setAttribute('aria-pressed', String(this.selected === 'fish'));
     }
     cancel.disabled = !this.selected;
+    this.options.elements.activeActions?.querySelectorAll('button').forEach(button => {
+      button.disabled = !this.canInteract();
+    });
     feed.setAttribute('aria-pressed', String(this.selected === 'feed'));
     boat.setAttribute('aria-pressed', String(this.selected === 'boat'));
     if (!this.selected) crosshair.hidden = true;
