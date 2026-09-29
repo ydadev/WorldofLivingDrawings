@@ -11,6 +11,7 @@ on:
       - 'tools/test-fish-browser.mjs'
       - 'tools/test-paint-browser.mjs'
       - 'tools/test-capture-browser.mjs'
+      - 'tools/test-interaction-browser.mjs'
   pull_request:
     paths:
       - '.github/workflows/risk-01.yml'
@@ -22,6 +23,7 @@ on:
       - 'tools/test-fish-browser.mjs'
       - 'tools/test-paint-browser.mjs'
       - 'tools/test-capture-browser.mjs'
+      - 'tools/test-interaction-browser.mjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -60,3 +62,6 @@ jobs:
       - name: Run Chrome paper capture synthetic probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:capture
+      - name: Run Chrome two-screen interaction probe
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:interaction

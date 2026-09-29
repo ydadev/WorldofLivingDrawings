@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Проверка действий на двух экранах</title>
+  </head>
+  <body>
+    <main class="interaction-main">
+      <h1>Подводный мир: проверка действий</h1>
+      <p>Выбери действие, затем один раз укажи место в воде. Все подключённые экраны получают результат сервера.</p>
+      <div class="interaction-controls">
+        <button type="button" id="action-feed" disabled>Корм</button>
+        <button type="button" id="action-boat" disabled>Подводная лодка</button>
+        <button type="button" id="action-cancel" disabled>Отмена</button>
+      </div>
+      <p id="interaction-status" role="status">Подключение…</p>
+      <div class="interaction-stage"><canvas id="interaction-scene" aria-label="Фиксированный боковой вид подводного мира"></canvas></div>
+      <p id="interaction-events" aria-live="polite"></p>
+    </main>
+    <script type="module" src="/src/interaction.ts"></script>
+  </body>
+</html>
