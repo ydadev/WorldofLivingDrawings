@@ -961,7 +961,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
 
     #[tokio::test]
-    #[ignore = "run against a fresh PostgreSQL database to measure three runners and 30 Controllers"]
+    #[ignore = "run against a fresh PostgreSQL database to measure three runners, 30 Controllers and 3 Viewers"]
     async fn three_hundred_fish_progress_across_three_real_time_scenes() {
         let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
@@ -1054,7 +1054,8 @@ mod tests {
             .unwrap();
         });
         let mut controllers = tokio::task::JoinSet::new();
-        let client_start = Arc::new(tokio::sync::Barrier::new(31));
+        let mut viewers = tokio::task::JoinSet::new();
+        let client_start = Arc::new(tokio::sync::Barrier::new(34));
         let command_times = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
             Uuid,
             tokio::time::Instant,
@@ -1239,6 +1240,135 @@ mod tests {
                     (scene_number, controller_number, count, last_tick, accepted, reconnected, action_latencies)
                 });
             }
+            let viewer_token = format!("load-viewer-{}", Uuid::new_v4());
+            let viewer_csrf = format!("load-viewer-csrf-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO device_grants (id, session_id, participant_id, role, \
+                 token_hash, csrf_hash, expires_at) \
+                 VALUES ($1, $2, $3, 'viewer', $4, $5, now() + interval '1 hour')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(session_id)
+            .bind(Uuid::new_v4())
+            .bind(crate::access::hash_token(&viewer_token).to_vec())
+            .bind(crate::access::hash_token(&viewer_csrf).to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut request = url.as_str().into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("origin", "https://world.example.test".parse().unwrap());
+            request.headers_mut().insert(
+                "cookie",
+                format!("__Host-ldw-viewer={viewer_token}").parse().unwrap(),
+            );
+            let (mut socket, _) = timeout(
+                Duration::from_secs(3),
+                tokio_tungstenite::connect_async(request),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            socket
+                .send(ClientMessage::text(
+                    json!({"type":"hello","csrf":viewer_csrf}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let snapshot: Value = serde_json::from_str(
+                timeout(Duration::from_secs(3), socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .to_text()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(snapshot["type"], "snapshot");
+            assert_eq!(snapshot["sceneId"], scene_id.to_string());
+            assert_eq!(
+                snapshot["entities"].as_array().unwrap().len(),
+                ldw_sim::MAX_FISH
+            );
+            let client_start = client_start.clone();
+            viewers.spawn(async move {
+                client_start.wait().await;
+                let command = InteractionCommand {
+                    kind: "command".into(),
+                    command_id: Uuid::new_v4(),
+                    session_id,
+                    scene_id,
+                    scene_epoch: 1,
+                    interaction_id: "feed".into(),
+                    point: realtime::Point { x: 0.0, y: 0.0 },
+                    expires_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64
+                        + 8_000,
+                };
+                socket
+                    .send(ClientMessage::text(
+                        serde_json::to_string(&command).unwrap(),
+                    ))
+                    .await
+                    .unwrap();
+                let mut count = 0;
+                let mut last_tick = 0;
+                let mut read_only = false;
+                let mut actions = std::collections::HashSet::new();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+                while let Some(remaining) =
+                    deadline.checked_duration_since(tokio::time::Instant::now())
+                {
+                    let message = match timeout(remaining, socket.next()).await {
+                        Ok(Some(Ok(message))) => message,
+                        Ok(other) => panic!("scene {scene_number} Viewer closed: {other:?}"),
+                        Err(_) => break,
+                    };
+                    match message {
+                        ClientMessage::Text(text) => {
+                            let value: Value = serde_json::from_str(&text).unwrap();
+                            if value["type"] == "positions" {
+                                assert_eq!(value["sceneId"], scene_id.to_string());
+                                assert_eq!(
+                                    value["positions"].as_array().unwrap().len(),
+                                    ldw_sim::MAX_FISH
+                                );
+                                let tick = value["simulationTick"].as_u64().unwrap();
+                                assert!(tick > last_tick);
+                                last_tick = tick;
+                                count += 1;
+                            } else if value["type"] == "ack" {
+                                assert_eq!(value["accepted"], false, "{value}");
+                                assert_eq!(value["code"], "READ_ONLY", "{value}");
+                                read_only = true;
+                            } else if value["type"] == "delta" {
+                                assert_eq!(value["sceneId"], scene_id.to_string());
+                                if let Some(applied) =
+                                    value["event"]["appliedCommandIds"].as_array()
+                                {
+                                    for command_id in [feed_command_id, boat_command_id] {
+                                        if applied.iter().any(|id| id == &command_id.to_string()) {
+                                            actions.insert(command_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ClientMessage::Ping(payload) => {
+                            socket.send(ClientMessage::Pong(payload)).await.unwrap();
+                        }
+                        ClientMessage::Close(_) => {
+                            panic!("scene {scene_number} Viewer closed early")
+                        }
+                        _ => {}
+                    }
+                }
+                (scene_number, count, last_tick, read_only, actions.len())
+            });
         }
         client_start.wait().await;
         let started = tokio::time::Instant::now();
@@ -1299,8 +1429,23 @@ mod tests {
             }
             action_latencies.extend(observed.into_values());
         }
+        let mut viewer_frames = 0;
+        while let Some(result) = viewers.join_next().await {
+            let (scene_number, count, last_tick, read_only, actions) = result.unwrap();
+            assert!(
+                count >= 18 && last_tick >= 180,
+                "scene {scene_number} Viewer received {count} frames, last tick {last_tick}"
+            );
+            assert!(read_only, "scene {scene_number} Viewer accepted a command");
+            assert_eq!(
+                actions, 2,
+                "scene {scene_number} Viewer missed an applied action"
+            );
+            viewer_frames += count;
+        }
         server.abort();
         println!("30 Controllers received {client_frames} position frames");
+        println!("3 read-only Viewers received {viewer_frames} position frames");
         action_latencies.sort_unstable();
         assert_eq!(action_latencies.len(), 60);
         let p95 = action_latencies[(action_latencies.len() * 95).div_ceil(100) - 1];
