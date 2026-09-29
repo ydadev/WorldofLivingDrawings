@@ -151,7 +151,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
           if (Math.hypot(item.heading.x, headingDepth) > .01)
             visual.targetYaw = Math.atan2(headingDepth, -item.heading.x);
           visual.targetPitch = Math.max(-.32, Math.min(.32,
-            Math.atan2(item.heading.y, Math.max(.3, Math.abs(item.heading.x))) * .28));
+            -Math.atan2(item.heading.y, Math.max(.3,
+              Math.hypot(item.heading.x, headingDepth))) * .28));
         }
       }
     }

@@ -140,6 +140,18 @@ try {
     depthVisual.yaw < Math.PI && depthVisual.noseDotHeading > .9 &&
     depthVisual.tailPresent && depthVisual.tailMoved,
     `Depth, turn and tail must animate: ${JSON.stringify(depthVisual)}`);
+  const climbVisual = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    adapter.applyPositions({ type: 'positions', schemaVersion: 1,
+      sceneId: 'scene-1', sceneEpoch: 1, revision: 1, simulationTick: 11,
+      positions: [{ id: 'fish-1', position: { x: 3, y: -1 }, depth: 1.2,
+        heading: { x: .8, y: .5 }, headingDepth: .3 }] });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const pitch = adapter.scene.getTransformNodeByName('fish-1').rotation.z;
+    return { pitch, noseUp: -Math.sin(pitch) };
+  });
+  assert(climbVisual.pitch < -.05 && climbVisual.noseUp > .05,
+    `Fish climbing in Y must raise its nose: ${JSON.stringify(climbVisual)}`);
   const afterStale = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyPositions({ type: 'positions', schemaVersion: 1, sceneId: 'scene-1',
