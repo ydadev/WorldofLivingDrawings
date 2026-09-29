@@ -33,8 +33,8 @@
 |---|---|---|---|
 | CORE-01 | DONE | TypeScript workspace, JSON Schema v1, renderer adapter, самодостаточный manifest с SHA-256; локально/CI PASS | RISK-03-TECH, RISK-04, RISK-05 |
 | CORE-02 | DONE | Rust/PG миграции, Admin/Owner, сессии/сцены, QR/PIN Controller, cookie/Origin/CSRF; SQL+HTTP тесты изоляции двух сессий в CI | CORE-01 |
-| CORE-03 | IN_PROGRESS | Viewer-доступ, WebSocket snapshots/deltas, команды, epoch, dedup, reconnect; повтор не меняет исход | CORE-02 |
-| CORE-04 | BACKLOG | Подводный пакет, серверный tick, навигация рыб, отображение и LOW-профиль | CORE-03 |
+| CORE-03 | DONE | Viewer/TV-активация, WebSocket snapshots/deltas, команды, epoch, dedup/reconnect; SQL+2 WS-клиента+Chrome/CI PASS | CORE-02 |
+| CORE-04 | READY | Подводный пакет, серверный tick, навигация рыб, отображение и LOW-профиль | CORE-03 |
 
 ## Этап 2 — законченные сценарии MVP
 
