@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
     extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -226,14 +226,14 @@ struct LoginResponse {
 
 async fn login(
     State(state): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(input): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), ApiError> {
     require_origin(&headers, &state)?;
     let peer_ip = peer
-        .map(|ConnectInfo(address)| address.ip().to_string())
+        .map(|Extension(ConnectInfo(address))| address.ip().to_string())
         .unwrap_or_else(|| "unknown-peer".to_owned());
     let grant = state
         .access
