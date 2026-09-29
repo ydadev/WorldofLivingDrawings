@@ -14,6 +14,7 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { Texture } from '@babylonjs/core/Materials/Textures/texture';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { Scene } from '@babylonjs/core/scene';
 import type { Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
@@ -28,10 +29,13 @@ export class BabylonRendererAdapter implements RendererAdapter {
   readonly engine: Engine;
   readonly scene: Scene;
   private readonly camera: FreeCamera;
-  private readonly markers = new Map<string, AbstractMesh>();
+  private readonly fallbackMaterial: StandardMaterial;
+  private readonly markers = new Map<string, TransformNode>();
+  private readonly loadingMarkers = new Map<string, AbstractMesh>();
   private readonly modelCache = new Map<string, Promise<AssetContainer>>();
   private readonly modelEntries = new Map<string, InstantiatedEntries>();
   private readonly paintTextures = new Map<string, Texture>();
+  private readonly paintMaterials = new Map<string, PBRMaterial[]>();
   private readonly entityVersions = new Map<string, string>();
   private readonly movement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
@@ -54,6 +58,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.camera.setTarget(Vector3.Zero());
     this.scene.activeCamera = this.camera;
     new HemisphericLight('ambient', new Vector3(0, 1, -1), this.scene).intensity = 1.2;
+    this.fallbackMaterial = new StandardMaterial('fish-loading', this.scene);
+    this.fallbackMaterial.diffuseColor = new Color3(.9, .72, .28);
     this.engine.runRenderLoop(() => { this.interpolate(); this.scene.render(); });
     this.resizeObserver = new ResizeObserver(() => this.resizeToBudget());
     this.resizeObserver.observe(canvas);
@@ -143,10 +149,11 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.movement.delete(entity.id);
     let marker = this.markers.get(entity.id);
     if (!marker) {
-      marker = MeshBuilder.CreateSphere(entity.id, { diameter: .45 }, this.scene);
-      const material = new StandardMaterial(`material-${entity.id}`, this.scene);
-      material.diffuseColor = new Color3(.9, .72, .28);
-      marker.material = material;
+      marker = new TransformNode(entity.id, this.scene);
+      const loading = MeshBuilder.CreateSphere(`${entity.id}/loading`, { diameter: .45 }, this.scene);
+      loading.parent = marker;
+      loading.material = this.fallbackMaterial;
+      this.loadingMarkers.set(entity.id, loading);
       this.markers.set(entity.id, marker);
       this.entityVersions.set(entity.id, version);
       if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])
@@ -164,15 +171,18 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.entityVersions.delete(id);
     this.paintTextures.get(id)?.dispose();
     this.paintTextures.delete(id);
+    this.loadingMarkers.get(id)?.dispose();
+    this.loadingMarkers.delete(id);
     this.modelEntries.get(id)?.dispose();
     this.modelEntries.delete(id);
+    for (const material of this.paintMaterials.get(id) ?? []) material.dispose();
+    this.paintMaterials.delete(id);
     const marker = this.markers.get(id);
-    marker?.material?.dispose();
     marker?.dispose();
     this.markers.delete(id);
   }
 
-  private async loadModel(entity: SceneEntity, marker: AbstractMesh): Promise<void> {
+  private async loadModel(entity: SceneEntity, marker: TransformNode): Promise<void> {
     const file = modelByDefinition[entity.definitionId];
     const url = new URL(file, new URL(this.assetBaseUrl, document.baseURI)).toString();
     let pending = this.modelCache.get(file);
@@ -182,32 +192,38 @@ export class BabylonRendererAdapter implements RendererAdapter {
     }
     const container = await pending;
     if (this.disposed || this.markers.get(entity.id) !== marker) return;
-    const entries = container.instantiateModelsToScene(name => `${entity.id}/${name}`, true,
+    for (const material of container.materials) {
+      if (material instanceof PBRMaterial) material.unlit = true;
+    }
+    const entries = container.instantiateModelsToScene(name => `${entity.id}/${name}`, false,
       { doNotInstantiate: true });
     if (this.disposed || this.markers.get(entity.id) !== marker) { entries.dispose(); return; }
     for (const root of entries.rootNodes) root.parent = marker;
     this.modelEntries.set(entity.id, entries);
-    for (const root of entries.rootNodes) {
-      for (const node of root.getDescendants(false)) {
-        if (node instanceof AbstractMesh && node.material instanceof PBRMaterial) {
-          node.material.unlit = true;
-        }
-      }
-    }
     if (entity.paintBlobId) {
       const texture = new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true);
       this.paintTextures.set(entity.id, texture);
+      const clonedMaterials = new Map<PBRMaterial, PBRMaterial>();
       for (const root of entries.rootNodes) {
         for (const node of root.getDescendants(false)) {
           if (node instanceof AbstractMesh && node.material instanceof PBRMaterial &&
-              (node.material.name === 'paint' || node.material.name.endsWith('/paint'))) {
-            node.material.albedoColor = Color3.White();
-            node.material.albedoTexture = texture;
+              node.material.name === 'paint') {
+            let material = clonedMaterials.get(node.material);
+            if (!material) {
+              material = node.material.clone(`${entity.id}/paint`);
+              material.unlit = true;
+              material.albedoColor = Color3.White();
+              material.albedoTexture = texture;
+              clonedMaterials.set(node.material, material);
+            }
+            node.material = material;
           }
         }
       }
+      this.paintMaterials.set(entity.id, [...clonedMaterials.values()]);
     }
-    marker.visibility = 0;
+    this.loadingMarkers.get(entity.id)?.dispose();
+    this.loadingMarkers.delete(entity.id);
   }
 
   private interpolate(now = performance.now()): void {

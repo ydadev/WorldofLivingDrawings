@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '../prototypes/wasm-webgl/node_modules/playwright-core/index.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const web = path.join(root, 'prototypes/wasm-webgl');
+const { PNG } = createRequire(import.meta.url)(path.join(web, 'node_modules/pngjs'));
 const chrome = process.env.LDW_CHROME_PATH || [
   'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium',
 ].find(existsSync);
@@ -72,7 +74,7 @@ try {
         { id: 'fish-2', definitionId: 'coral-fish',
           definitionVersion: 1, position: { x: -2, y: 1 }, paintBlobId: 'blue' },
       ], remove: [] });
-    const mesh = adapter.scene.getMeshByName('fish-1');
+    const mesh = adapter.scene.getTransformNodeByName('fish-1');
     return { gapRejected, wrongWorldRejected, inserted: mesh?.position.asArray() };
   });
   assert(result.gapRejected && result.wrongWorldRejected);
@@ -92,38 +94,53 @@ try {
     const meshes = window.coreAdapter.scene.meshes;
     const paint = id => meshes.find(mesh => mesh.name.startsWith(`${id}/`) &&
       mesh.material?.name.endsWith('/paint'))?.material;
+    const eye = id => meshes.find(mesh => mesh.name.startsWith(`${id}/`) &&
+      mesh.material?.name === 'eye-white')?.material;
     return { distinctPaintMaterials: paint('fish-1') !== paint('fish-2'),
       distinctPaintTextures: paint('fish-1')?.albedoTexture !== paint('fish-2')?.albedoTexture,
+      sharedEyeMaterial: !!eye('fish-1') && eye('fish-1') === eye('fish-2'),
       texturesReady: !!paint('fish-1')?.albedoTexture?.isReady() && !!paint('fish-2')?.albedoTexture?.isReady(),
       firstVisible: meshes.some(mesh => mesh.name.startsWith('fish-1/') && mesh.isVisible),
-      secondVisible: meshes.some(mesh => mesh.name.startsWith('fish-2/') && mesh.isVisible) };
+      secondVisible: meshes.some(mesh => mesh.name.startsWith('fish-2/') && mesh.isVisible),
+      activeMeshes: window.coreAdapter.scene.getActiveMeshes().length };
   });
-  assert.deepEqual(models, { distinctPaintMaterials: true, distinctPaintTextures: true,
-    texturesReady: true, firstVisible: true, secondVisible: true });
+  const { activeMeshes, ...modelChecks } = models;
+  assert(activeMeshes >= 2, `GLB meshes were culled: ${activeMeshes}`);
+  assert.deepEqual(modelChecks, { distinctPaintMaterials: true, distinctPaintTextures: true,
+    sharedEyeMaterial: true, texturesReady: true, firstVisible: true, secondVisible: true });
   assert.equal(coralRequests, 1, 'one model download serves two Entity instances');
   await desktop.evaluate(() => window.coreAdapter.applyPositions({
     type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
     revision: 1, simulationTick: 10,
     positions: [{ id: 'fish-1', position: { x: 3, y: -1 }, heading: { x: 1, y: 0 } }],
   }));
-  await desktop.waitForFunction(() => Math.abs(window.coreAdapter.scene.getMeshByName('fish-1')?.position.x - 3) < .01,
+  await desktop.waitForFunction(() => Math.abs(window.coreAdapter.scene.getTransformNodeByName('fish-1')?.position.x - 3) < .01,
     null, { timeout: 3000 });
   const afterStale = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyPositions({ type: 'positions', schemaVersion: 1, sceneId: 'scene-1',
       sceneEpoch: 1, revision: 1, simulationTick: 9,
       positions: [{ id: 'fish-1', position: { x: -3, y: -1 }, heading: { x: -1, y: 0 } }] });
-    return adapter.scene.getMeshByName('fish-1').position.x;
+    return adapter.scene.getTransformNodeByName('fish-1').position.x;
   });
   assert(Math.abs(afterStale - 3) < .01, 'stale position frame must not move the mesh');
   mkdirSync(path.join(root, '.local'), { recursive: true });
-  await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') });
+  const screenshot = PNG.sync.read(await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') }));
+  let redPixels = 0, bluePixels = 0;
+  for (let offset = 0; offset < screenshot.data.length; offset += 4) {
+    const [red, green, blue] = screenshot.data.subarray(offset, offset + 3);
+    if (red > 150 && green < 130 && blue < 130) redPixels++;
+    if (blue > 180 && red < 100 && green > 70 && green < 160) bluePixels++;
+  }
+  assert(redPixels > 1000 && bluePixels > 1000,
+    `Painted fish are not visible in screenshot: ${JSON.stringify({ redPixels, bluePixels })}`);
   const removed = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 2,
       simulationTick: 2, upsert: [], remove: ['fish-1', 'fish-2'] });
-    return !adapter.scene.getMeshByName('fish-1') && !adapter.scene.getMeshByName('fish-2') &&
-      !adapter.scene.meshes.some(mesh => /^fish-[12]\//.test(mesh.name));
+    return !adapter.scene.getTransformNodeByName('fish-1') && !adapter.scene.getTransformNodeByName('fish-2') &&
+      !adapter.scene.meshes.some(mesh => /^fish-[12]\//.test(mesh.name)) &&
+      !adapter.scene.materials.some(material => /^fish-[12]\/paint$/.test(material.name));
   });
   assert(removed);
   const budget = await desktop.evaluate(() => {
@@ -172,6 +189,7 @@ try {
     const sorted = samples.slice(5).sort((a, b) => a - b);
     return { fish: scene.meshes.filter(mesh => mesh.name.startsWith('fish-load-') &&
       mesh.material?.name.endsWith('/paint')).length,
+      meshes: scene.meshes.length, materials: scene.materials.length,
       frames: sorted.length, p95FrameMs: sorted[Math.floor(sorted.length * .95)] ?? null,
       width: window.coreAdapter.engine.getRenderWidth(),
       height: window.coreAdapter.engine.getRenderHeight() };
