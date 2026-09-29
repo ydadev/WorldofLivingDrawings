@@ -1122,6 +1122,61 @@ mod tests {
             serde_json::from_slice(&to_bytes(finalized.into_body(), 4096).await.unwrap()).unwrap();
         let blob_id = response["paintBlobId"].as_str().unwrap();
         assert_eq!(blob_store.read(blob_id).unwrap(), frozen);
+        let paint_url = format!("/api/sessions/{}/paint/{blob_id}", scene.session_id);
+        let paint_get = |cookie: Option<&str>, url: &str| {
+            let mut request = Request::builder().uri(url);
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            request.body(Body::empty()).unwrap()
+        };
+        let served = app
+            .clone()
+            .oneshot(paint_get(Some(&owner_cookie), &paint_url))
+            .await
+            .unwrap();
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(served.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(served.headers()[header::CACHE_CONTROL], "no-store");
+        let served_bytes = to_bytes(served.into_body(), 2_097_152).await.unwrap();
+        assert_eq!(served_bytes.as_ref(), frozen.as_slice());
+        assert_eq!(
+            app.clone()
+                .oneshot(paint_get(Some(&viewer_cookie), &paint_url))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(paint_get(Some(&other_cookie), &paint_url))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(paint_get(None, &paint_url))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let missing_url = format!(
+            "/api/sessions/{}/paint/{}",
+            scene.session_id,
+            "0".repeat(64)
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(paint_get(Some(&owner_cookie), &missing_url))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
         let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
             .bind(scene.scene_id)
             .fetch_one(&pool)
@@ -1162,6 +1217,18 @@ mod tests {
         );
         let queued = first_finish.unwrap();
         assert_eq!(competing_finish.unwrap().fish_id, queued.fish_id);
+        let queued_url = format!(
+            "/api/sessions/{}/paint/{}",
+            scene.session_id, queued.paint_blob_id
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(paint_get(Some(&owner_cookie), &queued_url))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
         let pending: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM fish_publications WHERE scene_id = $1 AND fish_id = $2 \
              AND paint_blob_id = $3",

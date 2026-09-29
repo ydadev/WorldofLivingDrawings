@@ -40,4 +40,6 @@ Chrome CI рендера подтвердил отдельные окраски 
 
 Публикация первой и следующих рыб подготовлена к общей транзакции с финализацией upload; локально rustfmt — PASS, Ubuntu CI этого изменения пока NOT_RUN. Публичного подтверждения пользовательской рыбы ещё нет.
 
-Добавлены миграция каталога приватных blob, `LDW_BLOB_DIR` и endpoint финализации intent. Файл фиксируется до транзакции, которая однократно создаёт первую Entity либо долговечную очередь runner; повтор возвращает прежний результат. Локально rustfmt — PASS; PostgreSQL/HTTP/Chrome CI пока NOT_RUN. Авторизованная выдача текстуры и UI-публикация ещё не готовы.
+Добавлены миграция каталога приватных blob, `LDW_BLOB_DIR` и endpoint финализации intent. Файл фиксируется до транзакции, которая однократно создаёт первую Entity либо долговечную очередь runner; повтор возвращает прежний результат. [Ubuntu/PostgreSQL/HTTP/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36577627299) и [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36577627333) — PASS. Авторизованная выдача текстуры и UI-публикация ещё не готовы.
+
+Добавлена авторизованная выдача опубликованной текстуры Owner/Controller/Viewer и URL с sessionId в рабочем Renderer. Локальные rustfmt и TypeScript — PASS; полная Vite-сборка в ограниченной Windows-среде остановлена `spawn EPERM`, Ubuntu/Chrome CI выдачи — NOT_RUN. Полный UI-путь «Оживить», согласованный backup и GC ещё не готовы.

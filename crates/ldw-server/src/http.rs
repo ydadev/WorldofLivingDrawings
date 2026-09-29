@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     access::{AccessError, AccessStore, GrantKind, PairCode},
-    blob_store::BlobStore,
+    blob_store::{BlobStore, BlobStoreError},
     paint_image::{self, PaintImageError},
     upload::{self, UploadError},
 };
@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> Router {
             "/api/sessions/{id}/upload-intents/{intent_id}/finalize",
             post(finalize_upload),
         )
+        .route("/api/sessions/{id}/paint/{blob_id}", get(private_paint))
         .route("/api/sessions/{id}/scene", get(scene))
         .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
         .route("/api/sessions/{id}/viewers", post(create_viewer))
@@ -160,6 +161,17 @@ impl From<PaintImageError> for ApiError {
         match error {
             PaintImageError::InvalidImage => Self(StatusCode::BAD_REQUEST, "INVALID_PAINT_IMAGE"),
             PaintImageError::TooLarge => Self(StatusCode::PAYLOAD_TOO_LARGE, "PAINT_TOO_LARGE"),
+        }
+    }
+}
+
+impl From<BlobStoreError> for ApiError {
+    fn from(error: BlobStoreError) -> Self {
+        match error {
+            BlobStoreError::InvalidPath => Self(StatusCode::NOT_FOUND, "PAINT_NOT_FOUND"),
+            BlobStoreError::InvalidPaint | BlobStoreError::CorruptBlob | BlobStoreError::Io(_) => {
+                Self(StatusCode::INTERNAL_SERVER_ERROR, "PAINT_UNAVAILABLE")
+            }
         }
     }
 }
@@ -386,6 +398,43 @@ async fn finalize_upload(
     )
     .await?;
     Ok(Json(result))
+}
+
+async fn private_paint(
+    State(state): State<AppState>,
+    Path((session_id, blob_id)): Path<(Uuid, String)>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, ApiError> {
+    let (kind, token) = if let Some(owner) = jar.get(OWNER_COOKIE) {
+        (GrantKind::Owner, owner.value())
+    } else if let Some(controller) = jar.get(CONTROLLER_COOKIE) {
+        (GrantKind::Controller, controller.value())
+    } else {
+        (GrantKind::Viewer, cookie_token(&jar, VIEWER_COOKIE)?)
+    };
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    let authorized: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scenes c \
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.state->'entities', '[]'::jsonb)) AS entity(value) \
+         WHERE c.id = $1 AND c.session_id = $2 AND entity.value->>'paintBlobId' = $3)",
+    )
+    .bind(access.scene.scene_id)
+    .bind(session_id)
+    .bind(&blob_id)
+    .fetch_one(state.access.pool())
+    .await
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR"))?;
+    if !authorized {
+        return Err(ApiError(StatusCode::NOT_FOUND, "PAINT_NOT_FOUND"));
+    }
+    let store = state.blob_store.clone();
+    let bytes = tokio::task::spawn_blocking(move || store.read(&blob_id))
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "PAINT_UNAVAILABLE"))??;
+    Ok((
+        [(header::CONTENT_TYPE, HeaderValue::from_static("image/png"))],
+        Bytes::from(bytes),
+    ))
 }
 
 #[derive(Serialize)]

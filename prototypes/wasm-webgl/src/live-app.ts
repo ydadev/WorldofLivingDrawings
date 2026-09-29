@@ -54,7 +54,8 @@ function mount(): void {
       toggle: document.querySelector<HTMLButtonElement>('#view-toggle') ?? undefined,
     },
     rendererFactory: canvas => {
-      const renderer = new BabylonRendererAdapter(canvas, '/fish/');
+      const renderer = new BabylonRendererAdapter(canvas, '/fish/',
+        id => `/api/sessions/${encodeURIComponent(sessionId)}/paint/${encodeURIComponent(id)}`);
       if (controller) renderer.setRenderScale(.5);
       return renderer;
     },
