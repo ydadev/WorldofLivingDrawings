@@ -2,6 +2,7 @@ use sqlx::{PgPool, migrate::MigrateError};
 pub mod access;
 pub mod http;
 pub mod realtime;
+pub mod simulation;
 
 /// The server uses versioned, embedded migrations; no database credentials live in source.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {

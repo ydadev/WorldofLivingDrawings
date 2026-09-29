@@ -832,6 +832,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hmac",
+ "ldw-sim",
  "rpassword",
  "serde",
  "serde_json",
