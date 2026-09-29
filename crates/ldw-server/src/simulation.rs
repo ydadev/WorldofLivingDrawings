@@ -1,11 +1,16 @@
 //! Persisted boundary for the server-owned simulation. The timer and broadcaster
 //! are separate; this module never writes a frame to PostgreSQL.
 
-use ldw_sim::{Bounds, EffectRule, Point, World, WorldCheckpoint, WorldInteractionRules};
+use ldw_sim::{
+    Bounds, EffectRule, FishCapabilities, Point, World, WorldCheckpoint, WorldInteractionRules,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::{
     sync::{broadcast, watch},
@@ -236,7 +241,87 @@ fn parse_interaction_rules(source: &str) -> Result<WorldInteractionRules, Simula
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PackageEntity {
+    schema_version: u32,
+    id: String,
+    version: u32,
+    model_asset_id: String,
+    paint_template_id: String,
+    paint_template_version: u32,
+    capabilities: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct FishDefinition {
+    version: u32,
+    capabilities: FishCapabilities,
+}
+
+fn parse_entity_definitions(
+    source: &str,
+) -> Result<HashMap<String, FishDefinition>, SimulationError> {
+    let definitions: Vec<PackageEntity> =
+        serde_json::from_str(source).map_err(|_| SimulationError::InvalidPackage)?;
+    if definitions.len() != 2 {
+        return Err(SimulationError::InvalidPackage);
+    }
+    let mut result = HashMap::with_capacity(2);
+    for definition in definitions {
+        let (model, template) = match definition.id.as_str() {
+            "coral-fish" => ("coral-model", "coral"),
+            "stream-fish" => ("stream-model", "stream"),
+            _ => return Err(SimulationError::InvalidPackage),
+        };
+        if definition.schema_version != 1
+            || definition.version != 1
+            || definition.model_asset_id != model
+            || definition.paint_template_id != template
+            || definition.paint_template_version != 1
+        {
+            return Err(SimulationError::InvalidPackage);
+        }
+        let mut capabilities = FishCapabilities {
+            consume_food: false,
+            avoid_threat: false,
+        };
+        for capability in definition.capabilities {
+            match capability.as_str() {
+                "consume-food" if !capabilities.consume_food => capabilities.consume_food = true,
+                "avoid-threat" if !capabilities.avoid_threat => capabilities.avoid_threat = true,
+                _ => return Err(SimulationError::InvalidPackage),
+            }
+        }
+        if result
+            .insert(
+                definition.id,
+                FishDefinition {
+                    version: definition.version,
+                    capabilities,
+                },
+            )
+            .is_some()
+        {
+            return Err(SimulationError::InvalidPackage);
+        }
+    }
+    Ok(result)
+}
+
+fn underwater_entity_definitions() -> Result<HashMap<String, FishDefinition>, SimulationError> {
+    parse_entity_definitions(include_str!("../../../content/underwater/entities.json"))
+}
+
+fn underwater_fish_definition(id: &str) -> Result<FishDefinition, SimulationError> {
+    underwater_entity_definitions()?
+        .get(id)
+        .copied()
+        .ok_or(SimulationError::InvalidPackage)
+}
+
 pub(crate) fn initial_world(scene_id: Uuid) -> Result<World, SimulationError> {
+    underwater_entity_definitions()?;
     let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
     World::new_with_rules(underwater_bounds()?, seed, underwater_interaction_rules()?)
         .map_err(|_| SimulationError::InvalidPackage)
@@ -270,20 +355,19 @@ fn interaction_state_event(world: &World, applied: &[Uuid]) -> Value {
         "appliedCommandIds":applied, "simulationTick":world.tick_number()})
 }
 
-fn valid_publication(definition_id: &str, paint_blob_id: &str) -> bool {
-    matches!(definition_id, "coral-fish" | "stream-fish")
-        && ((paint_blob_id.len() == 64
+fn valid_paint_blob_id(paint_blob_id: &str) -> bool {
+    (paint_blob_id.len() == 64
+        && paint_blob_id
+            .bytes()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()))
+        || ((2..=64).contains(&paint_blob_id.len())
             && paint_blob_id
                 .bytes()
-                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()))
-            || ((2..=64).contains(&paint_blob_id.len())
-                && paint_blob_id
-                    .bytes()
-                    .next()
-                    .is_some_and(|ch| ch.is_ascii_lowercase())
-                && paint_blob_id
-                    .bytes()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')))
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase())
+            && paint_blob_id
+                .bytes()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-'))
 }
 
 /// Trusted publication boundary: the caller must already own and validate the
@@ -319,7 +403,9 @@ pub(crate) async fn publish_first_fish_tx(
     paint_blob_id: &str,
     position: Point,
 ) -> Result<Value, SimulationError> {
-    if !valid_publication(definition_id, paint_blob_id) {
+    let definition = underwater_fish_definition(definition_id)
+        .map_err(|_| SimulationError::InvalidPublication)?;
+    if !valid_paint_blob_id(paint_blob_id) {
         return Err(SimulationError::InvalidPublication);
     }
     let row: Option<(String, i32, i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
@@ -351,12 +437,12 @@ pub(crate) async fn publish_first_fish_tx(
     }
     let mut world = initial_world(scene_id)?;
     world
-        .spawn_fish(fish_id.as_u128(), position, 1.2)
+        .spawn_fish_with_capabilities(fish_id.as_u128(), position, 1.2, definition.capabilities)
         .map_err(|_| SimulationError::InvalidPublication)?;
     let entity = json!({
         "id": format!("fish-{:032x}", fish_id.as_u128()),
         "definitionId": definition_id,
-        "definitionVersion": 1,
+        "definitionVersion": definition.version,
         "paintBlobId": paint_blob_id,
         "position": position,
     });
@@ -419,7 +505,9 @@ pub(crate) async fn queue_fish_tx(
     paint_blob_id: &str,
     position: Point,
 ) -> Result<(), SimulationError> {
-    if !valid_publication(definition_id, paint_blob_id) {
+    let definition = underwater_fish_definition(definition_id)
+        .map_err(|_| SimulationError::InvalidPublication)?;
+    if !valid_paint_blob_id(paint_blob_id) {
         return Err(SimulationError::InvalidPublication);
     }
     let row: Option<(String, i32, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
@@ -473,15 +561,18 @@ pub(crate) async fn queue_fish_tx(
         return Err(SimulationError::InvalidPublication);
     }
     world
-        .spawn_fish(fish_id.as_u128(), position, 1.2)
+        .spawn_fish_with_capabilities(fish_id.as_u128(), position, 1.2, definition.capabilities)
         .map_err(|_| SimulationError::InvalidPublication)?;
     sqlx::query(
-        "INSERT INTO fish_publications (scene_id, fish_id, definition_id, paint_blob_id, position_x, position_y) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO fish_publications (scene_id, fish_id, definition_id, definition_version, \
+         capabilities, paint_blob_id, position_x, position_y) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(scene_id)
     .bind(fish_id)
     .bind(definition_id)
+    .bind(definition.version as i32)
+    .bind(serde_json::to_value(definition.capabilities)?)
     .bind(paint_blob_id)
     .bind(position.x)
     .bind(position.y)
@@ -565,8 +656,8 @@ async fn apply_pending_fish(
     {
         return Ok(false);
     }
-    let pending: Vec<(Uuid, String, String, f32, f32)> = sqlx::query_as(
-        "SELECT fish_id, definition_id, paint_blob_id, position_x, position_y \
+    let pending: Vec<(Uuid, String, i32, Value, String, f32, f32)> = sqlx::query_as(
+        "SELECT fish_id, definition_id, definition_version, capabilities, paint_blob_id, position_x, position_y \
          FROM fish_publications WHERE scene_id = $1 ORDER BY created_at, fish_id LIMIT 100",
     )
     .bind(scene_id)
@@ -586,18 +677,25 @@ async fn apply_pending_fish(
     }
     let mut new_revision = revision;
     let mut events = Vec::with_capacity(pending.len());
-    for (fish_id, definition_id, paint_blob_id, x, y) in &pending {
-        if !valid_publication(definition_id, paint_blob_id) {
+    let definitions = underwater_entity_definitions()?;
+    for (fish_id, definition_id, definition_version, capabilities, paint_blob_id, x, y) in &pending
+    {
+        if !definitions.contains_key(definition_id)
+            || *definition_version != 1
+            || !valid_paint_blob_id(paint_blob_id)
+        {
             return Err(SimulationError::InvalidPublication);
         }
+        let capabilities: FishCapabilities = serde_json::from_value(capabilities.clone())
+            .map_err(|_| SimulationError::InvalidPublication)?;
         let position = Point { x: *x, y: *y };
         candidate
-            .spawn_fish(fish_id.as_u128(), position, 1.2)
+            .spawn_fish_with_capabilities(fish_id.as_u128(), position, 1.2, capabilities)
             .map_err(|_| SimulationError::InvalidPublication)?;
         let entity = json!({
             "id": format!("fish-{:032x}", fish_id.as_u128()),
             "definitionId": definition_id,
-            "definitionVersion": 1,
+            "definitionVersion": definition_version,
             "paintBlobId": paint_blob_id,
             "position": position,
         });
@@ -1083,6 +1181,24 @@ mod tests {
         assert_eq!(world.interaction_rules().feed.duration_ticks, 120);
         package[0]["effect"] = json!("threat");
         assert!(parse_interaction_rules(&package.to_string()).is_err());
+    }
+
+    #[test]
+    fn entity_capabilities_are_validated_from_the_package() {
+        let definitions = underwater_entity_definitions().unwrap();
+        assert!(definitions["coral-fish"].capabilities.consume_food);
+        assert!(definitions["stream-fish"].capabilities.avoid_threat);
+        let mut package: Value =
+            serde_json::from_str(include_str!("../../../content/underwater/entities.json"))
+                .unwrap();
+        package[1]["capabilities"] = json!(["avoid-threat"]);
+        let changed = parse_entity_definitions(&package.to_string()).unwrap();
+        assert!(!changed["stream-fish"].capabilities.consume_food);
+        assert!(changed["stream-fish"].capabilities.avoid_threat);
+        package[1]["capabilities"] = json!(["avoid-threat", "avoid-threat"]);
+        assert!(parse_entity_definitions(&package.to_string()).is_err());
+        package[1]["capabilities"] = json!(["arbitrary-code"]);
+        assert!(parse_entity_definitions(&package.to_string()).is_err());
     }
 
     fn load_paint_png(value: u8) -> Vec<u8> {
@@ -2737,6 +2853,22 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(queued, 2);
+        let accepted: (i32, Value) = sqlx::query_as(
+            "SELECT definition_version, capabilities FROM fish_publications WHERE scene_id = $1 AND fish_id = $2",
+        )
+        .bind(scene_id)
+        .bind(fourth)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(accepted.0, 1);
+        assert_eq!(accepted.1["consume_food"], true);
+        // Simulate a queued v1 fish whose accepted capabilities differ from
+        // the currently installed package: the runner must use the queue row.
+        sqlx::query("UPDATE fish_publications SET capabilities = $3::jsonb WHERE scene_id = $1 AND fish_id = $2")
+            .bind(scene_id).bind(fourth)
+            .bind(json!({"consume_food":false,"avoid_threat":true}))
+            .execute(&pool).await.unwrap();
         let (stop, receiver) = watch::channel(false);
         let hub = SimulationHub::default();
         let mut frames = hub.subscribe();
@@ -2762,6 +2894,16 @@ mod tests {
         worker.await.unwrap().unwrap();
         let after = load_scene(&pool, scene_id).await.unwrap();
         assert_eq!(after.world.fish().len(), 4);
+        assert!(
+            !after
+                .world
+                .fish()
+                .iter()
+                .find(|fish| fish.id == fourth.as_u128())
+                .unwrap()
+                .capabilities
+                .consume_food
+        );
         let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
             .bind(scene_id)
             .fetch_one(&pool)

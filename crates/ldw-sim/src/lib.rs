@@ -122,6 +122,8 @@ pub struct Fish {
     pub target: Point,
     /// World units per second, before the fixed 20 Hz tick.
     pub speed: f32,
+    #[serde(default)]
+    pub capabilities: FishCapabilities,
     pub heading: Point,
     /// Signed distance from the center of the aquarium; negative is nearer the camera.
     #[serde(default)]
@@ -139,6 +141,23 @@ pub struct Fish {
     pub fleeing: bool,
     #[serde(default)]
     threat_hold_until_tick: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FishCapabilities {
+    pub consume_food: bool,
+    pub avoid_threat: bool,
+}
+
+impl Default for FishCapabilities {
+    fn default() -> Self {
+        // Historical fish could both eat and flee; preserve old checkpoints.
+        Self {
+            consume_food: true,
+            avoid_threat: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -344,7 +363,9 @@ impl World {
                     .feeding
                     .as_ref()
                     .is_some_and(|id| !feed_ids.contains(id.as_str()))
+                || (fish.feeding.is_some() && !fish.capabilities.consume_food)
                 || (fish.fleeing && checkpoint.boat.is_none())
+                || (fish.fleeing && !fish.capabilities.avoid_threat)
             {
                 return Err(SimError::InvalidCheckpoint);
             }
@@ -493,6 +514,16 @@ impl World {
     }
 
     pub fn spawn_fish(&mut self, id: u128, position: Point, speed: f32) -> Result<(), SimError> {
+        self.spawn_fish_with_capabilities(id, position, speed, FishCapabilities::default())
+    }
+
+    pub fn spawn_fish_with_capabilities(
+        &mut self,
+        id: u128,
+        position: Point,
+        speed: f32,
+        capabilities: FishCapabilities,
+    ) -> Result<(), SimError> {
         if self.fish.len() >= MAX_FISH {
             return Err(SimError::FishLimit);
         }
@@ -516,6 +547,7 @@ impl World {
             position,
             target,
             speed,
+            capabilities,
             heading: Point { x: 1.0, y: 0.0 },
             depth: 0.0,
             depth_target: choose_depth(self.seed, id, 0),
@@ -587,7 +619,10 @@ impl World {
             };
             let distance_sq = fish.position.distance_squared(boat.position);
             let mut newly_fleeing = false;
-            if !fish.fleeing && distance_sq <= self.interaction_rules.boat.radius.powi(2) {
+            if fish.capabilities.avoid_threat
+                && !fish.fleeing
+                && distance_sq <= self.interaction_rules.boat.radius.powi(2)
+            {
                 fish.fleeing = true;
                 newly_fleeing = true;
                 fish.threat_hold_until_tick = self.tick.saturating_add(THREAT_HOLD_TICKS);
@@ -629,6 +664,7 @@ impl World {
                 .enumerate()
                 .filter(|(index, fish)| {
                     assignments[*index].is_none()
+                        && fish.capabilities.consume_food
                         && !fish.fleeing
                         && !source.fed_fish.contains(&fish_id(fish.id))
                         && fish.position.distance_squared(source.position)
@@ -1489,6 +1525,73 @@ mod tests {
             Some(feed),
             "the fish must resume active food instead of its obsolete escape route"
         );
+    }
+
+    #[test]
+    fn feed_and_threat_select_only_capable_fish_after_restart() {
+        let mut world = World::new(bounds(), 57).unwrap();
+        world
+            .spawn_fish_with_capabilities(
+                7,
+                Point { x: 6.8, y: 0.0 },
+                1.0,
+                FishCapabilities {
+                    consume_food: true,
+                    avoid_threat: false,
+                },
+            )
+            .unwrap();
+        world
+            .spawn_fish_with_capabilities(
+                8,
+                Point { x: 6.4, y: 0.5 },
+                1.0,
+                FishCapabilities {
+                    consume_food: false,
+                    avoid_threat: true,
+                },
+            )
+            .unwrap();
+        world
+            .spawn_fish_with_capabilities(
+                9,
+                Point { x: 6.0, y: -0.5 },
+                1.0,
+                FishCapabilities {
+                    consume_food: false,
+                    avoid_threat: false,
+                },
+            )
+            .unwrap();
+        let feed = "00000000000000000000000000000001";
+        world.start_feed(feed, Point { x: 5.4, y: 0.0 }).unwrap();
+        world.step();
+        assert_eq!(world.fish()[0].feeding.as_deref(), Some(feed));
+        assert!(world.fish()[1..].iter().all(|fish| fish.feeding.is_none()));
+        world
+            .start_boat(
+                "00000000000000000000000000000002",
+                Point { x: -0.1, y: 0.0 },
+            )
+            .unwrap();
+        world.step();
+        assert!(!world.fish()[0].fleeing);
+        assert_eq!(world.fish()[0].feeding.as_deref(), Some(feed));
+        assert!(world.fish()[1].fleeing);
+        assert!(!world.fish()[2].fleeing);
+        let mut replay = World::restore(world.checkpoint()).unwrap();
+        for _ in 0..30 {
+            world.step();
+            replay.step();
+            assert_eq!(world.checkpoint(), replay.checkpoint());
+        }
+        let mut legacy = serde_json::to_value(world.checkpoint()).unwrap();
+        legacy["fish"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("capabilities");
+        let restored = World::restore(serde_json::from_value(legacy).unwrap()).unwrap();
+        assert_eq!(restored.fish()[0].capabilities, FishCapabilities::default());
     }
 
     #[test]
