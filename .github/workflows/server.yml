@@ -75,7 +75,7 @@ jobs:
           DATABASE_URL=postgres://postgres@127.0.0.1:5432/ldw_capacity \
           LDW_TEST_SIMULATED_SESSION_LIMIT=3 \
           cargo test -p ldw-server --locked simulated_session_limit_rejects_fourth_concurrent_start -- --ignored
-      - name: Check three real-time scenes, 100 fish and 10 Controllers each
+      - name: Check three real-time scenes, 100 fish, Controllers, Viewers and uploads
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ldw_three_scenes'
           DATABASE_URL=postgres://postgres@127.0.0.1:5432/ldw_three_scenes \

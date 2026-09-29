@@ -952,6 +952,7 @@ mod tests {
         blob_store::BlobStore,
         http::{self, AppState},
         realtime::{self, InteractionCommand},
+        upload::{self, UploadIntentRequest},
     };
     use futures_util::{SinkExt, StreamExt};
     use ldw_sim::Point;
@@ -960,8 +961,26 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
 
+    const INITIAL_LOAD_FISH: usize = ldw_sim::MAX_FISH - 2;
+
+    fn load_paint_png(value: u8) -> Vec<u8> {
+        let mut raw = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut raw, 512, 512);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            let mut pixels = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                pixels.extend_from_slice(&[value, 90, 255 - value, 255]);
+            }
+            writer.write_image_data(&pixels).unwrap();
+        }
+        crate::paint_image::normalize_png(&raw).unwrap()
+    }
+
     #[tokio::test]
-    #[ignore = "run against a fresh PostgreSQL database to measure three runners, 30 Controllers and 3 Viewers"]
+    #[ignore = "run against a fresh PostgreSQL database to measure three runners, 30 Controllers, 3 Viewers and six uploads"]
     async fn three_hundred_fish_progress_across_three_real_time_scenes() {
         let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
@@ -971,6 +990,18 @@ mod tests {
         )
         .bind(owner)
         .bind(format!("three-scenes-{owner}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let owner_token = format!("load-owner-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+             VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(crate::access::hash_token(&owner_token).to_vec())
+        .bind(crate::access::hash_token("load-owner-csrf").to_vec())
         .execute(&pool)
         .await
         .unwrap();
@@ -1002,7 +1033,7 @@ mod tests {
 
             let mut world = initial_world(scene_id).unwrap();
             let mut entities = Vec::new();
-            for fish in 0..ldw_sim::MAX_FISH {
+            for fish in 0..INITIAL_LOAD_FISH {
                 let fish_id = Uuid::new_v4();
                 let position = Point {
                     x: -6.3 + (fish % 10) as f32 * 1.4,
@@ -1037,9 +1068,10 @@ mod tests {
         let mut frames = hub.subscribe();
         let store = AccessStore::new(pool.clone(), [7u8; 32]);
         let blob_root = std::env::temp_dir().join(format!("ldw-load-blobs-{}", Uuid::new_v4()));
+        let blob_store = BlobStore::create(blob_root).unwrap();
         let app = http::router(AppState {
-            access: store,
-            blob_store: BlobStore::create(blob_root).unwrap(),
+            access: store.clone(),
+            blob_store: blob_store.clone(),
             public_origin: Arc::from("https://world.example.test"),
             simulation_hub: hub.clone(),
         });
@@ -1115,7 +1147,7 @@ mod tests {
                 assert_eq!(snapshot["sceneId"], scene_id.to_string());
                 assert_eq!(
                     snapshot["entities"].as_array().unwrap().len(),
-                    ldw_sim::MAX_FISH
+                    INITIAL_LOAD_FISH
                 );
                 let client_start = client_start.clone();
                 let command_times = command_times.clone();
@@ -1126,6 +1158,8 @@ mod tests {
                     let mut last_tick = 0;
                     let mut accepted = 0;
                     let mut reconnected = false;
+                    let mut saw_full_scene = false;
+                    let mut published = std::collections::HashSet::new();
                     let mut action_latencies = std::collections::HashMap::new();
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
                     let reconnect_at = tokio::time::Instant::now() + Duration::from_secs(6);
@@ -1185,7 +1219,9 @@ mod tests {
                             assert_eq!(snapshot["sceneId"], scene_id.to_string());
                             assert_eq!(snapshot["sceneEpoch"], 1);
                             assert!(snapshot["revision"].as_i64().unwrap() >= 3);
-                            assert_eq!(snapshot["entities"].as_array().unwrap().len(), ldw_sim::MAX_FISH);
+                            let fish_count = snapshot["entities"].as_array().unwrap().len();
+                            assert!((INITIAL_LOAD_FISH..=ldw_sim::MAX_FISH).contains(&fish_count));
+                            saw_full_scene |= fish_count == ldw_sim::MAX_FISH;
                             assert!(snapshot["pendingInteractions"].as_array().unwrap().is_empty());
                             let actions = snapshot["activeActions"].as_array().unwrap();
                             assert!(actions.iter().any(|action| action["interactionId"] == "boat"));
@@ -1205,10 +1241,9 @@ mod tests {
                                 let value: Value = serde_json::from_str(&text).unwrap();
                                 if value["type"] == "positions" {
                                     assert_eq!(value["sceneId"], scene_id.to_string());
-                                    assert_eq!(
-                                        value["positions"].as_array().unwrap().len(),
-                                        ldw_sim::MAX_FISH
-                                    );
+                                    let fish_count = value["positions"].as_array().unwrap().len();
+                                    assert!((INITIAL_LOAD_FISH..=ldw_sim::MAX_FISH).contains(&fish_count));
+                                    saw_full_scene |= fish_count == ldw_sim::MAX_FISH;
                                     let tick = value["simulationTick"].as_u64().unwrap();
                                     assert!(tick > last_tick);
                                     last_tick = tick;
@@ -1218,6 +1253,9 @@ mod tests {
                                     accepted += 1;
                                 } else if value["type"] == "delta" {
                                     assert_eq!(value["sceneId"], scene_id.to_string());
+                                    if value["event"]["type"] == "entity_published" {
+                                        published.insert(value["event"]["entity"]["id"].as_str().unwrap().to_owned());
+                                    }
                                     if let Some(applied) = value["event"]["appliedCommandIds"].as_array() {
                                         for command_id in [feed_command_id, boat_command_id] {
                                             if applied.iter().any(|id| id == &command_id.to_string()) {
@@ -1237,7 +1275,8 @@ mod tests {
                             _ => {}
                         }
                     }
-                    (scene_number, controller_number, count, last_tick, accepted, reconnected, action_latencies)
+                    (scene_number, controller_number, count, last_tick, accepted, reconnected,
+                        saw_full_scene, published.len(), action_latencies)
                 });
             }
             let viewer_token = format!("load-viewer-{}", Uuid::new_v4());
@@ -1288,7 +1327,7 @@ mod tests {
             assert_eq!(snapshot["sceneId"], scene_id.to_string());
             assert_eq!(
                 snapshot["entities"].as_array().unwrap().len(),
-                ldw_sim::MAX_FISH
+                INITIAL_LOAD_FISH
             );
             let client_start = client_start.clone();
             viewers.spawn(async move {
@@ -1317,6 +1356,8 @@ mod tests {
                 let mut last_tick = 0;
                 let mut read_only = false;
                 let mut actions = std::collections::HashSet::new();
+                let mut published = std::collections::HashSet::new();
+                let mut saw_full_scene = false;
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
                 while let Some(remaining) =
                     deadline.checked_duration_since(tokio::time::Instant::now())
@@ -1331,10 +1372,11 @@ mod tests {
                             let value: Value = serde_json::from_str(&text).unwrap();
                             if value["type"] == "positions" {
                                 assert_eq!(value["sceneId"], scene_id.to_string());
-                                assert_eq!(
-                                    value["positions"].as_array().unwrap().len(),
-                                    ldw_sim::MAX_FISH
+                                let fish_count = value["positions"].as_array().unwrap().len();
+                                assert!(
+                                    (INITIAL_LOAD_FISH..=ldw_sim::MAX_FISH).contains(&fish_count)
                                 );
+                                saw_full_scene |= fish_count == ldw_sim::MAX_FISH;
                                 let tick = value["simulationTick"].as_u64().unwrap();
                                 assert!(tick > last_tick);
                                 last_tick = tick;
@@ -1345,6 +1387,11 @@ mod tests {
                                 read_only = true;
                             } else if value["type"] == "delta" {
                                 assert_eq!(value["sceneId"], scene_id.to_string());
+                                if value["event"]["type"] == "entity_published" {
+                                    published.insert(
+                                        value["event"]["entity"]["id"].as_str().unwrap().to_owned(),
+                                    );
+                                }
                                 if let Some(applied) =
                                     value["event"]["appliedCommandIds"].as_array()
                                 {
@@ -1365,19 +1412,101 @@ mod tests {
                         _ => {}
                     }
                 }
-                (scene_number, count, last_tick, read_only, actions.len())
+                (
+                    scene_number,
+                    count,
+                    last_tick,
+                    read_only,
+                    actions.len(),
+                    saw_full_scene,
+                    published.len(),
+                )
             });
         }
         client_start.wait().await;
         let started = tokio::time::Instant::now();
         let supervisor = tokio::spawn(run(pool.clone(), receiver, hub));
+        let mut uploads = tokio::task::JoinSet::new();
+        for &(scene_number, session_id, _) in &scenes {
+            let pool = pool.clone();
+            let store = store.clone();
+            let blob_store = blob_store.clone();
+            let owner_token = owner_token.clone();
+            uploads.spawn(async move {
+                sleep(Duration::from_secs(3)).await;
+                let access = store
+                    .scene_access(GrantKind::Owner, &owner_token, session_id)
+                    .await
+                    .unwrap();
+                let mut published = Vec::new();
+                for (index, (template, source_kind, position)) in [
+                    ("coral", "browser", Point { x: -5.5, y: 2.0 }),
+                    ("stream", "paper", Point { x: 5.5, y: 2.0 }),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let layout: Value = serde_json::from_str(match template {
+                        "coral" => {
+                            include_str!("../../../content/underwater/assets/coral.layout.json")
+                        }
+                        _ => include_str!("../../../content/underwater/assets/stream.layout.json"),
+                    })
+                    .unwrap();
+                    let request = UploadIntentRequest {
+                        scene_epoch: access.scene.scene_epoch,
+                        definition_id: format!("{template}-fish"),
+                        template_id: template.into(),
+                        template_version: 1,
+                        layout_hash: layout["contentHash"].as_str().unwrap().into(),
+                        source_kind: source_kind.into(),
+                        color_space: "sRGB".into(),
+                        position,
+                    };
+                    let intent =
+                        upload::create_upload_intent(&pool, GrantKind::Owner, &access, &request)
+                            .await
+                            .unwrap();
+                    let png = load_paint_png(40 + scene_number as u8 * 30 + index as u8 * 10);
+                    upload::store_paint(
+                        &pool,
+                        GrantKind::Owner,
+                        &access,
+                        intent.intent_id,
+                        png.clone(),
+                    )
+                    .await
+                    .unwrap();
+                    let expires_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64
+                        + 30_000;
+                    let finalized = upload::finalize_upload(
+                        &pool,
+                        &blob_store,
+                        GrantKind::Owner,
+                        &access,
+                        intent.intent_id,
+                        expires_at,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(blob_store.read(&finalized.paint_blob_id).unwrap(), png);
+                    published.push(finalized.fish_id);
+                }
+                (scene_number, published)
+            });
+        }
         let deadline = started + Duration::from_secs(12);
         let mut frame_counts = std::collections::HashMap::<Uuid, usize>::new();
         let mut last_ticks = std::collections::HashMap::<Uuid, u64>::new();
         while let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) {
             match timeout(remaining, frames.recv()).await {
                 Ok(Ok(frame)) => {
-                    assert_eq!(frame.positions.len(), ldw_sim::MAX_FISH);
+                    assert!(
+                        (INITIAL_LOAD_FISH..=ldw_sim::MAX_FISH).contains(&frame.positions.len())
+                    );
                     *frame_counts.entry(frame.scene_id).or_default() += 1;
                     last_ticks.insert(frame.scene_id, frame.simulation_tick);
                 }
@@ -1391,6 +1520,14 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        while let Some(result) = uploads.join_next().await {
+            let (scene_number, published) = result.unwrap();
+            assert_eq!(
+                published.len(),
+                2,
+                "scene {scene_number} did not finalize both uploads"
+            );
+        }
         let mut client_frames = 0;
         let mut action_latencies = Vec::new();
         while let Some(result) = controllers.join_next().await {
@@ -1401,6 +1538,8 @@ mod tests {
                 last_tick,
                 accepted,
                 reconnected,
+                saw_full_scene,
+                published,
                 observed,
             ) = result.unwrap();
             assert!(
@@ -1425,11 +1564,20 @@ mod tests {
                     "scene {scene_number} missed Controller reconnect"
                 );
             }
+            assert!(
+                saw_full_scene,
+                "scene {scene_number} Controller {controller_number} never saw 100 fish"
+            );
+            assert_eq!(
+                published, 2,
+                "scene {scene_number} Controller {controller_number} missed a fish publication"
+            );
             action_latencies.extend(observed.into_values());
         }
         let mut viewer_frames = 0;
         while let Some(result) = viewers.join_next().await {
-            let (scene_number, count, last_tick, read_only, actions) = result.unwrap();
+            let (scene_number, count, last_tick, read_only, actions, saw_full_scene, published) =
+                result.unwrap();
             assert!(
                 count >= 18 && last_tick >= 180,
                 "scene {scene_number} Viewer received {count} frames, last tick {last_tick}"
@@ -1438,6 +1586,14 @@ mod tests {
             assert_eq!(
                 actions, 2,
                 "scene {scene_number} Viewer missed an applied action"
+            );
+            assert!(
+                saw_full_scene,
+                "scene {scene_number} Viewer never saw 100 fish"
+            );
+            assert_eq!(
+                published, 2,
+                "scene {scene_number} Viewer missed a fish publication"
             );
             viewer_frames += count;
         }
@@ -1468,7 +1624,34 @@ mod tests {
             assert!(last >= 180, "scene {scene_number} fell behind real time");
             assert!(restored.world.tick_number() >= last);
             assert_eq!(restored.world.fish().len(), ldw_sim::MAX_FISH);
-            assert!(restored.revision >= 1, "feed and boat were not applied");
+            assert!(
+                restored.revision >= 5,
+                "actions or uploaded fish were not applied"
+            );
+            let (browser, paper): (i64, i64) = sqlx::query_as(
+                "SELECT count(*) FILTER (WHERE source_kind = 'browser'), \
+                 count(*) FILTER (WHERE source_kind = 'paper') \
+                 FROM upload_intents WHERE scene_id = $1 AND status = 'finalized'",
+            )
+            .bind(scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!((browser, paper), (1, 1));
+            let references: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM scene_paint_blobs WHERE scene_id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(references, 2);
+            let pending: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM fish_publications WHERE scene_id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(pending, 0);
         }
     }
 
