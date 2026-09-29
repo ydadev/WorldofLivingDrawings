@@ -59,8 +59,10 @@ for (const fish of species) {
   }
   const positions = floats(paint.attributes.POSITION, 3);
   const normals = floats(paint.attributes.NORMAL, 3);
+  const colors = floats(paint.attributes.COLOR_0, 3);
   const uvs = floats(paint.attributes.TEXCOORD_0, 2);
-  check(positions.length === uvs.length && positions.length === normals.length,
+  check(positions.length === uvs.length && positions.length === normals.length &&
+    positions.length === colors.length && colors.every(rgb => rgb.every(value => value >= .57 && value <= 1)),
     `${fish.id}: paint attributes have different lengths`);
   const sidePairs = new Map();
   let edges = 0, front = 0, back = 0;
@@ -86,8 +88,10 @@ for (const fish of species) {
     `${fish.id}: matching painted sides or colored edges are incomplete`);
   const tail = gltf.meshes[1].primitives[0];
   const tailPositions = floats(tail.attributes.POSITION, 3);
+  const tailColors = floats(tail.attributes.COLOR_0, 3);
   const tailUVs = floats(tail.attributes.TEXCOORD_0, 2);
-  check(tailPositions.length === tailUVs.length && tailPositions.length >= 24,
+  check(tailPositions.length === tailUVs.length && tailPositions.length === tailColors.length &&
+    tailPositions.length >= 24,
     `${fish.id}: tail paint geometry is incomplete`);
   for (let i = 0; i < tailPositions.length; i++) {
     const [x, y] = tailPositions[i];

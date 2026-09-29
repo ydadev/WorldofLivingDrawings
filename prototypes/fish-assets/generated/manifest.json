@@ -10,7 +10,7 @@
       "id": "coral",
       "templateVersion": 1,
       "layoutHash": "65c5bc5ba7ed7eb5e92c68c1e8f4c97ae4cf8112c2a0a2532a8e0e7c22f4509b",
-      "modelSha256": "160977825699c5556756f147903d2f8e0c76c896f4d384531e734e53456862d8",
+      "modelSha256": "a4348b87307b659fa9b505101f8bac23b53d804ef04690e1fee172ed1b7821bf",
       "templateSha256": "41fd6927b91276d4b744170ef2f1b98c9ea85591911a80ff577cdcb60494a5c1",
       "paintVertexCount": 734
     },
@@ -18,7 +18,7 @@
       "id": "stream",
       "templateVersion": 1,
       "layoutHash": "d239842c3929987516f2c7b5a4f33e6fdc5aad29025c9156bfdf796f161d71a4",
-      "modelSha256": "ac50f25a155d0dca30078819d7393455b530023a882951c92398e5d8394e2ed5",
+      "modelSha256": "f7bc390f2d2270d44d77c37c96418a37e79bf4a22010b44730fae112aa5f5171",
       "templateSha256": "8e9b9c49c9e7e32c91065158574535bb4370364cf93acb2ace0db962937bdc89",
       "paintVertexCount": 734
     }

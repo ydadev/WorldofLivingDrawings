@@ -14,13 +14,16 @@ const sha256 = data => createHash('sha256').update(data).digest('hex');
 const round = x => Math.round(x * 1e6) / 1e6;
 
 function meshData() {
-  return { positions: [], normals: [], uvs: [], indices: [] };
+  return { positions: [], normals: [], colors: [], uvs: [], indices: [] };
 }
 
 function vertex(mesh, position, normal, uv = [0, 0]) {
   const index = mesh.positions.length / 3;
   mesh.positions.push(...position.map(round));
   mesh.normals.push(...normal.map(round));
+  const shade = Math.max(0.57, Math.min(1,
+    0.75 + normal[1] * 0.12 - normal[0] * 0.07 + Math.abs(normal[2]) * 0.12));
+  mesh.colors.push(round(shade), round(shade), round(shade));
   mesh.uvs.push(...uv.map(round));
   return index;
 }
@@ -213,7 +216,10 @@ function glb(fish, meshes, tail, tailPivot, layoutHash) {
     attributes: {
       POSITION: accessor(mesh.positions, 5126, 'VEC3', 34962, true),
       NORMAL: accessor(mesh.normals, 5126, 'VEC3', 34962),
-      ...(material === 0 ? { TEXCOORD_0: accessor(mesh.uvs, 5126, 'VEC2', 34962) } : {}),
+      ...(material === 0 ? {
+        TEXCOORD_0: accessor(mesh.uvs, 5126, 'VEC2', 34962),
+        COLOR_0: accessor(mesh.colors, 5126, 'VEC3', 34962),
+      } : {}),
     },
     indices: accessor(mesh.indices, 5123, 'SCALAR', 34963),
     material,

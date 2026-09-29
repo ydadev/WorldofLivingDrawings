@@ -341,7 +341,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     const container = await pending;
     if (this.disposed || this.markers.get(entity.id) !== marker) return;
     for (const material of container.materials) {
-      if (material instanceof PBRMaterial) material.unlit = material.name !== 'paint';
+      if (material instanceof PBRMaterial) material.unlit = true;
     }
     const entries = container.instantiateModelsToScene(name => `${entity.id}/${name}`, false,
       { doNotInstantiate: true });
@@ -365,7 +365,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
             let material = clonedMaterials.get(node.material);
             if (!material) {
               material = node.material.clone(`${entity.id}/paint`);
-              material.unlit = false;
+              material.unlit = true;
               material.albedoColor = Color3.White();
               material.albedoTexture = texture;
               clonedMaterials.set(node.material, material);
