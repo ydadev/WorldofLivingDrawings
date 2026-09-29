@@ -1,5 +1,6 @@
 use sqlx::{PgPool, migrate::MigrateError};
 pub mod access;
+pub mod http;
 
 /// The server uses versioned, embedded migrations; no database credentials live in source.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
@@ -9,6 +10,13 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, StatusCode, header},
+    };
+    use std::{net::SocketAddr, sync::Arc};
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -273,5 +281,114 @@ mod tests {
                 .await,
             Err(access::AccessError::RateLimited)
         ));
+
+        let app = http::router(http::AppState {
+            access: store.clone(),
+            public_origin: Arc::from("https://world.example.test"),
+        });
+        let owner_cookie = format!("__Host-ldw-owner={}", first.token);
+        let own_request = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", first_scene.session_id))
+            .header(header::COOKIE, &owner_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(own_request).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let foreign_request = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", second_scene.session_id))
+            .header(header::COOKIE, &owner_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(foreign_request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let missing_origin = Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header(header::COOKIE, &owner_cookie)
+            .header("x-csrf-token", &first.csrf)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(missing_origin).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let bad_csrf = Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header(header::COOKIE, &owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", &second.csrf)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(bad_csrf).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let correct = Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header(header::COOKIE, &owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", &first.csrf)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(correct).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let second_invite = store
+            .open_invitation(&second.token, &second.csrf, second_scene.session_id)
+            .await
+            .expect("owner two opens own invitation");
+        let pair_body = serde_json::json!({
+            "client_key": "http-client", "qr_secret": second_invite.qr_secret,
+        });
+        let mut pair_request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{}/pair", second_scene.session_id))
+            .header(header::ORIGIN, "https://world.example.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(pair_body.to_string()))
+            .unwrap();
+        pair_request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:4100".parse::<SocketAddr>().unwrap()));
+        let pair_response = app.clone().oneshot(pair_request).await.unwrap();
+        assert_eq!(pair_response.status(), StatusCode::OK);
+        let set_cookie = pair_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            set_cookie.contains("Secure")
+                && set_cookie.contains("HttpOnly")
+                && set_cookie.contains("SameSite=Strict")
+        );
+        let controller_cookie = set_cookie.split(';').next().unwrap();
+        let controller_own = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", second_scene.session_id))
+            .header(header::COOKIE, controller_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(controller_own).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let controller_foreign = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", first_scene.session_id))
+            .header(header::COOKIE, controller_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(controller_foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 }

@@ -1,0 +1,294 @@
+use std::{net::SocketAddr, sync::Arc};
+
+use axum::{
+    Json, Router,
+    extract::{ConnectInfo, Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::access::{AccessError, AccessStore, PairCode};
+
+const OWNER_COOKIE: &str = "__Host-ldw-owner";
+const CONTROLLER_COOKIE: &str = "__Host-ldw-controller";
+
+#[derive(Clone)]
+pub struct AppState {
+    pub access: AccessStore,
+    pub public_origin: Arc<str>,
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/login", post(login))
+        .route("/api/owners", post(create_owner))
+        .route("/api/sessions", post(create_session))
+        .route("/api/sessions/{id}/scene", get(scene))
+        .route("/api/sessions/{id}/invitation", post(open_invitation))
+        .route("/api/sessions/{id}/pair", post(pair))
+        .layer(middleware::map_response(no_store))
+        .with_state(state)
+}
+
+async fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+#[derive(Debug)]
+struct ApiError(StatusCode, &'static str);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<AccessError> for ApiError {
+    fn from(error: AccessError) -> Self {
+        match error {
+            AccessError::Forbidden | AccessError::InvalidCredentials => {
+                Self(StatusCode::FORBIDDEN, "ACCESS_DENIED")
+            }
+            AccessError::AlreadyInitialized => Self(StatusCode::CONFLICT, "ALREADY_INITIALIZED"),
+            AccessError::InvalidAccount => Self(StatusCode::BAD_REQUEST, "INVALID_ACCOUNT"),
+            AccessError::RateLimited => Self(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
+            AccessError::ControllerLimit => Self(StatusCode::CONFLICT, "CONTROLLER_LIMIT"),
+            AccessError::OwnerApprovalRequired => {
+                Self(StatusCode::FORBIDDEN, "OWNER_APPROVAL_REQUIRED")
+            }
+            AccessError::Crypto | AccessError::Database(_) => {
+                Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
+            }
+        }
+    }
+}
+
+fn require_origin(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
+    if headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        != Some(state.public_origin.as_ref())
+    {
+        return Err(ApiError(StatusCode::FORBIDDEN, "ORIGIN_DENIED"));
+    }
+    Ok(())
+}
+
+fn csrf<'a>(headers: &'a HeaderMap) -> Result<&'a str, ApiError> {
+    headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError(StatusCode::FORBIDDEN, "CSRF_REQUIRED"))
+}
+
+fn cookie_token<'a>(jar: &'a CookieJar, name: &str) -> Result<&'a str, ApiError> {
+    jar.get(name)
+        .map(Cookie::value)
+        .ok_or(ApiError(StatusCode::FORBIDDEN, "ACCESS_DENIED"))
+}
+
+fn auth_cookie(name: &'static str, token: String) -> Cookie<'static> {
+    Cookie::build((name, token))
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .build()
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    login: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    role: String,
+    csrf: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<LoginRequest>,
+) -> Result<(CookieJar, Json<LoginResponse>), ApiError> {
+    require_origin(&headers, &state)?;
+    let grant = state.access.login(&input.login, &input.password).await?;
+    let response = LoginResponse {
+        role: grant.role,
+        csrf: grant.csrf,
+    };
+    Ok((
+        jar.add(auth_cookie(OWNER_COOKIE, grant.token)),
+        Json(response),
+    ))
+}
+
+#[derive(Deserialize)]
+struct OwnerRequest {
+    login: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct IdResponse {
+    id: Uuid,
+}
+
+async fn create_owner(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<OwnerRequest>,
+) -> Result<Json<IdResponse>, ApiError> {
+    require_origin(&headers, &state)?;
+    let token = cookie_token(&jar, OWNER_COOKIE)?;
+    state
+        .access
+        .check_owner_csrf(token, csrf(&headers)?)
+        .await?;
+    let id = state
+        .access
+        .create_owner(token, &input.login, &input.password)
+        .await?;
+    Ok(Json(IdResponse { id }))
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    session_id: Uuid,
+    scene_id: Uuid,
+}
+
+async fn create_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<SessionResponse>, ApiError> {
+    require_origin(&headers, &state)?;
+    let ids = state
+        .access
+        .create_session(cookie_token(&jar, OWNER_COOKIE)?, csrf(&headers)?)
+        .await?;
+    Ok(Json(SessionResponse {
+        session_id: ids.session_id,
+        scene_id: ids.scene_id,
+    }))
+}
+
+#[derive(Serialize)]
+struct SceneResponse {
+    session_id: Uuid,
+    scene_id: Uuid,
+    world_id: String,
+    world_version: i32,
+    scene_epoch: i64,
+    revision: i64,
+}
+
+async fn scene(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    jar: CookieJar,
+) -> Result<Json<SceneResponse>, ApiError> {
+    let summary = if let Some(owner) = jar.get(OWNER_COOKIE) {
+        state.access.owner_scene(owner.value(), session_id).await?
+    } else {
+        state
+            .access
+            .controller_scene(cookie_token(&jar, CONTROLLER_COOKIE)?, session_id)
+            .await?
+    };
+    Ok(Json(SceneResponse {
+        session_id: summary.session_id,
+        scene_id: summary.scene_id,
+        world_id: summary.world_id,
+        world_version: summary.world_version,
+        scene_epoch: summary.scene_epoch,
+        revision: summary.revision,
+    }))
+}
+
+#[derive(Serialize)]
+struct InvitationResponse {
+    pin: String,
+    qr_secret: String,
+    expires_in_seconds: u32,
+}
+
+async fn open_invitation(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<InvitationResponse>, ApiError> {
+    require_origin(&headers, &state)?;
+    let invitation = state
+        .access
+        .open_invitation(
+            cookie_token(&jar, OWNER_COOKIE)?,
+            csrf(&headers)?,
+            session_id,
+        )
+        .await?;
+    Ok(Json(InvitationResponse {
+        pin: invitation.pin,
+        qr_secret: invitation.qr_secret,
+        expires_in_seconds: 300,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PairRequest {
+    client_key: String,
+    pin: Option<String>,
+    qr_secret: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PairResponse {
+    participant_id: Uuid,
+    csrf: String,
+}
+
+async fn pair(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<PairRequest>,
+) -> Result<(CookieJar, Json<PairResponse>), ApiError> {
+    require_origin(&headers, &state)?;
+    let code = match (input.pin.as_deref(), input.qr_secret.as_deref()) {
+        (Some(pin), None) => PairCode::Pin(pin),
+        (None, Some(secret)) => PairCode::Qr(secret),
+        _ => return Err(ApiError(StatusCode::BAD_REQUEST, "ONE_PAIR_CODE_REQUIRED")),
+    };
+    let grant = state
+        .access
+        .pair_controller(session_id, &input.client_key, &peer.ip().to_string(), code)
+        .await?;
+    let response = PairResponse {
+        participant_id: grant.participant_id,
+        csrf: grant.csrf,
+    };
+    Ok((
+        jar.add(auth_cookie(CONTROLLER_COOKIE, grant.token)),
+        Json(response),
+    ))
+}
