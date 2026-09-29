@@ -1,7 +1,7 @@
 //! Browser integration fixture. Runs the real router and simulation against an
 //! isolated temporary PostgreSQL database; never used by the application.
 
-use std::{env, error::Error, net::SocketAddr, sync::Arc};
+use std::{env, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use ldw_server::{
     access::AccessStore,
@@ -49,7 +49,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let hub = simulation::SimulationHub::default();
     let simulation_task = tokio::spawn(simulation::run(pool, shutdown_rx, hub.clone()));
-    let blob_directory = env::temp_dir().join(format!("ldw-ui-blobs-{}", uuid::Uuid::new_v4()));
+    let provided_blob_directory = env::var_os("LDW_UI_BLOB_DIR").map(PathBuf::from);
+    let blob_directory = provided_blob_directory
+        .clone()
+        .unwrap_or_else(|| env::temp_dir().join(format!("ldw-ui-blobs-{}", uuid::Uuid::new_v4())));
     let app = router(AppState {
         access,
         blob_store: BlobStore::create(blob_directory.clone())?,
@@ -66,6 +69,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await?;
     let _ = shutdown_tx.send(true);
     simulation_task.await??;
-    std::fs::remove_dir_all(blob_directory)?;
+    if provided_blob_directory.is_none() {
+        std::fs::remove_dir_all(blob_directory)?;
+    }
     Ok(())
 }

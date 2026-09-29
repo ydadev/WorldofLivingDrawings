@@ -18,6 +18,7 @@ if (!executable || !process.env.DATABASE_URL) throw new Error('Chrome and DATABA
 const origin = 'https://127.0.0.1:9443';
 const fixturePassword = randomBytes(24).toString('base64url');
 const temp = mkdtempSync(path.join(os.tmpdir(), 'ldw-ui-'));
+const blobRoot = path.join(temp, 'blobs');
 const keyPath = path.join(temp, 'key.pem');
 const certPath = path.join(temp, 'cert.pem');
 execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
@@ -27,7 +28,8 @@ execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyo
 const fixture = spawn('cargo', ['run', '-p', 'ldw-server', '--example', 'browser_fixture', '--locked'], {
   cwd: root, env: { ...process.env, LDW_UI_BASE_DATABASE_URL: process.env.DATABASE_URL,
     LDW_UI_FIXTURE_PASSWORD: fixturePassword, LDW_UI_PUBLIC_ORIGIN: origin,
-    LDW_UI_BIND_ADDR: '127.0.0.1:4189' }, stdio: ['ignore', 'pipe', 'pipe'],
+    LDW_UI_BIND_ADDR: '127.0.0.1:4189', LDW_UI_BLOB_DIR: blobRoot },
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
 let fixtureError = '';
 fixture.stderr.on('data', chunk => { fixtureError += chunk.toString(); });
@@ -122,6 +124,23 @@ function recordFrames(page, frames) {
   page.on('websocket', socket => socket.on('framereceived', frame => {
     try { frames.push(JSON.parse(frame.payload)); } catch { /* ignore non-JSON */ }
   }));
+}
+async function verifyRecoveredScene(sessionId, coralBlob, streamBlob) {
+  const result = await new Promise((resolve, reject) => {
+    const check = spawn('bash', [path.join(root, 'tools/test-live-scene-restore.sh'),
+      temp, sessionId, coralBlob, streamBlob], {
+      cwd: root, env: { ...process.env, LDW_RESTORE_OWNER_PASSWORD: fixturePassword },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    check.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    check.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    check.on('error', reject);
+    check.on('close', code => code === 0 ? resolve(stdout) : reject(new Error(
+      `Live scene restore failed (${code}): ${stderr.slice(-3000)}`)));
+  });
+  console.log(result.trim());
 }
 
 try {
@@ -287,6 +306,8 @@ try {
     frame.actionPositions?.some(action => action.id.startsWith('boat-')));
 
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
+  await verifyRecoveredScene(sessionId, published.event.entity.paintBlobId,
+    paperPublished.event.entity.paintBlobId);
   console.log('CORE-04 real backend UI: HTTPS cookies, PostgreSQL, drawn and paper fish publication, Owner, Viewer, Controller, feed and boat: PASS');
 } finally {
   await browser?.close();

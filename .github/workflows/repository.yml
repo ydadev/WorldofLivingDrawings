@@ -16,5 +16,5 @@ jobs:
         run: node tools/check-repository.mjs --history
       - name: Check shell syntax
         run: |
-          bash -n infra/bootstrap-ubuntu.sh infra/backup-local.sh infra/backup-consistent.sh infra/backup-manifest.sh tools/test-backup-consistency.sh
+          bash -n infra/bootstrap-ubuntu.sh infra/backup-local.sh infra/backup-consistent.sh infra/backup-manifest.sh tools/test-backup-consistency.sh tools/test-live-scene-restore.sh
           sh -n infra/postgres/10-app.sh .githooks/pre-commit .githooks/commit-msg .githooks/pre-push
