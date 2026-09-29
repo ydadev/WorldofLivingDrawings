@@ -13,8 +13,11 @@ mod tests {
 
     #[tokio::test]
     async fn migration_keeps_active_scene_inside_its_session() {
-        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL for isolated test database");
-        let pool = PgPool::connect(&database_url).await.expect("connect test PostgreSQL");
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL for isolated test database");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect test PostgreSQL");
         migrate(&pool).await.expect("apply migrations");
         migrate(&pool).await.expect("migrations are repeatable");
 
@@ -26,7 +29,11 @@ mod tests {
         let session_b = Uuid::new_v4();
         for session in [session_a, session_b] {
             sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
-                .bind(session).bind(owner).execute(&pool).await.expect("insert session");
+                .bind(session)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .expect("insert session");
         }
         let scene_a = Uuid::new_v4();
         let scene_b = Uuid::new_v4();
@@ -35,71 +42,236 @@ mod tests {
                 .bind(scene).bind(session).execute(&pool).await.expect("insert scene");
         }
         let wrong = sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
-            .bind(scene_b).bind(session_a).execute(&pool).await;
-        assert!(wrong.is_err(), "a session cannot activate another session’s scene");
+            .bind(scene_b)
+            .bind(session_a)
+            .execute(&pool)
+            .await;
+        assert!(
+            wrong.is_err(),
+            "a session cannot activate another session’s scene"
+        );
         sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
-            .bind(scene_a).bind(session_a).execute(&pool).await.expect("activate own scene");
+            .bind(scene_a)
+            .bind(session_a)
+            .execute(&pool)
+            .await
+            .expect("activate own scene");
         let found: Uuid = sqlx::query_scalar("SELECT active_scene_id FROM sessions WHERE id = $1")
-            .bind(session_a).fetch_one(&pool).await.expect("read own scene");
+            .bind(session_a)
+            .fetch_one(&pool)
+            .await
+            .expect("read own scene");
         assert_eq!(found, scene_a);
 
         let store = access::AccessStore::new(pool.clone(), [7u8; 32]);
         let admin_password = Uuid::new_v4().to_string();
-        store.bootstrap_admin("ci-admin", &admin_password).await.expect("bootstrap admin once");
-        assert!(store.bootstrap_admin("other-admin", &admin_password).await.is_err());
+        store
+            .bootstrap_admin("ci-admin", &admin_password)
+            .await
+            .expect("bootstrap admin once");
+        assert!(
+            store
+                .bootstrap_admin("other-admin", &admin_password)
+                .await
+                .is_err()
+        );
         assert!(store.login("ci-admin", "wrong-password").await.is_err());
-        let admin = store.login("ci-admin", &admin_password).await.expect("admin login");
+        let admin = store
+            .login("ci-admin", &admin_password)
+            .await
+            .expect("admin login");
         let first_password = Uuid::new_v4().to_string();
         let second_password = Uuid::new_v4().to_string();
-        store.create_owner(&admin.token, "ci-owner-one", &first_password).await.expect("first owner");
-        store.create_owner(&admin.token, "ci-owner-two", &second_password).await.expect("second owner");
-        let first = store.login("ci-owner-one", &first_password).await.expect("first login");
-        let second = store.login("ci-owner-two", &second_password).await.expect("second login");
-        assert!(store.create_owner(&first.token, "unauthorized-owner", &first_password).await.is_err());
-        assert!(store.create_session(&first.token, &second.csrf).await.is_err());
-        let first_scene = store.create_session(&first.token, &first.csrf).await.expect("first session");
-        let second_scene = store.create_session(&second.token, &second.csrf).await.expect("second session");
-        assert_eq!(store.owner_scene(&first.token, first_scene.session_id).await.expect("own scene").scene_id,
-            first_scene.scene_id);
-        assert!(store.owner_scene(&first.token, second_scene.session_id).await.is_err(),
-            "owner token cannot read another owner's scene");
-        assert_eq!(store.owner_scene(&admin.token, second_scene.session_id).await.expect("admin access").scene_id,
-            second_scene.scene_id);
+        store
+            .create_owner(&admin.token, "ci-owner-one", &first_password)
+            .await
+            .expect("first owner");
+        store
+            .create_owner(&admin.token, "ci-owner-two", &second_password)
+            .await
+            .expect("second owner");
+        let first = store
+            .login("ci-owner-one", &first_password)
+            .await
+            .expect("first login");
+        let second = store
+            .login("ci-owner-two", &second_password)
+            .await
+            .expect("second login");
+        assert!(
+            store
+                .create_owner(&first.token, "unauthorized-owner", &first_password)
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .create_session(&first.token, &second.csrf)
+                .await
+                .is_err()
+        );
+        let first_scene = store
+            .create_session(&first.token, &first.csrf)
+            .await
+            .expect("first session");
+        let second_scene = store
+            .create_session(&second.token, &second.csrf)
+            .await
+            .expect("second session");
+        assert_eq!(
+            store
+                .owner_scene(&first.token, first_scene.session_id)
+                .await
+                .expect("own scene")
+                .scene_id,
+            first_scene.scene_id
+        );
+        assert!(
+            store
+                .owner_scene(&first.token, second_scene.session_id)
+                .await
+                .is_err(),
+            "owner token cannot read another owner's scene"
+        );
+        assert_eq!(
+            store
+                .owner_scene(&admin.token, second_scene.session_id)
+                .await
+                .expect("admin access")
+                .scene_id,
+            second_scene.scene_id
+        );
 
-        let invite = store.open_invitation(&first.token, &first.csrf, first_scene.session_id)
-            .await.expect("owner opens invitation");
+        let invite = store
+            .open_invitation(&first.token, &first.csrf, first_scene.session_id)
+            .await
+            .expect("owner opens invitation");
         assert_eq!(invite.pin.len(), 6);
-        assert!(store.open_invitation(&second.token, &second.csrf, first_scene.session_id).await.is_err(),
-            "other owner cannot open pairing");
-        assert!(store.pair_controller(first_scene.session_id, "device-a", "test-ip",
-            access::PairCode::Pin("0000000")).await.is_err());
-        let controller = store.pair_controller(first_scene.session_id, "device-a", "test-ip",
-            access::PairCode::Pin(&invite.pin)).await.expect("valid PIN pairs controller");
-        assert_eq!(store.controller_scene(&controller.token, first_scene.session_id)
-            .await.expect("controller reads own scene").scene_id, first_scene.scene_id);
-        assert!(store.controller_scene(&controller.token, second_scene.session_id).await.is_err(),
-            "controller token cannot read another session");
-        assert!(store.check_controller_csrf(&controller.token, &second.csrf, first_scene.session_id)
-            .await.is_err(), "controller cannot use another CSRF token");
-        store.check_controller_csrf(&controller.token, &controller.csrf, first_scene.session_id)
-            .await.expect("own CSRF token");
-        let replacement = store.open_invitation(&first.token, &first.csrf, first_scene.session_id)
-            .await.expect("rotate invitation");
-        assert!(store.pair_controller(first_scene.session_id, "device-b", "test-ip",
-            access::PairCode::Qr(&invite.qr_secret)).await.is_err(), "old QR must be invalid");
+        assert!(
+            store
+                .open_invitation(&second.token, &second.csrf, first_scene.session_id)
+                .await
+                .is_err(),
+            "other owner cannot open pairing"
+        );
+        assert!(
+            store
+                .pair_controller(
+                    first_scene.session_id,
+                    "device-a",
+                    "test-ip",
+                    access::PairCode::Pin("0000000")
+                )
+                .await
+                .is_err()
+        );
+        let controller = store
+            .pair_controller(
+                first_scene.session_id,
+                "device-a",
+                "test-ip",
+                access::PairCode::Pin(&invite.pin),
+            )
+            .await
+            .expect("valid PIN pairs controller");
+        assert_eq!(
+            store
+                .controller_scene(&controller.token, first_scene.session_id)
+                .await
+                .expect("controller reads own scene")
+                .scene_id,
+            first_scene.scene_id
+        );
+        assert!(
+            store
+                .controller_scene(&controller.token, second_scene.session_id)
+                .await
+                .is_err(),
+            "controller token cannot read another session"
+        );
+        assert!(
+            store
+                .check_controller_csrf(&controller.token, &second.csrf, first_scene.session_id)
+                .await
+                .is_err(),
+            "controller cannot use another CSRF token"
+        );
+        store
+            .check_controller_csrf(&controller.token, &controller.csrf, first_scene.session_id)
+            .await
+            .expect("own CSRF token");
+        let replacement = store
+            .open_invitation(&first.token, &first.csrf, first_scene.session_id)
+            .await
+            .expect("rotate invitation");
+        assert!(
+            store
+                .pair_controller(
+                    first_scene.session_id,
+                    "device-b",
+                    "test-ip",
+                    access::PairCode::Qr(&invite.qr_secret)
+                )
+                .await
+                .is_err(),
+            "old QR must be invalid"
+        );
         for number in 0..9 {
-            store.pair_controller(first_scene.session_id, &format!("device-{number}"), "test-ip",
-                access::PairCode::Qr(&replacement.qr_secret)).await.expect("controller within limit");
+            store
+                .pair_controller(
+                    first_scene.session_id,
+                    &format!("device-{number}"),
+                    "test-ip",
+                    access::PairCode::Qr(&replacement.qr_secret),
+                )
+                .await
+                .expect("controller within limit");
         }
-        assert!(matches!(store.pair_controller(first_scene.session_id, "last-device", "test-ip",
-            access::PairCode::Qr(&replacement.qr_secret)).await, Err(access::AccessError::ControllerLimit)));
+        assert!(matches!(
+            store
+                .pair_controller(
+                    first_scene.session_id,
+                    "last-device",
+                    "test-ip",
+                    access::PairCode::Qr(&replacement.qr_secret)
+                )
+                .await,
+            Err(access::AccessError::ControllerLimit)
+        ));
         for _ in 0..4 {
-            assert!(store.pair_controller(second_scene.session_id, "guessing-device", "other-ip",
-                access::PairCode::Pin("111111")).await.is_err());
+            assert!(
+                store
+                    .pair_controller(
+                        second_scene.session_id,
+                        "guessing-device",
+                        "other-ip",
+                        access::PairCode::Pin("111111")
+                    )
+                    .await
+                    .is_err()
+            );
         }
-        assert!(matches!(store.pair_controller(second_scene.session_id, "guessing-device", "other-ip",
-            access::PairCode::Pin("111111")).await, Err(access::AccessError::InvalidCredentials)));
-        assert!(matches!(store.pair_controller(second_scene.session_id, "guessing-device", "other-ip",
-            access::PairCode::Pin("111111")).await, Err(access::AccessError::RateLimited)));
+        assert!(matches!(
+            store
+                .pair_controller(
+                    second_scene.session_id,
+                    "guessing-device",
+                    "other-ip",
+                    access::PairCode::Pin("111111")
+                )
+                .await,
+            Err(access::AccessError::InvalidCredentials)
+        ));
+        assert!(matches!(
+            store
+                .pair_controller(
+                    second_scene.session_id,
+                    "guessing-device",
+                    "other-ip",
+                    access::PairCode::Pin("111111")
+                )
+                .await,
+            Err(access::AccessError::RateLimited)
+        ));
     }
 }

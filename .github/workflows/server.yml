@@ -39,5 +39,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Install rustfmt
+        run: rustup component add rustfmt --toolchain 1.98.1
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
       - name: Check server crate and migration constraints
         run: cargo test -p ldw-server --locked
