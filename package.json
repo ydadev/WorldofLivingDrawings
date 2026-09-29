@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "engines": { "node": "24.18.0" },
-  "workspaces": ["web/contracts", "web/renderer", "web/renderer-babylon", "web/transport"],
+  "workspaces": ["web/contracts", "web/renderer", "web/renderer-babylon", "web/transport", "web/world-ui"],
   "scripts": {
     "build:content": "node tools/build-content.mjs",
     "test:contracts": "node tools/test-contracts.mjs",

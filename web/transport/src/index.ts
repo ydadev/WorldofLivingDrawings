@@ -165,7 +165,11 @@ export class SceneConnection {
           value.positions.length > 100 || !value.positions.every(item =>
             item && typeof item.id === 'string' && item.position && item.heading &&
             Number.isFinite(item.position.x) && Number.isFinite(item.position.y) &&
-            Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y))) return;
+            Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y)) ||
+          (value.actionPositions !== undefined && (!Array.isArray(value.actionPositions) ||
+            value.actionPositions.length > 1 || !value.actionPositions.every(item =>
+              item && typeof item.id === 'string' && item.position &&
+              Number.isFinite(item.position.x) && Number.isFinite(item.position.y))))) return;
       this.simulationTick = value.simulationTick;
       this.options.onPositions(value as unknown as ScenePositions);
     } else if (value.type === 'ack') {

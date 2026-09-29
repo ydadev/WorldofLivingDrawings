@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Просмотр подводного мира</title>
+  </head>
+  <body data-role="viewer">
+    <main class="live-main">
+      <h1>Подводный мир на экране</h1>
+      <form id="access-form" class="live-access">
+        <label>ID сессии <input name="sessionId" autocomplete="off" required></label>
+        <button type="submit">Получить код подключения</button>
+      </form>
+      <p id="access-status" role="status" aria-live="polite"></p>
+      <section id="world-shell" hidden>
+        <p>Сессия: <code id="session-id"></code></p>
+        <div id="action-panel" class="interaction-controls">
+          <button type="button" id="action-feed">Корм</button>
+          <button type="button" id="action-boat">Подводная лодка</button>
+          <button type="button" id="action-cancel">Отмена</button>
+        </div>
+        <p id="interaction-status" role="status" aria-live="polite"></p>
+        <div id="world-stage" class="live-stage">
+          <canvas id="world-canvas" aria-label="Фиксированный вид подводного мира"></canvas>
+          <span id="world-crosshair" class="live-crosshair" aria-hidden="true" hidden>+</span>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/live-app.ts"></script>
+  </body>
+</html>

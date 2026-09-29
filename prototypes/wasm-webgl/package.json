@@ -16,7 +16,8 @@
     "test:paint": "node ../../tools/test-paint-browser.mjs",
     "test:capture": "node ../../tools/test-capture-browser.mjs",
     "test:interaction": "node ../../tools/test-interaction-browser.mjs",
-    "test:core-renderer": "node ../../tools/test-core-renderer-browser.mjs"
+    "test:core-renderer": "node ../../tools/test-core-renderer-browser.mjs",
+    "test:live-ui": "node ../../tools/test-live-ui-browser.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "9.28.0",

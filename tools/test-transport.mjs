@@ -56,10 +56,14 @@ const frame = (tick, revision = 0, epoch = 1) => ({
     heading: { x: 1, y: 0 } }],
 });
 first.receive(frame(10));
+first.receive({ ...frame(11), actionPositions: [
+  { id: 'boat-1', position: { x: Number.POSITIVE_INFINITY, y: 0 } }] });
+first.receive({ ...frame(12), actionPositions: [
+  { id: 'boat-1', position: { x: -6, y: 0 } }] });
 first.receive(frame(10));
 first.receive(frame(9));
 first.receive(frame(20, 2));
-assert.equal(positions.length, 1, 'only a new tick based on an applied revision is accepted');
+assert.equal(positions.length, 2, 'only valid new ticks based on an applied revision are accepted');
 const firstId = connection.sendInteraction('feed', { x: 1, y: -1 });
 assert.equal(typeof firstId, 'string');
 assert.equal(first.sent.at(-1).commandId, firstId);
@@ -69,7 +73,7 @@ assert.equal(results.length, 1);
 first.receive(delta(1));
 assert.equal(deltas.length, 1);
 first.receive(frame(20, 1));
-assert.equal(positions.length, 2);
+assert.equal(positions.length, 3);
 first.receive(delta(3));
 assert.equal(first.closed, true, 'revision gap discards the socket');
 assert.equal(sockets.length, 2, 'revision gap requests a fresh snapshot');
@@ -80,9 +84,9 @@ second.open();
 second.receive(snapshot(3));
 assert.equal(snapshots.at(-1).revision, 3);
 second.receive(frame(5, 3));
-assert.equal(positions.length, 3, 'a fresh snapshot resets the logical tick cursor');
+assert.equal(positions.length, 4, 'a fresh snapshot resets the logical tick cursor');
 second.receive(frame(30, 3, 2));
-assert.equal(positions.length, 3, 'old or wrong-epoch frames are ignored');
+assert.equal(positions.length, 4, 'old or wrong-epoch frames are ignored');
 const pendingId = connection.sendInteraction('boat', { x: 2, y: 1 });
 const original = second.sent.at(-1);
 second.close();

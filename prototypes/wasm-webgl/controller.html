@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Управление подводным миром</title>
+  </head>
+  <body data-role="controller">
+    <main class="live-main">
+      <h1>Управление миром</h1>
+      <form id="access-form" class="live-access">
+        <label>ID сессии <input name="sessionId" autocomplete="off" required></label>
+        <label>Код подключения <input name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required></label>
+        <button type="submit">Подключиться</button>
+      </form>
+      <p id="access-status" role="status" aria-live="polite"></p>
+      <section id="world-shell" hidden>
+        <p>Сессия: <code id="session-id"></code></p>
+        <button type="button" id="view-toggle" aria-expanded="false">Показать мир</button>
+        <div id="action-panel" class="interaction-controls">
+          <button type="button" id="action-feed">Корм</button>
+          <button type="button" id="action-boat">Подводная лодка</button>
+          <button type="button" id="action-cancel">Отмена</button>
+        </div>
+        <p id="interaction-status" role="status" aria-live="polite"></p>
+        <div id="world-stage" class="live-stage" hidden>
+          <canvas id="world-canvas" aria-label="Облегчённый вид подводного мира; выбор точки действия"></canvas>
+          <span id="world-crosshair" class="live-crosshair" aria-hidden="true" hidden>+</span>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/live-app.ts"></script>
+  </body>
+</html>
