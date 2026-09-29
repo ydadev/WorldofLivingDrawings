@@ -291,11 +291,15 @@ mod tests {
             event_count, 1,
             "duplicate and conflict do not create events"
         );
-        sqlx::query("UPDATE scenes SET scene_epoch = 2 WHERE id = $1")
-            .bind(first_scene.scene_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        assert!(store.bump_active_epochs().await.unwrap() >= 2);
+        assert_eq!(
+            store
+                .owner_scene(&first.token, first_scene.session_id)
+                .await
+                .unwrap()
+                .scene_epoch,
+            2
+        );
         assert_eq!(
             realtime::process_command(
                 &store,
@@ -419,6 +423,35 @@ mod tests {
                 .await,
             Err(access::AccessError::ControllerLimit)
         ));
+        sqlx::query("UPDATE device_grants SET last_heartbeat_at = now() - interval '61 seconds' WHERE token_hash = $1")
+            .bind(access::hash_token(&controller.token).to_vec())
+            .execute(&pool).await.unwrap();
+        let replacement_controller = store
+            .pair_controller(
+                first_scene.session_id,
+                "replacement-device",
+                "test-ip",
+                access::PairCode::Qr(&replacement.qr_secret),
+            )
+            .await
+            .expect("disconnected Controller frees a slot");
+        assert!(matches!(
+            store
+                .resume_controller(&controller.token, first_scene.session_id)
+                .await,
+            Err(access::AccessError::ControllerLimit)
+        ));
+        sqlx::query("UPDATE device_grants SET last_heartbeat_at = now() - interval '61 seconds' WHERE token_hash = $1")
+            .bind(access::hash_token(&replacement_controller.token).to_vec())
+            .execute(&pool).await.unwrap();
+        store
+            .resume_controller(&controller.token, first_scene.session_id)
+            .await
+            .expect("Controller reuses newly free slot");
+        store
+            .heartbeat_controller(&controller.token, first_scene.session_id)
+            .await
+            .expect("active Controller updates heartbeat");
         for _ in 0..4 {
             assert!(
                 store

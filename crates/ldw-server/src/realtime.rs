@@ -71,6 +71,13 @@ pub async fn websocket(
     } else {
         return Err(StatusCode::FORBIDDEN);
     };
+    if kind == GrantKind::Controller {
+        state
+            .access
+            .resume_controller(&token, session_id)
+            .await
+            .map_err(access_status)?;
+    }
     state
         .access
         .scene_access(kind, &token, session_id)
@@ -153,6 +160,9 @@ async fn serve(
             _ = heartbeat.tick() => {
                 if last_pong.elapsed() > Duration::from_secs(10)
                     || store.check_socket_csrf(kind, &token, &csrf, session_id).await.is_err()
+                { break; }
+                if kind == GrantKind::Controller
+                    && store.heartbeat_controller(&token, session_id).await.is_err()
                 { break; }
                 if socket.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
             }
@@ -331,6 +341,12 @@ pub async fn process_command(
         } else {
             json!({"type":"error","code":"COMMAND_CONFLICT","commandId":command.command_id})
         });
+    }
+    if kind == GrantKind::Controller {
+        sqlx::query("UPDATE device_grants SET last_activity_at = now() WHERE id = $1")
+            .bind(access.grant_id)
+            .execute(&mut *tx)
+            .await?;
     }
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

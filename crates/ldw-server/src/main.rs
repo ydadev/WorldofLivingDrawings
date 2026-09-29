@@ -54,11 +54,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Err("LDW_PUBLIC_ORIGIN must be a bare HTTPS origin".into());
             }
             let address: SocketAddr = env::var("LDW_BIND_ADDR")?.parse()?;
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            access.bump_active_epochs().await?;
             let app = router(AppState {
                 access,
                 public_origin: Arc::from(origin),
             });
-            let listener = tokio::net::TcpListener::bind(address).await?;
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),

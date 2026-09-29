@@ -132,6 +132,86 @@ impl AccessStore {
         Ok(())
     }
 
+    /// A fresh runtime invalidates clicks prepared before the process restart.
+    /// Durable command outcomes remain readable because their lookup precedes epoch validation.
+    pub async fn bump_active_epochs(&self) -> Result<u64, AccessError> {
+        let updated = sqlx::query(
+            "UPDATE scenes c SET scene_epoch = c.scene_epoch + 1, updated_at = now() \
+             FROM sessions s WHERE c.id = s.active_scene_id AND s.status != 'closed'",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected())
+    }
+
+    pub async fn resume_controller(
+        &self,
+        token: &str,
+        session_id: Uuid,
+    ) -> Result<(), AccessError> {
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM sessions WHERE id = $1 FOR UPDATE")
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        let row: Option<(Uuid, bool)> = sqlx::query_as(
+            "SELECT id, coalesce(last_heartbeat_at > now() - interval '60 seconds', false) \
+             FROM device_grants WHERE session_id = $1 AND token_hash = $2 AND role = 'controller' \
+             AND revoked_at IS NULL AND expires_at > now() \
+             AND last_activity_at > now() - interval '2 hours' FOR UPDATE",
+        )
+        .bind(session_id)
+        .bind(hash_token(token).to_vec())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (grant_id, recently_connected) = row.ok_or(AccessError::Forbidden)?;
+        if !recently_connected {
+            let active: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM device_grants WHERE session_id = $1 AND role = 'controller' \
+                 AND revoked_at IS NULL AND expires_at > now() \
+                 AND last_activity_at > now() - interval '2 hours' \
+                 AND last_heartbeat_at > now() - interval '60 seconds'",
+            )
+            .bind(session_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if active >= 10 {
+                return Err(AccessError::ControllerLimit);
+            }
+        }
+        sqlx::query("UPDATE device_grants SET last_heartbeat_at = now() WHERE id = $1")
+            .bind(grant_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn heartbeat_controller(
+        &self,
+        token: &str,
+        session_id: Uuid,
+    ) -> Result<(), AccessError> {
+        let changed = sqlx::query(
+            "UPDATE device_grants SET last_heartbeat_at = now() WHERE session_id = $1 \
+             AND token_hash = $2 AND role = 'controller' AND revoked_at IS NULL \
+             AND expires_at > now() AND last_activity_at > now() - interval '2 hours'",
+        )
+        .bind(session_id)
+        .bind(hash_token(token).to_vec())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(AccessError::Forbidden);
+        }
+        Ok(())
+    }
+
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
     }
