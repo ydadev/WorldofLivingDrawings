@@ -254,7 +254,7 @@ try {
   assert(profile.frames > 10, `No sustained frames: ${JSON.stringify(profile)}`);
   console.log(`Short software-GPU 100-fish LOW probe: ${JSON.stringify(profile)}`);
   if (errors.length) throw new Error(`Browser errors: ${errors.join(' | ')}`);
-  console.log('CORE-04 Chrome: fixed view, painted GLB, feed state, interpolation and cleanup: PASS');
+  console.log('CORE-04 Chrome: fixed view, painted GLB, feed and boat state, interpolation and cleanup: PASS');
 } finally {
   await browser?.close();
   server.kill();
