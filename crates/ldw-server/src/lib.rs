@@ -65,5 +65,41 @@ mod tests {
             "owner token cannot read another owner's scene");
         assert_eq!(store.owner_scene(&admin.token, second_scene.session_id).await.expect("admin access").scene_id,
             second_scene.scene_id);
+
+        let invite = store.open_invitation(&first.token, &first.csrf, first_scene.session_id)
+            .await.expect("owner opens invitation");
+        assert_eq!(invite.pin.len(), 6);
+        assert!(store.open_invitation(&second.token, &second.csrf, first_scene.session_id).await.is_err(),
+            "other owner cannot open pairing");
+        assert!(store.pair_controller(first_scene.session_id, "device-a", "test-ip",
+            access::PairCode::Pin("0000000")).await.is_err());
+        let controller = store.pair_controller(first_scene.session_id, "device-a", "test-ip",
+            access::PairCode::Pin(&invite.pin)).await.expect("valid PIN pairs controller");
+        assert_eq!(store.controller_scene(&controller.token, first_scene.session_id)
+            .await.expect("controller reads own scene").scene_id, first_scene.scene_id);
+        assert!(store.controller_scene(&controller.token, second_scene.session_id).await.is_err(),
+            "controller token cannot read another session");
+        assert!(store.check_controller_csrf(&controller.token, &second.csrf, first_scene.session_id)
+            .await.is_err(), "controller cannot use another CSRF token");
+        store.check_controller_csrf(&controller.token, &controller.csrf, first_scene.session_id)
+            .await.expect("own CSRF token");
+        let replacement = store.open_invitation(&first.token, &first.csrf, first_scene.session_id)
+            .await.expect("rotate invitation");
+        assert!(store.pair_controller(first_scene.session_id, "device-b", "test-ip",
+            access::PairCode::Qr(&invite.qr_secret)).await.is_err(), "old QR must be invalid");
+        for number in 0..9 {
+            store.pair_controller(first_scene.session_id, &format!("device-{number}"), "test-ip",
+                access::PairCode::Qr(&replacement.qr_secret)).await.expect("controller within limit");
+        }
+        assert!(matches!(store.pair_controller(first_scene.session_id, "last-device", "test-ip",
+            access::PairCode::Qr(&replacement.qr_secret)).await, Err(access::AccessError::ControllerLimit)));
+        for _ in 0..4 {
+            assert!(store.pair_controller(second_scene.session_id, "guessing-device", "other-ip",
+                access::PairCode::Pin("111111")).await.is_err());
+        }
+        assert!(matches!(store.pair_controller(second_scene.session_id, "guessing-device", "other-ip",
+            access::PairCode::Pin("111111")).await, Err(access::AccessError::InvalidCredentials)));
+        assert!(matches!(store.pair_controller(second_scene.session_id, "guessing-device", "other-ip",
+            access::PairCode::Pin("111111")).await, Err(access::AccessError::RateLimited)));
     }
 }
