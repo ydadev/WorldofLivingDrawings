@@ -16,6 +16,7 @@ use crate::access::{AccessError, AccessStore, PairCode};
 
 const OWNER_COOKIE: &str = "__Host-ldw-owner";
 const CONTROLLER_COOKIE: &str = "__Host-ldw-controller";
+const VIEWER_COOKIE: &str = "__Host-ldw-viewer";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/owners", post(create_owner))
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}/scene", get(scene))
+        .route("/api/sessions/{id}/viewers", post(create_viewer))
         .route("/api/sessions/{id}/invitation", post(open_invitation))
         .route("/api/sessions/{id}/pair", post(pair))
         .layer(middleware::map_response(no_store))
@@ -71,6 +73,7 @@ impl From<AccessError> for ApiError {
             AccessError::InvalidAccount => Self(StatusCode::BAD_REQUEST, "INVALID_ACCOUNT"),
             AccessError::RateLimited => Self(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
             AccessError::ControllerLimit => Self(StatusCode::CONFLICT, "CONTROLLER_LIMIT"),
+            AccessError::ViewerLimit => Self(StatusCode::CONFLICT, "VIEWER_LIMIT"),
             AccessError::OwnerApprovalRequired => {
                 Self(StatusCode::FORBIDDEN, "OWNER_APPROVAL_REQUIRED")
             }
@@ -213,11 +216,17 @@ async fn scene(
 ) -> Result<Json<SceneResponse>, ApiError> {
     let summary = if let Some(owner) = jar.get(OWNER_COOKIE) {
         state.access.owner_scene(owner.value(), session_id).await?
+    } else if let Some(controller) = jar.get(CONTROLLER_COOKIE) {
+        state
+            .access
+            .controller_scene(controller.value(), session_id)
+            .await?
     } else {
         state
             .access
-            .controller_scene(cookie_token(&jar, CONTROLLER_COOKIE)?, session_id)
+            .viewer_scene(cookie_token(&jar, VIEWER_COOKIE)?, session_id)
             .await?
+            .0
     };
     Ok(Json(SceneResponse {
         session_id: summary.session_id,
@@ -227,6 +236,44 @@ async fn scene(
         scene_epoch: summary.scene_epoch,
         revision: summary.revision,
     }))
+}
+
+#[derive(Deserialize)]
+struct ViewerRequest {
+    interact: bool,
+}
+
+#[derive(Serialize)]
+struct ViewerResponse {
+    role: String,
+    csrf: String,
+}
+
+async fn create_viewer(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<ViewerRequest>,
+) -> Result<(CookieJar, Json<ViewerResponse>), ApiError> {
+    require_origin(&headers, &state)?;
+    let grant = state
+        .access
+        .create_viewer(
+            cookie_token(&jar, OWNER_COOKIE)?,
+            csrf(&headers)?,
+            session_id,
+            input.interact,
+        )
+        .await?;
+    let response = ViewerResponse {
+        role: grant.role,
+        csrf: grant.csrf,
+    };
+    Ok((
+        jar.add(auth_cookie(VIEWER_COOKIE, grant.token)),
+        Json(response),
+    ))
 }
 
 #[derive(Serialize)]

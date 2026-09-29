@@ -150,6 +150,49 @@ mod tests {
             second_scene.scene_id
         );
 
+        assert!(
+            store
+                .create_viewer(&second.token, &second.csrf, first_scene.session_id, false)
+                .await
+                .is_err(),
+            "another Owner cannot provision a Viewer"
+        );
+        let read_only = store
+            .create_viewer(&first.token, &first.csrf, first_scene.session_id, false)
+            .await
+            .expect("provision read-only Viewer");
+        let interactive = store
+            .create_viewer(&first.token, &first.csrf, first_scene.session_id, true)
+            .await
+            .expect("provision interactive Viewer");
+        assert_eq!(
+            store
+                .viewer_scene(&read_only.token, first_scene.session_id)
+                .await
+                .expect("Viewer reads own scene")
+                .1,
+            "viewer"
+        );
+        assert_eq!(
+            store
+                .viewer_scene(&interactive.token, first_scene.session_id)
+                .await
+                .expect("interactive Viewer reads own scene")
+                .1,
+            "viewer_interact"
+        );
+        assert!(
+            store
+                .viewer_scene(&read_only.token, second_scene.session_id)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            store
+                .create_viewer(&first.token, &first.csrf, first_scene.session_id, false)
+                .await,
+            Err(access::AccessError::ViewerLimit)
+        ));
         let invite = store
             .open_invitation(&first.token, &first.csrf, first_scene.session_id)
             .await
@@ -347,6 +390,78 @@ mod tests {
         assert_eq!(
             app.clone().oneshot(correct).await.unwrap().status(),
             StatusCode::OK
+        );
+
+        let second_owner_cookie = format!("__Host-ldw-owner={}", second.token);
+        let viewer_body = serde_json::json!({ "interact": false }).to_string();
+        let viewer_without_origin = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{}/viewers", second_scene.session_id))
+            .header(header::COOKIE, &second_owner_cookie)
+            .header("x-csrf-token", &second.csrf)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(viewer_body.clone()))
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(viewer_without_origin)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let viewer_request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/sessions/{}/viewers", second_scene.session_id))
+            .header(header::COOKIE, &second_owner_cookie)
+            .header("x-csrf-token", &second.csrf)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(viewer_body))
+            .unwrap();
+        let viewer_response = app.clone().oneshot(viewer_request).await.unwrap();
+        assert_eq!(viewer_response.status(), StatusCode::OK);
+        let viewer_set_cookie = viewer_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(viewer_set_cookie.starts_with("__Host-ldw-viewer="));
+        assert!(
+            viewer_set_cookie.contains("Secure")
+                && viewer_set_cookie.contains("HttpOnly")
+                && viewer_set_cookie.contains("SameSite=Strict")
+        );
+        let viewer_cookie = viewer_set_cookie.split(';').next().unwrap();
+        let viewer_own = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", second_scene.session_id))
+            .header(header::COOKIE, viewer_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(viewer_own).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let viewer_foreign = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", first_scene.session_id))
+            .header(header::COOKIE, viewer_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(viewer_foreign).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let viewer_mutation = Request::builder()
+            .method("POST")
+            .uri("/api/sessions")
+            .header(header::COOKIE, viewer_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(viewer_mutation).await.unwrap().status(),
+            StatusCode::FORBIDDEN
         );
 
         let second_invite = store

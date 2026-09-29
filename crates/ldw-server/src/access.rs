@@ -22,6 +22,8 @@ pub enum AccessError {
     RateLimited,
     #[error("controller limit reached")]
     ControllerLimit,
+    #[error("viewer limit reached")]
+    ViewerLimit,
     #[error("owner approval required")]
     OwnerApprovalRequired,
     #[error("cryptographic operation failed")]
@@ -66,6 +68,14 @@ pub enum PairCode<'a> {
 pub struct ControllerGrant {
     pub session_id: Uuid,
     pub participant_id: Uuid,
+    pub token: String,
+    pub csrf: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerGrant {
+    pub session_id: Uuid,
+    pub role: String,
     pub token: String,
     pub csrf: String,
 }
@@ -220,6 +230,97 @@ impl AccessStore {
         .fetch_optional(&self.pool)
         .await?;
         scene_row(row)
+    }
+
+    /// A trusted Viewer is provisioned by an Owner on the device opening this request.
+    /// The grant is session-scoped and cannot be promoted by a Controller invitation.
+    pub async fn create_viewer(
+        &self,
+        owner_token: &str,
+        csrf: &str,
+        session_id: Uuid,
+        interact: bool,
+    ) -> Result<ViewerGrant, AccessError> {
+        self.check_owner_csrf(owner_token, csrf).await?;
+        let (account_id, owner_role) = self.owner_principal(owner_token).await?;
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE id = $1 AND (owner_id = $2 OR $3 = 'admin') FOR UPDATE",
+        )
+        .bind(session_id)
+        .bind(account_id)
+        .bind(owner_role)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM device_grants WHERE session_id = $1 AND role IN ('viewer', 'viewer_interact') \
+             AND revoked_at IS NULL AND expires_at > now()",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active >= 2 {
+            return Err(AccessError::ViewerLimit);
+        }
+        let role = if interact {
+            "viewer_interact"
+        } else {
+            "viewer"
+        };
+        let token = random_token()?;
+        let csrf = random_token()?;
+        sqlx::query(
+            "INSERT INTO device_grants (id, session_id, role, token_hash, csrf_hash, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, now() + interval '7 days')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(session_id)
+        .bind(role)
+        .bind(hash_token(&token).to_vec())
+        .bind(hash_token(&csrf).to_vec())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(ViewerGrant {
+            session_id,
+            role: role.to_owned(),
+            token,
+            csrf,
+        })
+    }
+
+    pub async fn viewer_scene(
+        &self,
+        token: &str,
+        session_id: Uuid,
+    ) -> Result<(SceneSummary, String), AccessError> {
+        let row: Option<(Uuid, Uuid, String, i32, i64, i64, String)> = sqlx::query_as(
+            "SELECT s.id, c.id, c.world_id, c.world_version, c.scene_epoch, c.revision, g.role \
+             FROM device_grants g JOIN sessions s ON s.id = g.session_id \
+             JOIN scenes c ON c.id = s.active_scene_id \
+             WHERE s.id = $1 AND g.token_hash = $2 AND g.role IN ('viewer', 'viewer_interact') \
+             AND g.revoked_at IS NULL AND g.expires_at > now() AND s.status != 'closed'",
+        )
+        .bind(session_id)
+        .bind(hash_token(token).to_vec())
+        .fetch_optional(&self.pool)
+        .await?;
+        let (session, scene, world, version, epoch, revision, role) =
+            row.ok_or(AccessError::Forbidden)?;
+        Ok((
+            SceneSummary {
+                session_id: session,
+                scene_id: scene,
+                world_id: world,
+                world_version: version,
+                scene_epoch: epoch,
+                revision,
+            },
+            role,
+        ))
     }
 
     pub async fn open_invitation(
