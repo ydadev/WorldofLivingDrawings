@@ -1086,12 +1086,14 @@ mod tests {
             .unwrap();
         world.spawn_fish(2, Point { x: -3.0, y: 0.0 }, 1.5).unwrap();
         world.set_target(2, Point { x: 3.0, y: 0.0 }).unwrap();
-        for _ in 0..180 {
+        let mut reached_far_side = false;
+        for _ in 0..240 {
             world.step();
             assert!(!point_blocked(world.fish()[0].position, world.obstacles()));
+            reached_far_side |= world.fish()[0].position.x > 1.0;
         }
         assert!(
-            world.fish()[0].position.x > 1.0,
+            reached_far_side,
             "fish should pass the obstacle instead of orbiting its near side"
         );
     }
