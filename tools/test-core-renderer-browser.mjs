@@ -207,6 +207,38 @@ try {
   });
   assert(movingLeft.markerX < 3 && movingLeft.eyeX < movingLeft.tailX,
     `Fish must face its visible motion, even when heading arrives late: ${JSON.stringify(movingLeft)}`);
+  const forwardLap = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    const marker = adapter.scene.getTransformNodeByName('fish-1');
+    const eye = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.material?.name === 'eye');
+    const tail = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    const targets = [
+      { x: 1, depth: -1.2 }, // turn toward the glass
+      { x: 3, depth: -1.2 }, // swim right along the glass
+      { x: 4, depth: 0 }, // turn away at the right edge
+      { x: 2, depth: 1.2 }, // swim left at the back
+      { x: 0, depth: 0 }, // turn toward the glass at the left edge
+    ];
+    const checks = [];
+    for (const [index, target] of targets.entries()) {
+      const start = marker.position.clone();
+      adapter.applyPositions({ type: 'positions', schemaVersion: 1,
+        sceneId: 'scene-1', sceneEpoch: 1, revision: 1, simulationTick: 14 + index,
+        positions: [{ id: 'fish-1', position: { x: target.x, y: -1 }, depth: target.depth,
+          heading: { x: -1, y: 0 }, headingDepth: 0 }] });
+      await new Promise(resolve => setTimeout(resolve, 550));
+      const nose = eye.getBoundingInfo().boundingBox.centerWorld.subtract(
+        tail.getBoundingInfo().boundingBox.centerWorld);
+      const travel = { x: target.x - start.x, z: target.depth - start.z };
+      checks.push((nose.x * travel.x + nose.z * travel.z) /
+        (Math.hypot(nose.x, nose.z) * Math.hypot(travel.x, travel.z)));
+    }
+    return checks;
+  });
+  assert(forwardLap.every(dot => dot > .9),
+    `Fish must lead with its nose throughout the depth lap: ${JSON.stringify(forwardLap)}`);
   mkdirSync(path.join(root, '.local'), { recursive: true });
   const screenshot = PNG.sync.read(await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') }));
   let redPixels = 0, bluePixels = 0;

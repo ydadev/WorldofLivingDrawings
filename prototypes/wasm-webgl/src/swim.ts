@@ -67,7 +67,7 @@ async function showDraft(draft: PaintDraft): Promise<void> {
   };
   move();
   swimTimer = window.setInterval(move, 500);
-  status.textContent = 'Рыбка поворачивает, уплывает в глубину и возвращается к стеклу. Раскраска взята из черновика этого браузера.';
+  status.textContent = 'У стекла рыбка плывёт головой вправо, вдали — головой влево. У краёв она разворачивается через глубину. Раскраска взята из черновика этого браузера.';
 }
 
 async function refreshDrafts(): Promise<void> {

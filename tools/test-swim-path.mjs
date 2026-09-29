@@ -21,4 +21,12 @@ for (const point of samples) {
 }
 assert(samples.filter(point => Math.abs(point.heading.x) > .7).length > samples.length * .65,
   'the fish should be seen mostly from its painted side');
+for (let index = 0; index < samples.length; index++) {
+  const from = samples[index];
+  const to = swimPath((index + 1) / 20);
+  const travel = [to.x - from.x, to.y - from.y, to.depth - from.depth];
+  const dot = from.heading.x * travel[0] + from.heading.y * travel[1] +
+    from.headingDepth * travel[2];
+  assert(dot > 0, `fish moves tail-first at sample ${index}`);
+}
 console.log('Swimming path: near, turn away, far, turn back, continuous 3D lap — PASS');
