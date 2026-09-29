@@ -4,7 +4,7 @@
 use ldw_sim::{Bounds, Point, World, WorldCheckpoint};
 use serde::Serialize;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::{collections::HashSet, time::Duration};
 use thiserror::Error;
 use tokio::{
@@ -164,14 +164,18 @@ fn interaction_state_event(world: &World, applied: &[Uuid]) -> Value {
 
 fn valid_publication(definition_id: &str, paint_blob_id: &str) -> bool {
     matches!(definition_id, "coral-fish" | "stream-fish")
-        && (2..=64).contains(&paint_blob_id.len())
-        && paint_blob_id
-            .bytes()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_lowercase())
-        && paint_blob_id
-            .bytes()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
+        && ((paint_blob_id.len() == 64
+            && paint_blob_id
+                .bytes()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()))
+            || ((2..=64).contains(&paint_blob_id.len())
+                && paint_blob_id
+                    .bytes()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_lowercase())
+                && paint_blob_id
+                    .bytes()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')))
 }
 
 /// Trusted publication boundary: the caller must already own and validate the
@@ -185,17 +189,38 @@ pub(crate) async fn publish_first_fish(
     paint_blob_id: &str,
     position: Point,
 ) -> Result<Value, SimulationError> {
+    let mut tx = pool.begin().await?;
+    let event = publish_first_fish_tx(
+        &mut tx,
+        scene_id,
+        fish_id,
+        definition_id,
+        paint_blob_id,
+        position,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(event)
+}
+
+pub(crate) async fn publish_first_fish_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    scene_id: Uuid,
+    fish_id: Uuid,
+    definition_id: &str,
+    paint_blob_id: &str,
+    position: Point,
+) -> Result<Value, SimulationError> {
     if !valid_publication(definition_id, paint_blob_id) {
         return Err(SimulationError::InvalidPublication);
     }
-    let mut tx = pool.begin().await?;
     let row: Option<(String, i32, i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
         "SELECT c.world_id, c.world_version, c.scene_epoch, c.revision, c.simulation_tick, \
          c.state, s.status, s.active_scene_id FROM scenes c JOIN sessions s ON s.id = c.session_id \
          WHERE c.id = $1 FOR UPDATE OF c",
     )
     .bind(scene_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some((world_id, world_version, epoch, revision, tick, state, status, active_scene)) = row
     else {
@@ -237,7 +262,7 @@ pub(crate) async fn publish_first_fish(
     .bind(new_revision)
     .bind(serde_json::to_value(world.checkpoint())?)
     .bind(json!([entity]))
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query(
         "INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)",
@@ -246,9 +271,8 @@ pub(crate) async fn publish_first_fish(
     .bind(new_revision)
     .bind(epoch)
     .bind(&event)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(event)
 }
 
@@ -262,16 +286,37 @@ pub(crate) async fn queue_fish(
     paint_blob_id: &str,
     position: Point,
 ) -> Result<(), SimulationError> {
+    let mut tx = pool.begin().await?;
+    queue_fish_tx(
+        &mut tx,
+        scene_id,
+        fish_id,
+        definition_id,
+        paint_blob_id,
+        position,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn queue_fish_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    scene_id: Uuid,
+    fish_id: Uuid,
+    definition_id: &str,
+    paint_blob_id: &str,
+    position: Point,
+) -> Result<(), SimulationError> {
     if !valid_publication(definition_id, paint_blob_id) {
         return Err(SimulationError::InvalidPublication);
     }
-    let mut tx = pool.begin().await?;
     let row: Option<(String, i32, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
         "SELECT c.world_id, c.world_version, c.simulation_tick, c.state, s.status, s.active_scene_id \
          FROM scenes c JOIN sessions s ON s.id = c.session_id WHERE c.id = $1 FOR UPDATE OF c",
     )
     .bind(scene_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some((world_id, world_version, tick, state, status, active_scene)) = row else {
         return Err(SimulationError::InvalidScene);
@@ -304,14 +349,14 @@ pub(crate) async fn queue_fish(
     let queued: i64 =
         sqlx::query_scalar("SELECT count(*) FROM fish_publications WHERE scene_id = $1")
             .bind(scene_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
     let reserved: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM upload_intents WHERE scene_id = $1 \
          AND status <> 'finalized' AND reservation_until > now()",
     )
     .bind(scene_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     if entities.len() + queued as usize + reserved as usize >= ldw_sim::MAX_FISH {
         return Err(SimulationError::InvalidPublication);
@@ -329,9 +374,8 @@ pub(crate) async fn queue_fish(
     .bind(paint_blob_id)
     .bind(position.x)
     .bind(position.y)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

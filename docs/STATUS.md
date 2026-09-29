@@ -36,4 +36,6 @@ Chrome CI рендера подтвердил отдельные окраски 
 
 Добавлен endpoint передачи PNG в карантин intent. Он применяет серверный нормализатор, проверяет авторство и повтор запроса, продлевает резервацию после успешной загрузки; внутренняя очередь рыб учитывает действующие резервации. [Ubuntu/PostgreSQL/HTTP CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36573896288) и [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36573896219) — PASS. Принято [ADR-018](DECISIONS.md#adr-018--хранение-paint-texture) для долговечного хранения. Финализация, приватный blob и появление пользовательской рыбы ещё не готовы.
 
-По ADR-018 добавлен внутренний файловый BlobStore для неизменяемых PNG: полный SHA-256, приватные каталоги, атомарное размещение без замены и проверка целостности. Локально rustfmt — PASS, Ubuntu CI пока NOT_RUN. Модуль ещё не подключён к финализации и выдаче текстур.
+По ADR-018 добавлен внутренний файловый BlobStore для неизменяемых PNG: полный SHA-256, приватные каталоги, атомарное размещение без замены и проверка целостности. [Ubuntu CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36575529173) и [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36575529713) — PASS. Модуль ещё не подключён к финализации и выдаче текстур.
+
+Публикация первой и следующих рыб подготовлена к общей транзакции с финализацией upload; локально rustfmt — PASS, Ubuntu CI этого изменения пока NOT_RUN. Публичного подтверждения пользовательской рыбы ещё нет.
