@@ -15,6 +15,13 @@ export type PaintAction =
 
 const WORK_SIZE = 1024;
 const TEXTURE_SIZE = 512;
+const MAX_HISTORY_ACTIONS = 50;
+const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
+
+function actionBytes(action: PaintAction): number {
+  return action.kind === 'stroke' || action.kind === 'erase'
+    ? 256 + action.points.length * 64 : 256;
+}
 
 export function layoutPoint(layout: PaintLayout, x: number, y: number): [number, number] {
   const [left, right, bottom, top] = layout.bounds;
@@ -75,6 +82,24 @@ export class PaintDocument {
     this.actions.length = this.cursor;
     this.actions.push(action);
     this.cursor++;
+    this.render();
+    while (this.actions.length > MAX_HISTORY_ACTIONS ||
+      this.actions.reduce((total, item) => total + actionBytes(item), 0) > MAX_HISTORY_BYTES)
+      this.foldOldest();
+  }
+
+  private foldOldest(): void {
+    const oldest = this.actions[0];
+    const remaining = this.actions.slice(1);
+    const nextCursor = this.cursor - 1;
+    this.actions = [oldest];
+    this.cursor = 1;
+    this.render();
+    const context = this.base.getContext('2d')!;
+    context.clearRect(0, 0, WORK_SIZE, WORK_SIZE);
+    context.drawImage(this.layer, 0, 0);
+    this.actions = remaining;
+    this.cursor = nextCursor;
     this.render();
   }
 

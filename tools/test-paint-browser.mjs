@@ -164,7 +164,58 @@ try {
 
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
+  const touchSession = await context.newCDPSession(page);
+  const gestureBox = await canvas.boundingBox();
+  const touchPoint = (id, x, y) => ({ id, x: gestureBox.x + gestureBox.width * x / 512,
+    y: gestureBox.y + gestureBox.height * y / 512 });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchStart',
+    touchPoints: [touchPoint(1, 256, 256)] });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchMove',
+    touchPoints: [touchPoint(1, 264, 256)] });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchStart',
+    touchPoints: [touchPoint(1, 264, 256), touchPoint(2, 304, 256)] });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchMove',
+    touchPoints: [touchPoint(1, 180, 256), touchPoint(2, 350, 256)] });
+  await page.waitForFunction(() => Number.parseInt(document.querySelector('#paint-zoom-level').value) > 100);
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchEnd',
+    touchPoints: [touchPoint(1, 180, 256)] });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchMove',
+    touchPoints: [touchPoint(1, 220, 256)] });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  if ((await page.evaluate(() => window.paintProbe)).actionCount !== 0)
+    throw new Error('Two-finger gesture committed the preliminary stroke');
+  await page.locator('#paint-fit').click();
+  if (!white(await colorAt(256, 256))) throw new Error('Two-finger gesture left paint on the fish');
+  const wheelBox = await canvas.boundingBox();
+  await page.mouse.move(wheelBox.x + wheelBox.width / 2, wheelBox.y + wheelBox.height / 2);
+  await page.mouse.wheel(0, -120);
+  await page.waitForFunction(() => Number.parseInt(document.querySelector('#paint-zoom-level').value) > 100);
+  await page.locator('#paint-fit').click();
+  const pen = touchPoint(4, 256, 256);
+  await touchSession.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pen.x, y: pen.y,
+    button: 'left', buttons: 1, clickCount: 1, pointerType: 'pen' });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchStart',
+    touchPoints: [touchPoint(5, 310, 256)] });
+  await touchSession.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await touchSession.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pen.x, y: pen.y,
+    button: 'left', buttons: 0, clickCount: 1, pointerType: 'pen' });
+  if ((await page.evaluate(() => window.paintProbe)).actionCount !== 1 ||
+      !red(await colorAt(256, 256)) || red(await colorAt(310, 256)))
+    throw new Error('Pen stroke or touch palm rejection failed');
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
   await clickAt(256, 256);
+  await page.locator('[data-paint-color="#2456df"]').click();
+  for (let i = 0; i < 50; i++) await clickAt(256, 256);
+  if ((await page.evaluate(() => window.paintProbe)).actionCount !== 50)
+    throw new Error('Paint history exceeded 50 actions');
+  await page.evaluate(() => {
+    for (let i = 0; i < 50; i++) document.querySelector('#paint-undo').click();
+  });
+  if (!red(await colorAt(256, 256)) || await page.locator('#paint-undo').isEnabled())
+    throw new Error('Old paint vanished when the history was folded into its base layer');
+  await page.locator('#paint-redo').click();
+  if (!blue(await colorAt(256, 256))) throw new Error('Recent action could not be redone after folding');
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.paintProbe?.status === 'PASS');
   if (!white(await colorAt(256, 256))) throw new Error('Editor saved before explicit opt-in');
@@ -356,7 +407,7 @@ try {
   if (!red(await mobileColor())) throw new Error('Mobile draft did not restore');
   await mobile.close();
   if (errors.length) throw new Error(`Draft browser errors: ${errors.join(' | ')}`);
-  console.log('MVP-02 drafts: opt-in, reload, conflict/copy, 10/64 MiB limits, unavailable storage and mobile touch: PASS');
+  console.log('MVP-02 paint: pinch/pan, wheel, pen palm rejection, 50-action history, drafts and mobile touch: PASS');
 } finally {
   await browser?.close();
   server.kill();

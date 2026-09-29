@@ -93,6 +93,11 @@ let dragStartX = 0;
 let dragStartY = 0;
 let dragPanX = 0;
 let dragPanY = 0;
+const touchPoints = new Map<number, [number, number]>();
+let touchGesture: { distance: number; zoom: number; anchorX: number; anchorY: number } | undefined;
+let suppressTouch = false;
+let activePen: number | undefined;
+let touchTap: { pointerId: number; tool: 'fill' | 'pick'; x: number; y: number; color: string } | undefined;
 
 function refreshSwatches(): void {
   for (const swatch of swatches)
@@ -110,10 +115,10 @@ function showZoom(): void {
   zoomOutButton.disabled = zoom <= 1;
 }
 
-function setZoom(next: number): void {
+function setZoom(next: number, anchorX = 256, anchorY = 256): void {
   const adjusted = Math.max(1, Math.min(4, next));
-  panX = 256 - (256 - panX) * adjusted / zoom;
-  panY = 256 - (256 - panY) * adjusted / zoom;
+  panX = anchorX - (anchorX - panX) * adjusted / zoom;
+  panY = anchorY - (anchorY - panY) * adjusted / zoom;
   zoom = adjusted;
   clampPan();
   showZoom();
@@ -199,7 +204,7 @@ async function flushDraft(): Promise<boolean> {
   return okay;
 }
 
-function screenCoordinate(event: PointerEvent): [number, number] {
+function screenCoordinate(event: { clientX: number; clientY: number }): [number, number] {
   const rect = sheet.getBoundingClientRect();
   return [(event.clientX - rect.left) / rect.width * 512,
     (event.clientY - rect.top) / rect.height * 512];
@@ -208,6 +213,23 @@ function screenCoordinate(event: PointerEvent): [number, number] {
 function coordinate(event: PointerEvent): [number, number] {
   const [x, y] = screenCoordinate(event);
   return [(x - panX) / zoom, (y - panY) / zoom];
+}
+
+function gesturePoints(): { x: number; y: number; distance: number } {
+  const [[firstX, firstY], [secondX, secondY]] = [...touchPoints.values()];
+  return { x: (firstX + secondX) / 2, y: (firstY + secondY) / 2,
+    distance: Math.max(1, Math.hypot(secondX - firstX, secondY - firstY)) };
+}
+
+function sampleColor(x: number, y: number): void {
+  if (!documentState) return;
+  const pixel = documentState.textureCanvas().getContext('2d')!
+    .getImageData(Math.max(0, Math.min(511, Math.floor(x))),
+      Math.max(0, Math.min(511, Math.floor(y))), 1, 1).data;
+  colorInput.value = '#' + [...pixel].slice(0, 3)
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+  refreshSwatches();
+  if (window.paintProbe) window.paintProbe.sampledColor = colorInput.value;
 }
 
 function paintSheet(): void {
@@ -281,6 +303,12 @@ async function load(species: FishId, draft?: PaintDraft): Promise<void> {
   const thisGeneration = ++generation;
   currentPointer = undefined;
   points = [];
+  touchPoints.clear();
+  touchGesture = undefined;
+  suppressTouch = false;
+  activePen = undefined;
+  touchTap = undefined;
+  draggingPan = false;
   status.textContent = 'Загрузка шаблона и модели…';
   window.paintProbe = { status: 'LOADING' };
   try {
@@ -331,6 +359,35 @@ async function load(species: FishId, draft?: PaintDraft): Promise<void> {
 
 sheet.addEventListener('pointerdown', event => {
   if (!documentState) return;
+  if (event.pointerType === 'touch') {
+    if (activePen !== undefined) return;
+    event.preventDefault();
+    touchPoints.set(event.pointerId, screenCoordinate(event));
+    sheet.setPointerCapture(event.pointerId);
+    if (touchPoints.size >= 2) {
+      if (!touchGesture) {
+        const touch = gesturePoints();
+        touchGesture = { distance: touch.distance, zoom,
+          anchorX: (touch.x - panX) / zoom, anchorY: (touch.y - panY) / zoom };
+      }
+      suppressTouch = true;
+      currentPointer = undefined;
+      points = [];
+      touchTap = undefined;
+      draggingPan = false;
+      paintSheet();
+      return;
+    }
+  } else if (event.pointerType === 'pen') {
+    touchPoints.clear();
+    touchGesture = undefined;
+    suppressTouch = false;
+    currentPointer = undefined;
+    points = [];
+    touchTap = undefined;
+    draggingPan = false;
+    activePen = event.pointerId;
+  }
   if (currentPointer !== undefined) {
     points = [];
     currentPointer = undefined;
@@ -351,13 +408,12 @@ sheet.addEventListener('pointerdown', event => {
     return;
   }
   const [x, y] = coordinate(event);
-  if (tool === 'fill') { commit({ kind: 'fill', x, y, color: colorInput.value }); return; }
-  if (tool === 'pick') {
-    const pixel = documentState.textureCanvas().getContext('2d')!
-      .getImageData(Math.max(0, Math.min(511, Math.floor(x))), Math.max(0, Math.min(511, Math.floor(y))), 1, 1).data;
-    colorInput.value = '#' + [...pixel].slice(0, 3).map(value => value.toString(16).padStart(2, '0')).join('');
-    refreshSwatches();
-    if (window.paintProbe) window.paintProbe.sampledColor = colorInput.value;
+  if (tool === 'fill' || tool === 'pick') {
+    if (event.pointerType === 'touch') {
+      currentPointer = event.pointerId;
+      touchTap = { pointerId: event.pointerId, tool, x, y, color: colorInput.value };
+    } else if (tool === 'fill') commit({ kind: 'fill', x, y, color: colorInput.value });
+    else sampleColor(x, y);
     return;
   }
   currentPointer = event.pointerId;
@@ -369,7 +425,23 @@ sheet.addEventListener('pointerdown', event => {
   paintSheet();
 });
 sheet.addEventListener('pointermove', event => {
+  if (event.pointerType === 'touch') {
+    if (!touchPoints.has(event.pointerId)) return;
+    touchPoints.set(event.pointerId, screenCoordinate(event));
+    if (touchGesture && touchPoints.size >= 2) {
+      const touch = gesturePoints();
+      zoom = Math.max(1, Math.min(4, touchGesture.zoom * touch.distance / touchGesture.distance));
+      panX = touch.x - touchGesture.anchorX * zoom;
+      panY = touch.y - touchGesture.anchorY * zoom;
+      clampPan();
+      showZoom();
+      paintSheet();
+      return;
+    }
+    if (suppressTouch) return;
+  }
   if (currentPointer !== event.pointerId) return;
+  if (touchTap) return;
   if (draggingPan) {
     const [x, y] = screenCoordinate(event);
     panX = dragPanX + x - dragStartX;
@@ -382,7 +454,25 @@ sheet.addEventListener('pointermove', event => {
   paintSheet();
 });
 sheet.addEventListener('pointerup', event => {
+  if (event.pointerType === 'touch') {
+    if (!touchPoints.has(event.pointerId)) return;
+    touchPoints.delete(event.pointerId);
+    if (touchGesture || suppressTouch) {
+      touchGesture = undefined;
+      if (!touchPoints.size) suppressTouch = false;
+      return;
+    }
+  }
+  if (activePen === event.pointerId) activePen = undefined;
   if (currentPointer !== event.pointerId) return;
+  if (touchTap) {
+    const tap = touchTap;
+    touchTap = undefined;
+    currentPointer = undefined;
+    if (tap.tool === 'fill') commit({ kind: 'fill', x: tap.x, y: tap.y, color: tap.color });
+    else sampleColor(tap.x, tap.y);
+    return;
+  }
   if (draggingPan) { currentPointer = undefined; draggingPan = false; return; }
   points.push(coordinate(event));
   const action: PaintAction = { kind: pointerTool, points, size: pointerSize, color: pointerColor };
@@ -391,8 +481,22 @@ sheet.addEventListener('pointerup', event => {
   commit(action);
 });
 sheet.addEventListener('pointercancel', event => {
-  if (currentPointer === event.pointerId) { currentPointer = undefined; draggingPan = false; points = []; paintSheet(); }
+  if (event.pointerType === 'touch') {
+    if (!touchPoints.has(event.pointerId)) return;
+    touchPoints.delete(event.pointerId);
+    if (touchGesture) { touchGesture = undefined; suppressTouch = true; }
+    if (!touchPoints.size) suppressTouch = false;
+  }
+  if (activePen === event.pointerId) activePen = undefined;
+  if (currentPointer === event.pointerId) {
+    currentPointer = undefined; draggingPan = false; touchTap = undefined; points = []; paintSheet();
+  }
 });
+sheet.addEventListener('wheel', event => {
+  event.preventDefault();
+  const [x, y] = screenCoordinate(event);
+  setZoom(zoom * (event.deltaY < 0 ? 1.25 : 0.8), x, y);
+}, { passive: false });
 for (const swatch of swatches) swatch.addEventListener('click', () => {
   colorInput.value = swatch.dataset.paintColor!;
   refreshSwatches();
