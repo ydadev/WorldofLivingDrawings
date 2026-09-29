@@ -131,13 +131,21 @@ try {
     const first = tail?.rotation.y;
     await new Promise(resolve => setTimeout(resolve, 170));
     const yaw = marker.rotation.y;
-    const noseDotHeading = (-Math.cos(yaw) * .92 + Math.sin(yaw) * .38) / Math.hypot(.92, .38);
+    const eyeMesh = scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') && mesh.material?.name === 'eye');
+    const tailMesh = scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    const eyeCenter = eyeMesh?.getBoundingInfo().boundingBox.centerWorld;
+    const tailCenter = tailMesh?.getBoundingInfo().boundingBox.centerWorld;
+    const noseVector = eyeCenter && tailCenter ? eyeCenter.subtract(tailCenter) : null;
+    const noseDotHeading = noseVector &&
+      (noseVector.x * .92 + noseVector.z * .38) /
+      (Math.hypot(noseVector.x, noseVector.z) * Math.hypot(.92, .38));
     return { depth: marker.position.z, scale: marker.scaling.x, yaw, noseDotHeading,
       tailPresent: !!tail, tailMoved: Math.abs(tail?.rotation.y - first) > .02,
       tailNames: scene.meshes.concat(scene.transformNodes).filter(node => node.name.includes('tail')).map(node => node.name) };
   });
   assert(Math.abs(depthVisual.depth - 1.2) < .01 && depthVisual.scale < .9 &&
-    depthVisual.yaw < Math.PI && depthVisual.noseDotHeading > .9 &&
+    depthVisual.yaw < -.05 && depthVisual.noseDotHeading > .9 &&
     depthVisual.tailPresent && depthVisual.tailMoved,
     `Depth, turn and tail must animate: ${JSON.stringify(depthVisual)}`);
   const climbVisual = await desktop.evaluate(async () => {
@@ -148,10 +156,32 @@ try {
         heading: { x: .8, y: .5 }, headingDepth: .3 }] });
     await new Promise(resolve => setTimeout(resolve, 300));
     const pitch = adapter.scene.getTransformNodeByName('fish-1').rotation.z;
-    return { pitch, noseUp: -Math.sin(pitch) };
+    const eye = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.material?.name === 'eye');
+    const tail = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    return { pitch, noseAboveTail: eye && tail &&
+      eye.getBoundingInfo().boundingBox.centerWorld.y -
+      tail.getBoundingInfo().boundingBox.centerWorld.y };
   });
-  assert(climbVisual.pitch < -.05 && climbVisual.noseUp > .05,
+  assert(climbVisual.pitch > .05 && climbVisual.noseAboveTail > .25,
     `Fish climbing in Y must raise its nose: ${JSON.stringify(climbVisual)}`);
+  const reverseVisual = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    adapter.applyPositions({ type: 'positions', schemaVersion: 1,
+      sceneId: 'scene-1', sceneEpoch: 1, revision: 1, simulationTick: 12,
+      positions: [{ id: 'fish-1', position: { x: 3, y: -1 }, depth: 1.2,
+        heading: { x: -1, y: 0 }, headingDepth: 0 }] });
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    const eye = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.material?.name === 'eye');
+    const tail = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    return { eyeX: eye?.getBoundingInfo().boundingBox.centerWorld.x,
+      tailX: tail?.getBoundingInfo().boundingBox.centerWorld.x };
+  });
+  assert(reverseVisual.eyeX < reverseVisual.tailX,
+    `Fish moving left must put its head before the tail: ${JSON.stringify(reverseVisual)}`);
   const afterStale = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyPositions({ type: 'positions', schemaVersion: 1, sceneId: 'scene-1',
