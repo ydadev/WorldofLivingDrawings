@@ -231,3 +231,5 @@ Babylon renderer теперь показывает источник из `active
 ## 2026-09-29 — CORE-04, интеграционная проверка страниц с backend (в работе)
 
 Добавлен CI-сценарий с отдельной временной PostgreSQL-БД, реальными `ldw-server` router и Simulation Core, локальным HTTPS/WSS proxy и тремя профилями Chrome. Он проходит вход Owner, создание сессии, запрос/одобрение read-only Viewer, сопряжение Controller по PIN, корм с ПК и лодку с телефона; проверяет серверные события и положения лодки. Локально `node --check tools/test-real-ui-browser.mjs` и `git diff --check` — PASS. Rust/PG/Chrome интеграция на Windows не запускалась; Ubuntu CI — NOT_RUN до публикации. Физические телефон/TV и production deploy не входят в эту проверку.
+
+[Первый Ubuntu CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36569458356) — FAIL до компиляции: `rustfmt` потребовал разбить вызов `axum::serve` на несколько строк. Точный diff CI применён; интеграционный сценарий ещё NOT_RUN.

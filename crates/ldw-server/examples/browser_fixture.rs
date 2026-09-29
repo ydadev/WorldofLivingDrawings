@@ -52,11 +52,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         public_origin: Arc::from(public_origin),
         simulation_hub: hub,
     });
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     let _ = shutdown_tx.send(true);
     simulation_task.await??;
     Ok(())
