@@ -2,6 +2,7 @@ use std::{env, error::Error, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use ldw_server::{
     access::AccessStore,
+    blob_gc,
     blob_store::BlobStore,
     http::{AppState, router},
     migrate, simulation,
@@ -14,11 +15,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
     let command = arguments
         .next()
-        .ok_or("expected serve or bootstrap-admin")?;
+        .ok_or("expected serve, bootstrap-admin or gc-blobs")?;
     let database_url_file = PathBuf::from(env::var("LDW_DATABASE_URL_FILE")?);
     let database_url = fs::read_to_string(database_url_file)?;
     let pool = PgPool::connect(database_url.trim()).await?;
     migrate(&pool).await?;
+
+    if command == "gc-blobs" {
+        if arguments.next().is_some() {
+            return Err("unexpected argument".into());
+        }
+        let store = BlobStore::new(PathBuf::from(env::var("LDW_BLOB_DIR")?))?;
+        let outcome = blob_gc::collect(&pool, &store).await?;
+        println!(
+            "Blob GC completed: {} files, {} catalog rows",
+            outcome.files_deleted, outcome.catalog_rows_deleted
+        );
+        return Ok(());
+    }
 
     let key_file = PathBuf::from(env::var("LDW_PIN_KEY_FILE")?);
     let key_bytes = fs::read(key_file)?;
@@ -81,7 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = shutdown_tx.send(true);
             simulation_task.await??;
         }
-        _ => return Err("expected serve or bootstrap-admin".into()),
+        _ => return Err("expected serve, bootstrap-admin or gc-blobs".into()),
     }
     Ok(())
 }

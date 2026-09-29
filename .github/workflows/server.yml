@@ -63,6 +63,14 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check server crate and migration constraints
         run: cargo test -p ldw-server --locked
+      - name: Check blob GC maintenance command
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/ldw-gc-blobs"
+          printf '%s\n' "$DATABASE_URL" > "$RUNNER_TEMP/ldw-ci-db-url"
+          chmod 0600 "$RUNNER_TEMP/ldw-ci-db-url"
+          LDW_DATABASE_URL_FILE="$RUNNER_TEMP/ldw-ci-db-url" \
+          LDW_BLOB_DIR="$RUNNER_TEMP/ldw-gc-blobs" \
+          cargo run -p ldw-server --locked -- gc-blobs
       - name: Check deterministic simulation core
         run: cargo test -p ldw-sim --locked
       - name: Check consistent DB and blob backup
