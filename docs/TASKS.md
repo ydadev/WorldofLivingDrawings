@@ -32,7 +32,7 @@
 | ID | Статус | Результат и приёмка | Зависимости |
 |---|---|---|---|
 | CORE-01 | DONE | TypeScript workspace, JSON Schema v1, renderer adapter, самодостаточный manifest с SHA-256; локально/CI PASS | RISK-03-TECH, RISK-04, RISK-05 |
-| CORE-02 | READY | Миграции, сессии/сцены, владельцы и pairing; тест изоляции чужих сессий | CORE-01 |
+| CORE-02 | IN_PROGRESS | Миграции, сессии/сцены, владельцы и pairing; тест изоляции чужих сессий | CORE-01 |
 | CORE-03 | BACKLOG | WebSocket snapshots/deltas, команды, epoch, dedup, reconnect; повтор не меняет исход | CORE-02 |
 | CORE-04 | BACKLOG | Подводный пакет, серверный tick, навигация рыб, отображение и LOW-профиль | CORE-03 |
 

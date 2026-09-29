@@ -1,0 +1,43 @@
+name: Server migrations
+on:
+  push:
+    paths:
+      - '.github/workflows/server.yml'
+      - 'rust-toolchain.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+  pull_request:
+    paths:
+      - '.github/workflows/server.yml'
+      - 'rust-toolchain.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  migrations:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check server crate and migration constraints
+        run: cargo test -p ldw-server --locked
