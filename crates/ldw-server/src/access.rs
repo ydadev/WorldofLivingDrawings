@@ -90,6 +90,26 @@ pub struct SceneSummary {
     pub revision: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantKind {
+    Owner,
+    Controller,
+    Viewer,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneAccess {
+    pub scene: SceneSummary,
+    pub grant_id: Uuid,
+    pub role: String,
+}
+
+impl SceneAccess {
+    pub fn may_interact(&self) -> bool {
+        self.role != "viewer"
+    }
+}
+
 impl AccessStore {
     pub fn new(pool: PgPool, pin_key: [u8; 32]) -> Self {
         Self { pool, pin_key }
@@ -98,6 +118,112 @@ impl AccessStore {
     pub async fn ping(&self) -> Result<(), AccessError> {
         let _: i32 = sqlx::query_scalar("SELECT 1").fetch_one(&self.pool).await?;
         Ok(())
+    }
+
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// Re-read on every command so an expired or revoked grant cannot keep acting
+    /// merely because its WebSocket was already open.
+    pub async fn scene_access(
+        &self,
+        kind: GrantKind,
+        token: &str,
+        session_id: Uuid,
+    ) -> Result<SceneAccess, AccessError> {
+        let token_hash = hash_token(token).to_vec();
+        let row: Option<(Uuid, Uuid, String, i32, i64, i64, Uuid, String)> = match kind {
+            GrantKind::Owner => sqlx::query_as(
+                "SELECT s.id, c.id, c.world_id, c.world_version, c.scene_epoch, c.revision, g.id, a.role \
+                 FROM owner_grants g JOIN accounts a ON a.id = g.account_id \
+                 JOIN sessions s ON (s.owner_id = a.id OR a.role = 'admin') \
+                 JOIN scenes c ON c.id = s.active_scene_id \
+                 WHERE s.id = $1 AND g.token_hash = $2 AND g.revoked_at IS NULL \
+                 AND g.expires_at > now() AND a.disabled_at IS NULL AND s.status != 'closed'",
+            )
+            .bind(session_id)
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?,
+            GrantKind::Controller | GrantKind::Viewer => {
+                let role_predicate = if kind == GrantKind::Controller {
+                    "g.role = 'controller'"
+                } else {
+                    "g.role IN ('viewer', 'viewer_interact')"
+                };
+                let sql = format!(
+                    "SELECT s.id, c.id, c.world_id, c.world_version, c.scene_epoch, c.revision, g.id, g.role \
+                     FROM device_grants g JOIN sessions s ON s.id = g.session_id \
+                     JOIN scenes c ON c.id = s.active_scene_id \
+                     WHERE s.id = $1 AND g.token_hash = $2 AND {role_predicate} \
+                     AND g.revoked_at IS NULL AND g.expires_at > now() AND s.status != 'closed' \
+                     AND (g.role != 'controller' OR g.last_activity_at > now() - interval '2 hours')"
+                );
+                sqlx::query_as(&sql)
+                    .bind(session_id)
+                    .bind(token_hash)
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+        };
+        let (session, scene, world, version, epoch, revision, grant_id, role) =
+            row.ok_or(AccessError::Forbidden)?;
+        Ok(SceneAccess {
+            scene: SceneSummary {
+                session_id: session,
+                scene_id: scene,
+                world_id: world,
+                world_version: version,
+                scene_epoch: epoch,
+                revision,
+            },
+            grant_id,
+            role,
+        })
+    }
+
+    pub async fn check_socket_csrf(
+        &self,
+        kind: GrantKind,
+        token: &str,
+        csrf: &str,
+        session_id: Uuid,
+    ) -> Result<(), AccessError> {
+        let found: Option<i32> = match kind {
+            GrantKind::Owner => sqlx::query_scalar(
+                "SELECT 1 FROM owner_grants g JOIN accounts a ON a.id = g.account_id \
+                 JOIN sessions s ON (s.owner_id = a.id OR a.role = 'admin') \
+                 WHERE s.id = $1 AND g.token_hash = $2 AND g.csrf_hash = $3 \
+                 AND g.revoked_at IS NULL AND g.expires_at > now() AND a.disabled_at IS NULL AND s.status != 'closed'",
+            )
+            .bind(session_id)
+            .bind(hash_token(token).to_vec())
+            .bind(hash_token(csrf).to_vec())
+            .fetch_optional(&self.pool)
+            .await?,
+            GrantKind::Controller | GrantKind::Viewer => {
+                let role_predicate = if kind == GrantKind::Controller {
+                    "g.role = 'controller'"
+                } else {
+                    "g.role IN ('viewer', 'viewer_interact')"
+                };
+                let sql = format!(
+                    "SELECT 1 FROM device_grants g JOIN sessions s ON s.id = g.session_id \
+                     WHERE s.id = $1 AND g.token_hash = $2 AND g.csrf_hash = $3 \
+                     AND {role_predicate} AND g.revoked_at IS NULL AND g.expires_at > now() \
+                     AND s.status != 'closed' \
+                     AND (g.role != 'controller' OR g.last_activity_at > now() - interval '2 hours')"
+                );
+                sqlx::query_scalar(&sql)
+                    .bind(session_id)
+                    .bind(hash_token(token).to_vec())
+                    .bind(hash_token(csrf).to_vec())
+                    .fetch_optional(&self.pool)
+                    .await?
+            }
+        };
+        found.ok_or(AccessError::Forbidden).map(|_| ())
     }
 
     /// Only a local bootstrap command may call this; it is never an HTTP route.

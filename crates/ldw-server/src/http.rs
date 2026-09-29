@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/owners", post(create_owner))
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}/scene", get(scene))
+        .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
         .route("/api/sessions/{id}/viewers", post(create_viewer))
         .route("/api/sessions/{id}/invitation", post(open_invitation))
         .route("/api/sessions/{id}/pair", post(pair))

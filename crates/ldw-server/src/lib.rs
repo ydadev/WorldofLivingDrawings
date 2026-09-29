@@ -1,6 +1,7 @@
 use sqlx::{PgPool, migrate::MigrateError};
 pub mod access;
 pub mod http;
+pub mod realtime;
 
 /// The server uses versioned, embedded migrations; no database credentials live in source.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
@@ -193,6 +194,135 @@ mod tests {
                 .await,
             Err(access::AccessError::ViewerLimit)
         ));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let interaction = realtime::InteractionCommand {
+            kind: "command".to_owned(),
+            command_id: Uuid::new_v4(),
+            session_id: first_scene.session_id,
+            scene_id: first_scene.scene_id,
+            scene_epoch: 1,
+            interaction_id: "feed".to_owned(),
+            point: realtime::Point { x: 1.0, y: -1.0 },
+            expires_at: now_ms + 8000,
+        };
+        let rejected = realtime::process_command(
+            &store,
+            access::GrantKind::Viewer,
+            &read_only.token,
+            first_scene.session_id,
+            &interaction,
+        )
+        .await
+        .expect("read-only command receives durable rejection");
+        assert_eq!(rejected["code"], "READ_ONLY");
+        assert_eq!(rejected["revision"], 0);
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Viewer,
+                &read_only.token,
+                first_scene.session_id,
+                &interaction,
+            )
+            .await
+            .unwrap(),
+            rejected
+        );
+        let accepted = realtime::process_command(
+            &store,
+            access::GrantKind::Viewer,
+            &interactive.token,
+            first_scene.session_id,
+            &interaction,
+        )
+        .await
+        .expect("interactive Viewer creates one event");
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(accepted["revision"], 1);
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Viewer,
+                &interactive.token,
+                first_scene.session_id,
+                &interaction,
+            )
+            .await
+            .unwrap(),
+            accepted,
+            "repeated command returns same committed ACK"
+        );
+        let mut conflict = interaction.clone();
+        conflict.point.x = 2.0;
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Viewer,
+                &interactive.token,
+                first_scene.session_id,
+                &conflict,
+            )
+            .await
+            .unwrap()["code"],
+            "COMMAND_CONFLICT"
+        );
+        assert_eq!(
+            realtime::command_status(
+                &store,
+                access::GrantKind::Viewer,
+                &interactive.token,
+                first_scene.session_id,
+                interaction.command_id,
+            )
+            .await
+            .unwrap(),
+            Some(accepted.clone())
+        );
+        let event_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM scene_events WHERE scene_id = $1")
+                .bind(first_scene.scene_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            event_count, 1,
+            "duplicate and conflict do not create events"
+        );
+        sqlx::query("UPDATE scenes SET scene_epoch = 2 WHERE id = $1")
+            .bind(first_scene.scene_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Viewer,
+                &interactive.token,
+                first_scene.session_id,
+                &interaction,
+            )
+            .await
+            .unwrap(),
+            accepted,
+            "known outcome survives epoch change"
+        );
+        let mut stale = interaction.clone();
+        stale.command_id = Uuid::new_v4();
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Viewer,
+                &interactive.token,
+                first_scene.session_id,
+                &stale,
+            )
+            .await
+            .unwrap()["code"],
+            "STALE_SCENE"
+        );
         let invite = store
             .open_invitation(&first.token, &first.csrf, first_scene.session_id)
             .await
