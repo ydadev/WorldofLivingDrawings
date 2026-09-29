@@ -12,7 +12,7 @@ const sessionId = '00000000-0000-4000-8000-000000000001';
 const sceneId = '00000000-0000-4000-8000-000000000002';
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.wasm': 'application/wasm',
-  '.glb': 'model/gltf-binary', '.png': 'image/png' };
+  '.glb': 'model/gltf-binary', '.png': 'image/png', '.svg': 'image/svg+xml' };
 const csp = ["default-src 'none'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self'",
   "img-src 'self' data: blob:", `connect-src 'self' ws://127.0.0.1:${port}`, "worker-src 'self'", "object-src 'none'",
   "base-uri 'none'", "frame-src 'self'", "frame-ancestors 'self'"].join('; ');
