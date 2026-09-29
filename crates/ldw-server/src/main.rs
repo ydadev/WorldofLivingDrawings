@@ -1,0 +1,71 @@
+use std::{env, error::Error, fs, net::SocketAddr, path::PathBuf, sync::Arc};
+
+use ldw_server::{
+    access::AccessStore,
+    http::{AppState, router},
+    migrate,
+};
+use sqlx::PgPool;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut arguments = env::args().skip(1);
+    let command = arguments
+        .next()
+        .ok_or("expected serve or bootstrap-admin")?;
+    let database_url_file = PathBuf::from(env::var("LDW_DATABASE_URL_FILE")?);
+    let database_url = fs::read_to_string(database_url_file)?;
+    let pool = PgPool::connect(database_url.trim()).await?;
+    migrate(&pool).await?;
+
+    let key_file = PathBuf::from(env::var("LDW_PIN_KEY_FILE")?);
+    let key_bytes = fs::read(key_file)?;
+    let pin_key: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "PIN key must be 32 bytes")?;
+    let access = AccessStore::new(pool, pin_key);
+
+    match command.as_str() {
+        "bootstrap-admin" => {
+            let login = arguments.next().ok_or("expected admin login")?;
+            if arguments.next().is_some() {
+                return Err("password must not be a CLI argument".into());
+            }
+            let password = rpassword::prompt_password("New Admin password: ")?;
+            let confirm = rpassword::prompt_password("Repeat password: ")?;
+            if password != confirm {
+                return Err("passwords do not match".into());
+            }
+            access.bootstrap_admin(&login, &password).await?;
+            println!("Admin account created");
+        }
+        "serve" => {
+            if arguments.next().is_some() {
+                return Err("unexpected argument".into());
+            }
+            let origin = env::var("LDW_PUBLIC_ORIGIN")?;
+            let parsed: axum::http::Uri = origin.parse()?;
+            if parsed.scheme_str() != Some("https")
+                || parsed.authority().is_none()
+                || parsed.path() != "/"
+                || parsed.query().is_some()
+                || origin.ends_with('/')
+            {
+                return Err("LDW_PUBLIC_ORIGIN must be a bare HTTPS origin".into());
+            }
+            let address: SocketAddr = env::var("LDW_BIND_ADDR")?.parse()?;
+            let app = router(AppState {
+                access,
+                public_origin: Arc::from(origin),
+            });
+            let listener = tokio::net::TcpListener::bind(address).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await?;
+        }
+        _ => return Err("expected serve or bootstrap-admin".into()),
+    }
+    Ok(())
+}

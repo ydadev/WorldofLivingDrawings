@@ -85,6 +85,11 @@ impl AccessStore {
         Self { pool, pin_key }
     }
 
+    pub async fn ping(&self) -> Result<(), AccessError> {
+        let _: i32 = sqlx::query_scalar("SELECT 1").fetch_one(&self.pool).await?;
+        Ok(())
+    }
+
     /// Only a local bootstrap command may call this; it is never an HTTP route.
     pub async fn bootstrap_admin(&self, login: &str, password: &str) -> Result<Uuid, AccessError> {
         let hash = password_hash(login, password)?;

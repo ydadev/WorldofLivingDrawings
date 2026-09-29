@@ -25,6 +25,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/health/ready", get(ready))
         .route("/api/login", post(login))
         .route("/api/owners", post(create_owner))
         .route("/api/sessions", post(create_session))
@@ -33,6 +34,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/pair", post(pair))
         .layer(middleware::map_response(no_store))
         .with_state(state)
+}
+
+async fn ready(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    state.access.ping().await?;
+    Ok(StatusCode::OK)
 }
 
 async fn no_store(mut response: Response) -> Response {
