@@ -12,7 +12,7 @@
 | `web/transport` | WSS, порядок snapshot/delta, reconnect и выяснение исхода команд | Только контракты и браузерный WebSocket |
 | Capture и Editor | Два способа создания `PaintResult` | PaintLayout и контракты, не Simulation |
 | `crates/ldw-server` | Права, epoch/revision, подтверждение/журнал команд | Контракты и PostgreSQL; не браузер/renderer |
-| будущий simulation core | Движение, ресурсы и исходы действий | Версионированный контент и состояние сервера |
+| `crates/ldw-sim` | Чистое детерминированное движение, далее реакции и ресурсы | Геометрия/параметры из версионированного контента |
 | `content/underwater` | Декларативные определения и ассеты | Только версионированная схема; без исполняемого кода |
 
 Корневой `package.json` описывает четыре TypeScript workspace. Папка `prototypes/` остаётся самостоятельным стендом этапа 0. `crates/ldw-server` — серверный каркас; продуктовые Viewer/Controller и симулятор остаются следующими задачами. Проверочный `interaction-server.mjs` не превращается в production backend.

@@ -45,3 +45,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check server crate and migration constraints
         run: cargo test -p ldw-server --locked
+      - name: Check deterministic simulation core
+        run: cargo test -p ldw-sim --locked
+      - name: Check browser WebAssembly target for simulation core
+        run: rustup target add wasm32-unknown-unknown --toolchain 1.98.1 && cargo build -p ldw-sim --target wasm32-unknown-unknown --locked
