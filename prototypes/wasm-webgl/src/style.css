@@ -40,6 +40,11 @@ a { color: #92d9f0; }
 .interaction-stage { display: flex; justify-content: center; align-items: center; width: 100%; }
 #interaction-scene { display: block; width: min(100%, 1200px); aspect-ratio: 16 / 9; height: auto; touch-action: none; border-radius: .5rem; }
 #core-scene { display: block; width: min(100%, 1200px); aspect-ratio: 16 / 9; height: auto; border-radius: .5rem; }
+.swim-main { max-width: 1240px; margin: 0 auto; padding: 1rem; }
+.swim-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.swim-controls label { display: flex; align-items: center; gap: .5rem; }
+.swim-controls select { min-height: 44px; max-width: min(70vw, 380px); padding: .4rem; }
+#swim-scene { display: block; width: 100%; aspect-ratio: 16 / 9; height: auto; border-radius: .5rem; }
 [hidden] { display: none !important; }
 .live-main { max-width: 1240px; margin: 0 auto; padding: 1rem; }
 .live-access { display: grid; gap: .8rem; max-width: 420px; }

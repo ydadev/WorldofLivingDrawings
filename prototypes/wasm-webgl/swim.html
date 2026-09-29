@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Рыбка в подводном мире</title>
+  </head>
+  <body>
+    <main class="swim-main">
+      <h1>Твоя рыбка в подводном мире</h1>
+      <p>Рыбка плавает с твоей раскраской. Это локальный просмотр черновика; в общую сцену он не отправляется.</p>
+      <div class="swim-controls">
+        <label>Черновик <select id="swim-draft"><option value="">Загрузка…</option></select></label>
+        <button id="swim-reload" type="button">Обновить черновики</button>
+        <a href="/paint.html">Вернуться к раскраске</a>
+      </div>
+      <p id="swim-status" role="status">Загрузка черновика…</p>
+      <canvas id="swim-scene" aria-label="Подводный мир с плавающей рыбкой"></canvas>
+    </main>
+    <script type="module" src="/src/swim.ts"></script>
+  </body>
+</html>

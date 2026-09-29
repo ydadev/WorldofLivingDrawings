@@ -15,7 +15,7 @@ const csp = [
 
 export default defineConfig({
   base: './',
-  build: { target: 'es2020', rolldownOptions: { input: ['index.html', 'fish.html', 'paint.html', 'capture.html', 'interaction.html', 'core.html', 'world.html', 'controller.html', 'viewer.html'] } },
+  build: { target: 'es2020', rolldownOptions: { input: ['index.html', 'fish.html', 'paint.html', 'swim.html', 'capture.html', 'interaction.html', 'core.html', 'world.html', 'controller.html', 'viewer.html'] } },
   server: { headers: { 'Content-Security-Policy': csp } },
   preview: {
     port: 4173,
