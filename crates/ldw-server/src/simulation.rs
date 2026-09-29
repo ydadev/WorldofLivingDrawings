@@ -112,6 +112,30 @@ fn underwater_bounds() -> Result<Bounds, SimulationError> {
     })
 }
 
+pub(crate) fn initial_world(scene_id: Uuid) -> Result<World, SimulationError> {
+    let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
+    World::new(underwater_bounds()?, seed).map_err(|_| SimulationError::InvalidPackage)
+}
+
+fn feed_actions(world: &World) -> Value {
+    json!(
+        world
+            .feed_sources()
+            .iter()
+            .map(|source| json!({
+                "id":format!("feed-{}", source.id),
+                "interactionId":"feed", "point":source.position,
+                "remaining":source.remaining, "expiresAtTick":source.expires_at_tick,
+            }))
+            .collect::<Vec<_>>()
+    )
+}
+
+fn interaction_state_event(world: &World, applied: &[Uuid]) -> Value {
+    json!({"type":"interaction_state", "activeActions":feed_actions(world),
+        "appliedCommandIds":applied, "simulationTick":world.tick_number()})
+}
+
 fn valid_publication(definition_id: &str, paint_blob_id: &str) -> bool {
     matches!(definition_id, "coral-fish" | "stream-fish")
         && (2..=64).contains(&paint_blob_id.len())
@@ -163,9 +187,7 @@ pub(crate) async fn publish_first_fish(
     {
         return Err(SimulationError::InvalidScene);
     }
-    let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
-    let mut world =
-        World::new(underwater_bounds()?, seed).map_err(|_| SimulationError::InvalidPackage)?;
+    let mut world = initial_world(scene_id)?;
     world
         .spawn_fish(fish_id.as_u128(), position, 1.2)
         .map_err(|_| SimulationError::InvalidPublication)?;
@@ -314,8 +336,7 @@ pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, Si
         {
             return Err(SimulationError::InvalidScene);
         }
-        let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
-        World::new(bounds, seed).map_err(|_| SimulationError::InvalidPackage)?
+        initial_world(scene_id)?
     };
     Ok(LoadedScene {
         epoch,
@@ -436,6 +457,180 @@ async fn apply_pending_fish(
         .await?;
     tx.commit().await?;
     scene.world = candidate;
+    scene.persisted_tick = tick;
+    scene.revision = new_revision;
+    Ok(true)
+}
+
+/// Accepted commands remain in the scene until the worker commits their effect.
+/// The checkpoint, projection, queue removal and revisioned event are atomic.
+async fn apply_pending_interactions(
+    pool: &PgPool,
+    scene_id: Uuid,
+    scene: &mut LoadedScene,
+) -> Result<bool, SimulationError> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(String, i32, i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.world_id, c.world_version, c.scene_epoch, c.revision, c.simulation_tick, \
+         c.state, s.status, s.active_scene_id FROM scenes c JOIN sessions s ON s.id = c.session_id \
+         WHERE c.id = $1 FOR UPDATE OF c",
+    )
+    .bind(scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((world_id, world_version, epoch, revision, persisted_tick, mut state, status, active)) =
+        row
+    else {
+        return Ok(false);
+    };
+    if world_id != "underwater"
+        || world_version != 1
+        || epoch != scene.epoch
+        || persisted_tick != scene.persisted_tick
+        || status != "running"
+        || active != Some(scene_id)
+    {
+        return Ok(false);
+    }
+    let pending = state
+        .get("pendingInteractions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut candidate = scene.world.clone();
+    let mut remaining = Vec::new();
+    let mut applied = Vec::new();
+    for entry in pending {
+        if entry.get("type").and_then(Value::as_str) != Some("interaction_requested")
+            || entry.get("interactionId").and_then(Value::as_str) != Some("feed")
+        {
+            remaining.push(entry);
+            continue;
+        }
+        let id = entry
+            .get("commandId")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(SimulationError::InvalidScene)?;
+        let point: Point = serde_json::from_value(
+            entry
+                .get("point")
+                .cloned()
+                .ok_or(SimulationError::InvalidScene)?,
+        )?;
+        candidate
+            .start_feed(&id.simple().to_string(), point)
+            .map_err(|_| SimulationError::InvalidScene)?;
+        applied.push(id);
+    }
+    if applied.is_empty() {
+        return Ok(true);
+    }
+    let tick = i64::try_from(candidate.tick_number()).map_err(|_| SimulationError::InvalidScene)?;
+    let new_revision = revision
+        .checked_add(1)
+        .ok_or(SimulationError::InvalidScene)?;
+    let event = interaction_state_event(&candidate, &applied);
+    let object = state.as_object_mut().ok_or(SimulationError::InvalidScene)?;
+    object.insert(
+        "simulation".into(),
+        serde_json::to_value(candidate.checkpoint())?,
+    );
+    object.insert("pendingInteractions".into(), json!(remaining));
+    object.insert("activeActions".into(), feed_actions(&candidate));
+    let updated = sqlx::query(
+        "UPDATE scenes SET state = $1::jsonb, simulation_tick = $2, revision = $3, updated_at = now() \
+         WHERE id = $4 AND scene_epoch = $5 AND simulation_tick = $6",
+    )
+    .bind(state)
+    .bind(tick)
+    .bind(new_revision)
+    .bind(scene_id)
+    .bind(scene.epoch)
+    .bind(scene.persisted_tick)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(scene_id)
+    .bind(new_revision)
+    .bind(scene.epoch)
+    .bind(event)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    scene.world = candidate;
+    scene.persisted_tick = tick;
+    scene.revision = new_revision;
+    Ok(true)
+}
+
+/// Resource consumption and expiry are durable transitions. They get one
+/// checkpoint and one revision, so a restart cannot replay an eaten portion.
+async fn save_interaction_state(
+    pool: &PgPool,
+    scene_id: Uuid,
+    scene: &mut LoadedScene,
+) -> Result<bool, SimulationError> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.scene_epoch, c.revision, c.simulation_tick, c.state, s.status, s.active_scene_id \
+         FROM scenes c JOIN sessions s ON s.id = c.session_id WHERE c.id = $1 FOR UPDATE OF c",
+    )
+    .bind(scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((epoch, revision, persisted_tick, mut state, status, active)) = row else {
+        return Ok(false);
+    };
+    if epoch != scene.epoch
+        || persisted_tick != scene.persisted_tick
+        || status != "running"
+        || active != Some(scene_id)
+    {
+        return Ok(false);
+    }
+    let tick =
+        i64::try_from(scene.world.tick_number()).map_err(|_| SimulationError::InvalidScene)?;
+    let new_revision = revision
+        .checked_add(1)
+        .ok_or(SimulationError::InvalidScene)?;
+    let event = interaction_state_event(&scene.world, &[]);
+    let object = state.as_object_mut().ok_or(SimulationError::InvalidScene)?;
+    object.insert(
+        "simulation".into(),
+        serde_json::to_value(scene.world.checkpoint())?,
+    );
+    object.insert("activeActions".into(), feed_actions(&scene.world));
+    let updated = sqlx::query(
+        "UPDATE scenes SET state = $1::jsonb, simulation_tick = $2, revision = $3, updated_at = now() \
+         WHERE id = $4 AND scene_epoch = $5 AND simulation_tick = $6",
+    )
+    .bind(state)
+    .bind(tick)
+    .bind(new_revision)
+    .bind(scene_id)
+    .bind(scene.epoch)
+    .bind(scene.persisted_tick)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(scene_id)
+    .bind(new_revision)
+    .bind(scene.epoch)
+    .bind(event)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     scene.persisted_tick = tick;
     scene.revision = new_revision;
     Ok(true)
@@ -562,12 +757,22 @@ async fn run_scene(
                     if !apply_pending_fish(&pool, scene_id, &mut scene).await? {
                         return Ok(());
                     }
+                    if !apply_pending_interactions(&pool, scene_id, &mut scene).await? {
+                        return Ok(());
+                    }
                 }
+                let food_before = scene.world.feed_sources().to_vec();
                 scene.world.step();
+                if scene.world.feed_sources() != food_before
+                    && !save_interaction_state(&pool, scene_id, &mut scene).await?
+                {
+                    return Ok(());
+                }
                 if scene.world.tick_number() % 10 == 0 {
                     hub.publish(position_frame(scene_id, &scene));
                 }
                 if scene.world.tick_number() % 100 == 0
+                    && scene.world.tick_number() > scene.persisted_tick as u64
                     && !save_checkpoint(&pool, scene_id, &mut scene).await?
                 {
                     return Ok(());
@@ -587,8 +792,205 @@ async fn run_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        access::{AccessStore, GrantKind},
+        realtime::{self, InteractionCommand},
+    };
     use ldw_sim::Point;
+    use sha2::{Digest, Sha256};
     use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    async fn accepted_feed_is_applied_once_consumed_and_restored() {
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        let grant = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scene_id = Uuid::new_v4();
+        let token = Uuid::new_v4().to_string();
+        let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("feed-{owner}")).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+                     VALUES ($1, $2, $3, $3, now() + interval '1 day')",
+        )
+        .bind(grant)
+        .bind(owner)
+        .bind(token_hash.to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+            .bind(session)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version) VALUES ($1, $2, 'underwater', 1)")
+            .bind(scene_id).bind(session).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = AccessStore::new(pool.clone(), [3; 32]);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let command = InteractionCommand {
+            kind: "command".into(),
+            command_id: Uuid::new_v4(),
+            session_id: session,
+            scene_id,
+            scene_epoch: 1,
+            interaction_id: "feed".into(),
+            point: realtime::Point { x: 0.0, y: 0.0 },
+            expires_at: now_ms + 8_000,
+        };
+        let outside = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            point: realtime::Point { x: 7.49, y: 0.0 },
+            ..command.clone()
+        };
+        let invalid =
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &outside)
+                .await
+                .unwrap();
+        assert_eq!(invalid["code"], "OUTSIDE_WATER");
+        let ack = realtime::process_command(&store, GrantKind::Owner, &token, session, &command)
+            .await
+            .unwrap();
+        assert_eq!(ack["accepted"], true);
+        assert_eq!(ack["revision"], 1);
+        let pending: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pending["pendingInteractions"].as_array().unwrap().len(), 1);
+        assert_eq!(pending["simulation"]["tick"], 0);
+        let repeat = realtime::process_command(&store, GrantKind::Owner, &token, session, &command)
+            .await
+            .unwrap();
+        assert_eq!(repeat, ack);
+        let immediate = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            ..command.clone()
+        };
+        let rejected =
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &immediate)
+                .await
+                .unwrap();
+        assert_eq!(rejected["accepted"], false);
+        assert!(rejected["code"] == "FEED_SCENE_COOLDOWN" || rejected["code"] == "FEED_COOLDOWN");
+
+        let (stop, receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver,
+            SimulationHub::default(),
+            Duration::from_millis(5),
+        ));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if state["activeActions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.len() == 1)
+                {
+                    assert!(state["pendingInteractions"].as_array().unwrap().is_empty());
+                    break;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        queue_fish(
+            &pool,
+            scene_id,
+            Uuid::new_v4(),
+            "coral-fish",
+            "paint-fed",
+            Point { x: 0.5, y: 0.0 },
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if state["activeActions"][0]["remaining"] == 9 {
+                    break;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        let restored = load_scene(&pool, scene_id).await.unwrap();
+        assert_eq!(restored.world.feed_sources()[0].remaining, 9);
+        assert_eq!(restored.world.feed_sources()[0].fed_fish.len(), 1);
+        let consumed_at = restored.world.tick_number();
+        let (stop_again, receiver_again) = watch::channel(false);
+        let worker_again = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver_again,
+            SimulationHub::default(),
+            Duration::from_millis(5),
+        ));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let loaded = load_scene(&pool, scene_id).await.unwrap();
+                if loaded.world.tick_number() >= consumed_at + 40 {
+                    break loaded;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop_again.send(true).unwrap();
+        worker_again.await.unwrap().unwrap();
+        let after_restart = load_scene(&pool, scene_id).await.unwrap();
+        assert_eq!(
+            after_restart.world.feed_sources()[0].remaining,
+            9,
+            "restored fish must not eat the same portion twice"
+        );
+        let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state["activeActions"][0]["remaining"], 9);
+        let transitions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM scene_events \
+            WHERE scene_id = $1 AND event->>'type' = 'interaction_state'",
+        )
+        .bind(scene_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            transitions >= 2,
+            "start and consumption need revisioned events"
+        );
+    }
 
     #[tokio::test]
     async fn queued_fish_join_running_world_and_survive_restart() {

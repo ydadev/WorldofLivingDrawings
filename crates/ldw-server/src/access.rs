@@ -32,6 +32,8 @@ pub enum AccessError {
     OwnerApprovalRequired,
     #[error("cryptographic operation failed")]
     Crypto,
+    #[error("invalid persisted scene state")]
+    SceneState,
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
 }

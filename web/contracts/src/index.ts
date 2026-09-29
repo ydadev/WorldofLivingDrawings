@@ -79,12 +79,25 @@ export interface EntityPublished {
   type: 'entity_published';
   entity: SceneEntity;
 }
+export interface ActiveAction {
+  id: string;
+  interactionId: 'feed';
+  point: Point2;
+  remaining: number;
+  expiresAtTick: number;
+}
+export interface InteractionState {
+  type: 'interaction_state';
+  activeActions: ActiveAction[];
+  appliedCommandIds: string[];
+  simulationTick: number;
+}
 export interface RealtimeSnapshot extends SceneSnapshot {
   type: 'snapshot';
   sceneId: string;
   simulationVersion: number;
   serverTime: number;
-  activeActions: unknown[];
+  activeActions: ActiveAction[];
   pendingInteractions: InteractionRequested[];
   resources: Record<string, unknown>;
   reservations: unknown[];
@@ -100,7 +113,7 @@ export interface SceneDelta {
 export interface RealtimeDelta extends SceneDelta {
   type: 'delta';
   sceneId: string;
-  event: InteractionRequested | EntityPublished;
+  event: InteractionRequested | EntityPublished | InteractionState;
 }
 export interface ScenePositions {
   type: 'positions';

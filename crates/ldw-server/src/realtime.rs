@@ -12,6 +12,7 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
+use ldw_sim::{Point as SimPoint, World, WorldCheckpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     access::{AccessError, AccessStore, GrantKind, SceneAccess},
     http::AppState,
-    simulation::SimulationHub,
+    simulation::{self, SimulationHub},
 };
 
 const OWNER_COOKIE: &str = "__Host-ldw-owner";
@@ -87,6 +88,74 @@ fn validate_interaction(
         return Some("OUTSIDE_WATER");
     }
     None
+}
+
+fn feed_limit_code(
+    state: &Value,
+    world: &World,
+    grant_id: Uuid,
+    now_ms: i64,
+) -> Result<Option<&'static str>, AccessError> {
+    let pending = match state.get("pendingInteractions") {
+        None => 0,
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .filter(|entry| entry.get("interactionId").and_then(Value::as_str) == Some("feed"))
+            .count(),
+        _ => return Err(AccessError::SceneState),
+    };
+    if world.feed_sources().len() + pending >= 3 {
+        return Ok(Some("FEED_LIMIT"));
+    }
+    let limits = state.get("interactionLimits");
+    if let Some(limits) = limits {
+        if !limits.is_object() {
+            return Err(AccessError::SceneState);
+        }
+        if limits
+            .get("lastSceneFeedMs")
+            .and_then(Value::as_i64)
+            .is_some_and(|last| now_ms.saturating_sub(last) < 500)
+        {
+            return Ok(Some("FEED_SCENE_COOLDOWN"));
+        }
+        let grant_key = grant_id.to_string();
+        if limits
+            .get("feedByGrantMs")
+            .and_then(|map| map.get(grant_key.as_str()))
+            .and_then(Value::as_i64)
+            .is_some_and(|last| now_ms.saturating_sub(last) < 1000)
+        {
+            return Ok(Some("FEED_COOLDOWN"));
+        }
+    }
+    Ok(None)
+}
+
+fn record_feed_acceptance(
+    state: &mut Value,
+    grant_id: Uuid,
+    now_ms: i64,
+) -> Result<(), AccessError> {
+    let object = state.as_object_mut().ok_or(AccessError::SceneState)?;
+    let limits = object
+        .entry("interactionLimits")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or(AccessError::SceneState)?;
+    let by_grant = limits
+        .entry("feedByGrantMs")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or(AccessError::SceneState)?;
+    by_grant.retain(|_, value| {
+        value
+            .as_i64()
+            .is_some_and(|last| now_ms.saturating_sub(last) < 1000)
+    });
+    by_grant.insert(grant_id.to_string(), json!(now_ms));
+    limits.insert("lastSceneFeedMs".into(), json!(now_ms));
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,7 +345,8 @@ async fn serve(
                     };
                     let delta = json!({"type":"delta", "sceneId":access.scene.scene_id,
                         "schemaVersion":1, "sceneEpoch":epoch, "revision":revision,
-                        "simulationTick":0, "upsert":upsert, "remove":[], "event":event});
+                        "simulationTick":event.get("simulationTick").and_then(Value::as_u64).unwrap_or(0),
+                        "upsert":upsert, "remove":[], "event":event});
                     if send_json(&mut socket, &delta).await.is_err() { return; }
                     cursor = revision;
                 }
@@ -409,15 +479,16 @@ pub async fn process_command(
     let body = serde_json::to_vec(command).map_err(|_| AccessError::Crypto)?;
     let body_hash: [u8; 32] = Sha256::digest(&body).into();
     let mut tx = store.pool().begin().await?;
-    let (epoch, revision, status): (i64, i64, String) = sqlx::query_as(
-        "SELECT c.scene_epoch, c.revision, s.status FROM scenes c \
+    let (epoch, revision, persisted_tick, mut state, status): (i64, i64, i64, Value, String) =
+        sqlx::query_as(
+            "SELECT c.scene_epoch, c.revision, c.simulation_tick, c.state, s.status FROM scenes c \
          JOIN sessions s ON s.id = c.session_id \
          WHERE c.id = $1 AND c.session_id = $2 FOR UPDATE OF c",
-    )
-    .bind(access.scene.scene_id)
-    .bind(session_id)
-    .fetch_one(&mut *tx)
-    .await?;
+        )
+        .bind(access.scene.scene_id)
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let previous: Option<(Vec<u8>, Value)> = sqlx::query_as(
         "SELECT body_hash, outcome FROM scene_commands \
          WHERE session_id = $1 AND grant_id = $2 AND command_id = $3",
@@ -444,7 +515,8 @@ pub async fn process_command(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AccessError::Crypto)?
         .as_millis() as i64;
-    let code = if command.kind != "command" || command.session_id != session_id {
+    let mut initial_checkpoint = None;
+    let mut code = if command.kind != "command" || command.session_id != session_id {
         Some("INVALID_COMMAND")
     } else if command.scene_id != access.scene.scene_id || command.scene_epoch != epoch {
         Some("STALE_SCENE")
@@ -459,8 +531,48 @@ pub async fn process_command(
     } else {
         None
     };
+    if code.is_none() && command.interaction_id == "feed" {
+        let mut world = if let Some(value) = state.get("simulation") {
+            let checkpoint: WorldCheckpoint =
+                serde_json::from_value(value.clone()).map_err(|_| AccessError::SceneState)?;
+            if checkpoint.tick != persisted_tick as u64 {
+                return Err(AccessError::SceneState);
+            }
+            World::restore(checkpoint).map_err(|_| AccessError::SceneState)?
+        } else {
+            if persisted_tick != 0
+                || state
+                    .get("entities")
+                    .and_then(Value::as_array)
+                    .is_some_and(|entities| !entities.is_empty())
+            {
+                return Err(AccessError::SceneState);
+            }
+            simulation::initial_world(access.scene.scene_id).map_err(|_| AccessError::SceneState)?
+        };
+        code = feed_limit_code(&state, &world, access.grant_id, now_ms)?;
+        if code.is_none() {
+            let point = SimPoint {
+                x: command.point.x as f32,
+                y: command.point.y as f32,
+            };
+            code = match world.start_feed(&command.command_id.simple().to_string(), point) {
+                Ok(()) => None,
+                Err(ldw_sim::SimError::InvalidPosition) => Some("OUTSIDE_WATER"),
+                Err(ldw_sim::SimError::FeedLimit) => Some("FEED_LIMIT"),
+                Err(_) => return Err(AccessError::SceneState),
+            };
+            if code.is_none() && state.get("simulation").is_none() {
+                initial_checkpoint = Some(
+                    simulation::initial_world(access.scene.scene_id)
+                        .map_err(|_| AccessError::SceneState)?
+                        .checkpoint(),
+                );
+            }
+        }
+    }
     let new_revision = if code.is_none() {
-        revision + 1
+        revision.checked_add(1).ok_or(AccessError::SceneState)?
     } else {
         revision
     };
@@ -470,15 +582,29 @@ pub async fn process_command(
     if code.is_none() {
         let event = json!({"type":"interaction_requested","commandId":command.command_id,
             "interactionId":command.interaction_id,"point":command.point});
+        let object = state.as_object_mut().ok_or(AccessError::SceneState)?;
+        object
+            .entry("pendingInteractions")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or(AccessError::SceneState)?
+            .push(event.clone());
+        if let Some(checkpoint) = initial_checkpoint {
+            object.insert(
+                "simulation".into(),
+                serde_json::to_value(checkpoint).map_err(|_| AccessError::SceneState)?,
+            );
+            object.entry("entities").or_insert_with(|| json!([]));
+        }
+        if command.interaction_id == "feed" {
+            record_feed_acceptance(&mut state, access.grant_id, now_ms)?;
+        }
         sqlx::query(
-            "UPDATE scenes SET revision = $1, updated_at = now(), \
-             state = jsonb_set(state, '{pendingInteractions}', \
-             coalesce(state->'pendingInteractions', '[]'::jsonb) || $3::jsonb, true) \
-             WHERE id = $2",
+            "UPDATE scenes SET revision = $1, updated_at = now(), state = $3::jsonb WHERE id = $2",
         )
         .bind(new_revision)
         .bind(access.scene.scene_id)
-        .bind(json!([event.clone()]))
+        .bind(state)
         .execute(&mut *tx)
         .await?;
         sqlx::query("INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)")

@@ -219,7 +219,7 @@ mod tests {
             session_id: first_scene.session_id,
             scene_id: first_scene.scene_id,
             scene_epoch: 1,
-            interaction_id: "feed".to_owned(),
+            interaction_id: "boat".to_owned(),
             point: realtime::Point { x: 1.0, y: -1.0 },
             expires_at: now_ms + 8000,
         };
