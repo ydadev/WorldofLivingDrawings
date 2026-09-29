@@ -228,6 +228,8 @@ try {
   });
   await mobile.locator('#capture-open').click();
   const capture = mobile.frameLocator('#editor-frame');
+  await mobile.waitForFunction(() => typeof document.querySelector('#editor-frame')?.contentWindow?.captureResult === 'function',
+    null, { timeout: 20000 });
   await capture.locator('#capture-file').setInputFiles({
     name: 'test-paper.png', mimeType: 'image/png', buffer: syntheticPaper,
   });
