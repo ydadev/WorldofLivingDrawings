@@ -147,8 +147,9 @@ export class BabylonRendererAdapter implements RendererAdapter {
       if (visual && Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y)) {
         const headingDepth = item.headingDepth ?? 0;
         if (Number.isFinite(headingDepth) && Math.abs(headingDepth) <= 1) {
+          // The authored GLB has its nose on local -X and its tail on +X.
           if (Math.hypot(item.heading.x, headingDepth) > .01)
-            visual.targetYaw = Math.atan2(-headingDepth, item.heading.x);
+            visual.targetYaw = Math.atan2(headingDepth, -item.heading.x);
           visual.targetPitch = Math.max(-.32, Math.min(.32,
             Math.atan2(item.heading.y, Math.max(.3, Math.abs(item.heading.x))) * .28));
         }
@@ -201,7 +202,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
       loading.material = this.fallbackMaterial;
       this.loadingMarkers.set(entity.id, loading);
       this.markers.set(entity.id, marker);
-      this.fishMotion.set(entity.id, { yaw: 0, targetYaw: 0, pitch: 0, targetPitch: 0,
+      this.fishMotion.set(entity.id, { yaw: Math.PI, targetYaw: Math.PI,
+        pitch: 0, targetPitch: 0,
         phase: [...entity.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) * .31 });
       this.entityVersions.set(entity.id, version);
       if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])

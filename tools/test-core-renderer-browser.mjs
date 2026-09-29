@@ -130,12 +130,15 @@ try {
     const tail = scene.getNodeByName('fish-1/tail-pivot');
     const first = tail?.rotation.y;
     await new Promise(resolve => setTimeout(resolve, 170));
-    return { depth: marker.position.z, scale: marker.scaling.x, yaw: marker.rotation.y,
+    const yaw = marker.rotation.y;
+    const noseDotHeading = (-Math.cos(yaw) * .92 + Math.sin(yaw) * .38) / Math.hypot(.92, .38);
+    return { depth: marker.position.z, scale: marker.scaling.x, yaw, noseDotHeading,
       tailPresent: !!tail, tailMoved: Math.abs(tail?.rotation.y - first) > .02,
       tailNames: scene.meshes.concat(scene.transformNodes).filter(node => node.name.includes('tail')).map(node => node.name) };
   });
   assert(Math.abs(depthVisual.depth - 1.2) < .01 && depthVisual.scale < .9 &&
-    Math.abs(depthVisual.yaw) > .1 && depthVisual.tailPresent && depthVisual.tailMoved,
+    depthVisual.yaw < Math.PI && depthVisual.noseDotHeading > .9 &&
+    depthVisual.tailPresent && depthVisual.tailMoved,
     `Depth, turn and tail must animate: ${JSON.stringify(depthVisual)}`);
   const afterStale = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;

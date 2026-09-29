@@ -98,6 +98,9 @@ jobs:
       - name: Run Chrome renderer adapter probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:core-renderer
+      - name: Check near and far swimming path
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:swim-path
       - name: Run Chrome live world UI probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:live-ui

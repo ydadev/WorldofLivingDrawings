@@ -3,6 +3,7 @@ import { BabylonRendererAdapter } from '@ldw/renderer-babylon';
 import worldData from '../../../content/underwater/world.json';
 import { PaintDocument, type PaintLayout } from './paint-core';
 import { listDrafts, type PaintDraft } from './paint-drafts';
+import { swimPath } from './swim-path';
 import './style.css';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#swim-scene')!;
@@ -16,18 +17,6 @@ let generation = 0;
 let swimTimer: number | undefined;
 let simulationTick = 0;
 let swimStart = 0;
-
-function swimPath(seconds: number): { x: number; y: number; depth: number;
-  heading: { x: number; y: number }; headingDepth: number } {
-  const x = 3.9 * Math.sin(seconds * .34) + .7 * Math.sin(seconds * .71);
-  const y = 1.15 * Math.sin(seconds * .42 + .8) + .3 * Math.sin(seconds * .9);
-  const depth = 1.3 * Math.sin(seconds * .23 - .8);
-  const dx = 3.9 * .34 * Math.cos(seconds * .34) + .7 * .71 * Math.cos(seconds * .71);
-  const dy = 1.15 * .42 * Math.cos(seconds * .42 + .8) + .3 * .9 * Math.cos(seconds * .9);
-  const dz = 1.3 * .23 * Math.cos(seconds * .23 - .8);
-  const length = Math.hypot(dx, dy, dz);
-  return { x, y, depth, heading: { x: dx / length, y: dy / length }, headingDepth: dz / length };
-}
 
 const adapter = new BabylonRendererAdapter(canvas, '/fish/', () => paintUrl ?? '');
 adapter.setWorld(world);
@@ -78,7 +67,7 @@ async function showDraft(draft: PaintDraft): Promise<void> {
   };
   move();
   swimTimer = window.setInterval(move, 500);
-  status.textContent = 'Рыбка плавает в аквариуме. Раскраска взята из черновика этого браузера.';
+  status.textContent = 'Рыбка поворачивает, уплывает в глубину и возвращается к стеклу. Раскраска взята из черновика этого браузера.';
 }
 
 async function refreshDrafts(): Promise<void> {

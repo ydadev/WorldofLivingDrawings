@@ -17,6 +17,7 @@
     "test:capture": "node ../../tools/test-capture-browser.mjs",
     "test:interaction": "node ../../tools/test-interaction-browser.mjs",
     "test:core-renderer": "node ../../tools/test-core-renderer-browser.mjs",
+    "test:swim-path": "node ../../tools/test-swim-path.mjs",
     "test:live-ui": "node ../../tools/test-live-ui-browser.mjs",
     "test:real-ui": "node ../../tools/test-real-ui-browser.mjs"
   },
