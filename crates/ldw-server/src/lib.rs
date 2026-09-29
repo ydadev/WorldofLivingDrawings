@@ -290,7 +290,10 @@ mod tests {
             .uri("/health/ready")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(app.clone().oneshot(readiness).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            app.clone().oneshot(readiness).await.unwrap().status(),
+            StatusCode::OK
+        );
         let owner_cookie = format!("__Host-ldw-owner={}", first.token);
         let own_request = Request::builder()
             .uri(format!("/api/sessions/{}/scene", first_scene.session_id))
