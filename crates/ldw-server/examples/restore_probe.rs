@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(scene_response.status(), StatusCode::OK);
     let scene_bytes = to_bytes(scene_response.into_body(), 4096).await?;
     let scene: serde_json::Value = serde_json::from_slice(&scene_bytes)?;
-    assert_eq!(scene["sceneId"], summary.scene_id.to_string());
+    assert_eq!(scene["scene_id"], summary.scene_id.to_string());
 
     for id in &blob_ids {
         let uri = format!("/api/sessions/{session_id}/paint/{id}");
