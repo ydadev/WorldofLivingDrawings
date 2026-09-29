@@ -12,7 +12,10 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::access::{AccessError, AccessStore, PairCode};
+use crate::{
+    access::{AccessError, AccessStore, GrantKind, PairCode},
+    upload::{self, UploadError},
+};
 
 const OWNER_COOKIE: &str = "__Host-ldw-owner";
 const CONTROLLER_COOKIE: &str = "__Host-ldw-controller";
@@ -32,6 +35,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/login", post(login))
         .route("/api/owners", post(create_owner))
         .route("/api/sessions", post(create_session))
+        .route(
+            "/api/sessions/{id}/upload-intents",
+            post(create_upload_intent),
+        )
         .route("/api/sessions/{id}/scene", get(scene))
         .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
         .route("/api/sessions/{id}/viewers", post(create_viewer))
@@ -97,6 +104,21 @@ impl From<AccessError> for ApiError {
                 Self(StatusCode::FORBIDDEN, "OWNER_APPROVAL_REQUIRED")
             }
             AccessError::Crypto | AccessError::SceneState | AccessError::Database(_) => {
+                Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
+            }
+        }
+    }
+}
+
+impl From<UploadError> for ApiError {
+    fn from(error: UploadError) -> Self {
+        match error {
+            UploadError::Forbidden => Self(StatusCode::FORBIDDEN, "ACCESS_DENIED"),
+            UploadError::InvalidPaint => Self(StatusCode::BAD_REQUEST, "INVALID_PAINT_RESULT"),
+            UploadError::StaleScene => Self(StatusCode::CONFLICT, "STALE_SCENE"),
+            UploadError::SceneFull => Self(StatusCode::CONFLICT, "SCENE_FULL"),
+            UploadError::IntentLimit => Self(StatusCode::TOO_MANY_REQUESTS, "UPLOAD_INTENT_LIMIT"),
+            UploadError::InvalidScene | UploadError::Database(_) => {
                 Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
             }
         }
@@ -216,6 +238,31 @@ async fn create_session(
         session_id: ids.session_id,
         scene_id: ids.scene_id,
     }))
+}
+
+async fn create_upload_intent(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<upload::UploadIntentRequest>,
+) -> Result<(StatusCode, Json<upload::UploadIntentResponse>), ApiError> {
+    require_origin(&headers, &state)?;
+    let (kind, token) = if let Some(owner) = jar.get(OWNER_COOKIE) {
+        (GrantKind::Owner, owner.value())
+    } else {
+        (
+            GrantKind::Controller,
+            cookie_token(&jar, CONTROLLER_COOKIE)?,
+        )
+    };
+    state
+        .access
+        .check_socket_csrf(kind, token, csrf(&headers)?, session_id)
+        .await?;
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    let intent = upload::create_upload_intent(state.access.pool(), kind, &access, &input).await?;
+    Ok((StatusCode::CREATED, Json(intent)))
 }
 
 #[derive(Serialize)]

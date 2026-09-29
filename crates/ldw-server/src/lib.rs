@@ -4,6 +4,7 @@ pub mod http;
 pub mod paint_image;
 pub mod realtime;
 pub mod simulation;
+pub mod upload;
 
 /// The server uses versioned, embedded migrations; no database credentials live in source.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
