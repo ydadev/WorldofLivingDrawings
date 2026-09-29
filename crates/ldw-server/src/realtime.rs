@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::LazyLock,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     extract::{
@@ -25,6 +28,65 @@ const OWNER_COOKIE: &str = "__Host-ldw-owner";
 const CONTROLLER_COOKIE: &str = "__Host-ldw-controller";
 const VIEWER_COOKIE: &str = "__Host-ldw-viewer";
 const MAX_MESSAGE_BYTES: usize = 8192;
+
+#[derive(Deserialize)]
+struct WorldRules {
+    id: String,
+    version: i32,
+    zones: Vec<ZoneRules>,
+}
+#[derive(Deserialize)]
+struct ZoneRules {
+    id: String,
+    bounds: [f64; 4],
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InteractionRules {
+    id: String,
+    allowed_zone_id: String,
+}
+static UNDERWATER_RULES: LazyLock<(WorldRules, Vec<InteractionRules>)> = LazyLock::new(|| {
+    (
+        serde_json::from_str(include_str!("../../../content/underwater/world.json"))
+            .expect("versioned underwater world definition"),
+        serde_json::from_str(include_str!(
+            "../../../content/underwater/interactions.json"
+        ))
+        .expect("versioned underwater interaction definitions"),
+    )
+});
+
+fn validate_interaction(
+    access: &SceneAccess,
+    command: &InteractionCommand,
+) -> Option<&'static str> {
+    let (world, interactions) = &*UNDERWATER_RULES;
+    if access.scene.world_id != world.id || access.scene.world_version != world.version {
+        return Some("UNSUPPORTED_WORLD");
+    }
+    let Some(definition) = interactions
+        .iter()
+        .find(|item| item.id == command.interaction_id)
+    else {
+        return Some("UNKNOWN_INTERACTION");
+    };
+    let Some(zone) = world
+        .zones
+        .iter()
+        .find(|item| item.id == definition.allowed_zone_id)
+    else {
+        return Some("INVALID_WORLD_PACKAGE");
+    };
+    if !command.point.x.is_finite()
+        || !command.point.y.is_finite()
+        || !(zone.bounds[0]..=zone.bounds[1]).contains(&command.point.x)
+        || !(zone.bounds[2]..=zone.bounds[3]).contains(&command.point.y)
+    {
+        return Some("OUTSIDE_WATER");
+    }
+    None
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -363,14 +425,8 @@ pub async fn process_command(
         Some("READ_ONLY")
     } else if status != "running" {
         Some("SCENE_NOT_RUNNING")
-    } else if !matches!(command.interaction_id.as_str(), "feed" | "boat") {
-        Some("UNKNOWN_INTERACTION")
-    } else if !command.point.x.is_finite()
-        || !command.point.y.is_finite()
-        || !(-7.5..=7.5).contains(&command.point.x)
-        || !(-4.0..=4.0).contains(&command.point.y)
-    {
-        Some("OUTSIDE_WATER")
+    } else if let Some(reason) = validate_interaction(&access, command) {
+        Some(reason)
     } else {
         None
     };

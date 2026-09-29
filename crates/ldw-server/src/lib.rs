@@ -327,6 +327,75 @@ mod tests {
             .unwrap()["code"],
             "STALE_SCENE"
         );
+        let concurrent = realtime::InteractionCommand {
+            command_id: Uuid::new_v4(),
+            session_id: second_scene.session_id,
+            scene_id: second_scene.scene_id,
+            scene_epoch: 2,
+            expires_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+                + 8000,
+            ..interaction.clone()
+        };
+        let (first_result, second_result) = tokio::join!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Owner,
+                &second.token,
+                second_scene.session_id,
+                &concurrent
+            ),
+            realtime::process_command(
+                &store,
+                access::GrantKind::Owner,
+                &second.token,
+                second_scene.session_id,
+                &concurrent
+            )
+        );
+        assert_eq!(first_result.unwrap(), second_result.unwrap());
+        let count_after_race: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM scene_events WHERE scene_id = $1")
+                .bind(second_scene.scene_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count_after_race, 1,
+            "concurrent duplicate commits one event"
+        );
+        let mut expired = concurrent.clone();
+        expired.command_id = Uuid::new_v4();
+        expired.expires_at = 1;
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Owner,
+                &second.token,
+                second_scene.session_id,
+                &expired,
+            )
+            .await
+            .unwrap()["code"],
+            "EXPIRED_COMMAND"
+        );
+        let mut outside = concurrent.clone();
+        outside.command_id = Uuid::new_v4();
+        outside.point.x = 8.0;
+        assert_eq!(
+            realtime::process_command(
+                &store,
+                access::GrantKind::Owner,
+                &second.token,
+                second_scene.session_id,
+                &outside,
+            )
+            .await
+            .unwrap()["code"],
+            "OUTSIDE_WATER"
+        );
         let invite = store
             .open_invitation(&first.token, &first.csrf, first_scene.session_id)
             .await

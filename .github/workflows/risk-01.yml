@@ -4,6 +4,8 @@ on:
     paths:
       - '.github/workflows/risk-01.yml'
       - 'rust-toolchain.toml'
+      - 'Cargo.toml'
+      - 'prototypes/wasm-core/**'
       - '.node-version'
       - 'package.json'
       - 'package-lock.json'
@@ -25,6 +27,8 @@ on:
     paths:
       - '.github/workflows/risk-01.yml'
       - 'rust-toolchain.toml'
+      - 'Cargo.toml'
+      - 'prototypes/wasm-core/**'
       - '.node-version'
       - 'package.json'
       - 'package-lock.json'
