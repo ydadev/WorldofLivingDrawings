@@ -112,6 +112,18 @@ fn underwater_bounds() -> Result<Bounds, SimulationError> {
     })
 }
 
+fn valid_publication(definition_id: &str, paint_blob_id: &str) -> bool {
+    matches!(definition_id, "coral-fish" | "stream-fish")
+        && (2..=64).contains(&paint_blob_id.len())
+        && paint_blob_id
+            .bytes()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+        && paint_blob_id
+            .bytes()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
+}
+
 /// Trusted publication boundary: the caller must already own and validate the
 /// PaintResult blob. This transaction establishes the first Entity and tick-0
 /// checkpoint together; the supervisor discovers the new scene on its next scan.
@@ -123,17 +135,7 @@ pub(crate) async fn publish_first_fish(
     paint_blob_id: &str,
     position: Point,
 ) -> Result<Value, SimulationError> {
-    if !matches!(definition_id, "coral-fish" | "stream-fish")
-        || paint_blob_id.len() < 2
-        || paint_blob_id.len() > 64
-        || !paint_blob_id
-            .bytes()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_lowercase())
-        || !paint_blob_id
-            .bytes()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
-    {
+    if !valid_publication(definition_id, paint_blob_id) {
         return Err(SimulationError::InvalidPublication);
     }
     let mut tx = pool.begin().await?;
@@ -202,6 +204,82 @@ pub(crate) async fn publish_first_fish(
     Ok(event)
 }
 
+/// Caller must validate blob ownership and the PaintResult before this boundary.
+/// A queued fish is not yet visible; only the scene worker can publish it.
+pub(crate) async fn queue_fish(
+    pool: &PgPool,
+    scene_id: Uuid,
+    fish_id: Uuid,
+    definition_id: &str,
+    paint_blob_id: &str,
+    position: Point,
+) -> Result<(), SimulationError> {
+    if !valid_publication(definition_id, paint_blob_id) {
+        return Err(SimulationError::InvalidPublication);
+    }
+    let mut tx = pool.begin().await?;
+    let row: Option<(String, i32, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.world_id, c.world_version, c.simulation_tick, c.state, s.status, s.active_scene_id \
+         FROM scenes c JOIN sessions s ON s.id = c.session_id WHERE c.id = $1 FOR UPDATE OF c",
+    )
+    .bind(scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((world_id, world_version, tick, state, status, active_scene)) = row else {
+        return Err(SimulationError::InvalidScene);
+    };
+    if world_id != "underwater"
+        || world_version != 1
+        || status != "running"
+        || active_scene != Some(scene_id)
+        || tick < 0
+    {
+        return Err(SimulationError::InvalidScene);
+    }
+    let checkpoint: WorldCheckpoint = serde_json::from_value(
+        state
+            .get("simulation")
+            .cloned()
+            .ok_or(SimulationError::InvalidScene)?,
+    )?;
+    if checkpoint.tick != tick as u64 || checkpoint.bounds != underwater_bounds()? {
+        return Err(SimulationError::InvalidScene);
+    }
+    let mut world = World::restore(checkpoint).map_err(|_| SimulationError::InvalidScene)?;
+    let entities = state
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or(SimulationError::InvalidScene)?;
+    if entities.len() != world.fish().len() {
+        return Err(SimulationError::InvalidScene);
+    }
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM fish_publications WHERE scene_id = $1")
+            .bind(scene_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if entities.len() + queued as usize >= ldw_sim::MAX_FISH {
+        return Err(SimulationError::InvalidPublication);
+    }
+    world
+        .spawn_fish(fish_id.as_u128(), position, 1.2)
+        .map_err(|_| SimulationError::InvalidPublication)?;
+    sqlx::query(
+        "INSERT INTO fish_publications (scene_id, fish_id, definition_id, paint_blob_id, position_x, position_y) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(scene_id)
+    .bind(fish_id)
+    .bind(definition_id)
+    .bind(paint_blob_id)
+    .bind(position.x)
+    .bind(position.y)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, SimulationError> {
     let (world_id, world_version, epoch, revision, tick, state): (
         String,
@@ -245,6 +323,122 @@ pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, Si
         persisted_tick: tick,
         world,
     })
+}
+
+/// Apply the durable inbox to the worker-owned world. PostgreSQL receives the
+/// matching checkpoint, Entity list, ordered events and queue deletion before
+/// the in-memory world changes; a crash leaves either all or none of the batch.
+async fn apply_pending_fish(
+    pool: &PgPool,
+    scene_id: Uuid,
+    scene: &mut LoadedScene,
+) -> Result<bool, SimulationError> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(String, i32, i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.world_id, c.world_version, c.scene_epoch, c.revision, c.simulation_tick, \
+         c.state, s.status, s.active_scene_id FROM scenes c JOIN sessions s ON s.id = c.session_id \
+         WHERE c.id = $1 FOR UPDATE OF c",
+    )
+    .bind(scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((world_id, world_version, epoch, revision, persisted_tick, state, status, active)) =
+        row
+    else {
+        return Ok(false);
+    };
+    if world_id != "underwater"
+        || world_version != 1
+        || epoch != scene.epoch
+        || persisted_tick != scene.persisted_tick
+        || status != "running"
+        || active != Some(scene_id)
+    {
+        return Ok(false);
+    }
+    let pending: Vec<(Uuid, String, String, f32, f32)> = sqlx::query_as(
+        "SELECT fish_id, definition_id, paint_blob_id, position_x, position_y \
+         FROM fish_publications WHERE scene_id = $1 ORDER BY created_at, fish_id LIMIT 100",
+    )
+    .bind(scene_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if pending.is_empty() {
+        return Ok(true);
+    }
+    let mut candidate = scene.world.clone();
+    let mut entities = state
+        .get("entities")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or(SimulationError::InvalidScene)?;
+    if entities.len() != candidate.fish().len() {
+        return Err(SimulationError::InvalidScene);
+    }
+    let mut new_revision = revision;
+    let mut events = Vec::with_capacity(pending.len());
+    for (fish_id, definition_id, paint_blob_id, x, y) in &pending {
+        if !valid_publication(definition_id, paint_blob_id) {
+            return Err(SimulationError::InvalidPublication);
+        }
+        let position = Point { x: *x, y: *y };
+        candidate
+            .spawn_fish(fish_id.as_u128(), position, 1.2)
+            .map_err(|_| SimulationError::InvalidPublication)?;
+        let entity = json!({
+            "id": format!("fish-{:032x}", fish_id.as_u128()),
+            "definitionId": definition_id,
+            "definitionVersion": 1,
+            "paintBlobId": paint_blob_id,
+            "position": position,
+        });
+        entities.push(entity.clone());
+        new_revision = new_revision
+            .checked_add(1)
+            .ok_or(SimulationError::InvalidScene)?;
+        events.push((
+            new_revision,
+            json!({"type":"entity_published", "entity":entity}),
+        ));
+    }
+    let tick = i64::try_from(candidate.tick_number()).map_err(|_| SimulationError::InvalidScene)?;
+    let updated = sqlx::query(
+        "UPDATE scenes SET state = jsonb_set(jsonb_set(state, '{simulation}', $1::jsonb, true), \
+         '{entities}', $2::jsonb, true), simulation_tick = $3, revision = $4, updated_at = now() \
+         WHERE id = $5 AND scene_epoch = $6 AND simulation_tick = $7",
+    )
+    .bind(serde_json::to_value(candidate.checkpoint())?)
+    .bind(json!(entities))
+    .bind(tick)
+    .bind(new_revision)
+    .bind(scene_id)
+    .bind(scene.epoch)
+    .bind(scene.persisted_tick)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Ok(false);
+    }
+    for (revision, event) in events {
+        sqlx::query(
+            "INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(scene_id)
+        .bind(revision)
+        .bind(scene.epoch)
+        .bind(event)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("DELETE FROM fish_publications WHERE scene_id = $1")
+        .bind(scene_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    scene.world = candidate;
+    scene.persisted_tick = tick;
+    scene.revision = new_revision;
+    Ok(true)
 }
 
 /// Save only after a complete 100-tick (5-second) interval or controlled stop.
@@ -365,6 +559,9 @@ async fn run_scene(
                     .fetch_one(&pool)
                     .await?;
                     if !running { break; }
+                    if !apply_pending_fish(&pool, scene_id, &mut scene).await? {
+                        return Ok(());
+                    }
                 }
                 scene.world.step();
                 if scene.world.tick_number() % 10 == 0 {
@@ -392,6 +589,206 @@ mod tests {
     use super::*;
     use ldw_sim::Point;
     use tokio::time::{sleep, timeout};
+
+    #[tokio::test]
+    async fn queued_fish_join_running_world_and_survive_restart() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("isolated test database"))
+            .await
+            .unwrap();
+        crate::migrate(&pool).await.unwrap();
+        let owner = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scene_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("live-{owner}")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+            .bind(session)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version) VALUES ($1, $2, 'underwater', 1)")
+            .bind(scene_id).bind(session).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first = Uuid::new_v4();
+        publish_first_fish(
+            &pool,
+            scene_id,
+            first,
+            "coral-fish",
+            "paint-first",
+            Point { x: -2.0, y: 0.0 },
+        )
+        .await
+        .unwrap();
+        let (stop, receiver) = watch::channel(false);
+        let hub = SimulationHub::default();
+        let mut frames = hub.subscribe();
+        let worker = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver,
+            hub,
+            Duration::from_millis(1),
+        ));
+        let initial = timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial.positions.len(), 1);
+        let second = Uuid::new_v4();
+        let before: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before["entities"].as_array().unwrap().len(), 1);
+        assert!(
+            queue_fish(
+                &pool,
+                scene_id,
+                Uuid::new_v4(),
+                "stream-fish",
+                "paint-bad",
+                Point { x: 99.0, y: 0.0 }
+            )
+            .await
+            .is_err()
+        );
+        queue_fish(
+            &pool,
+            scene_id,
+            second,
+            "stream-fish",
+            "paint-second",
+            Point { x: 2.0, y: 0.0 },
+        )
+        .await
+        .unwrap();
+        assert!(
+            queue_fish(
+                &pool,
+                scene_id,
+                second,
+                "stream-fish",
+                "paint-second",
+                Point { x: 2.0, y: 0.0 }
+            )
+            .await
+            .is_err()
+        );
+        let applied = timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = frames.recv().await.unwrap();
+                if frame.positions.len() == 2 {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(applied.revision, 2);
+        assert!(
+            applied
+                .positions
+                .iter()
+                .any(|fish| fish.id == format!("fish-{:032x}", second.as_u128()))
+        );
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        let restored = load_scene(&pool, scene_id).await.unwrap();
+        assert_eq!(restored.world.fish().len(), 2);
+        assert!(restored.persisted_tick >= 20);
+        let second_event: Value = sqlx::query_scalar(
+            "SELECT event FROM scene_events WHERE scene_id = $1 AND revision = 2",
+        )
+        .bind(scene_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(second_event["entity"]["paintBlobId"], "paint-second");
+
+        let third = Uuid::new_v4();
+        queue_fish(
+            &pool,
+            scene_id,
+            third,
+            "coral-fish",
+            "paint-third",
+            Point { x: 0.0, y: 2.0 },
+        )
+        .await
+        .unwrap();
+        let fourth = Uuid::new_v4();
+        queue_fish(
+            &pool,
+            scene_id,
+            fourth,
+            "stream-fish",
+            "paint-fourth",
+            Point { x: 3.0, y: -2.0 },
+        )
+        .await
+        .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fish_publications WHERE scene_id = $1")
+                .bind(scene_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 2);
+        let (stop, receiver) = watch::channel(false);
+        let hub = SimulationHub::default();
+        let mut frames = hub.subscribe();
+        let worker = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver,
+            hub,
+            Duration::from_millis(1),
+        ));
+        let resumed = timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = frames.recv().await.unwrap();
+                if frame.positions.len() == 4 {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(resumed.revision, 4);
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
+        let after = load_scene(&pool, scene_id).await.unwrap();
+        assert_eq!(after.world.fish().len(), 4);
+        let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state["entities"].as_array().unwrap().len(), 4);
+        let revisions: Vec<i64> = sqlx::query_scalar(
+            "SELECT revision FROM scene_events WHERE scene_id = $1 ORDER BY revision",
+        )
+        .bind(scene_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(revisions, [1, 2, 3, 4]);
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM fish_publications WHERE scene_id = $1")
+                .bind(scene_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0);
+    }
 
     #[tokio::test]
     async fn checkpoint_survives_database_roundtrip_and_rejects_stale_worker() {
