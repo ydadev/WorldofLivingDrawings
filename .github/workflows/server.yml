@@ -79,6 +79,8 @@ jobs:
           cargo run -p ldw-server --locked -- gc-blobs
       - name: Check deterministic simulation core
         run: cargo test -p ldw-sim --locked
+      - name: Probe three scenes and ten logical minutes
+        run: cargo run --release -p ldw-sim --example three_scene_probe --locked
       - name: Check consistent DB and blob backup
         run: bash tools/test-backup-consistency.sh
       - name: Check backup retention boundaries
