@@ -67,6 +67,7 @@ export interface SceneSnapshot {
   worldId: string;
   worldVersion: number;
   entities: SceneEntity[];
+  activeActions?: ActiveAction[];
 }
 
 export interface InteractionRequested {
@@ -109,6 +110,7 @@ export interface SceneDelta {
   simulationTick: number;
   upsert: SceneEntity[];
   remove: string[];
+  event?: InteractionRequested | EntityPublished | InteractionState;
 }
 export interface RealtimeDelta extends SceneDelta {
   type: 'delta';

@@ -978,6 +978,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state["activeActions"][0]["remaining"], 9);
+        let (stop_final, receiver_final) = watch::channel(false);
+        let worker_final = tokio::spawn(run_scene(
+            pool.clone(),
+            scene_id,
+            receiver_final,
+            SimulationHub::default(),
+            Duration::from_millis(5),
+        ));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+                    .bind(scene_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if state["activeActions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.is_empty())
+                {
+                    assert!(
+                        state["simulation"]["feed_sources"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty()
+                    );
+                    break;
+                }
+                sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .unwrap();
+        stop_final.send(true).unwrap();
+        worker_final.await.unwrap().unwrap();
         let transitions: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM scene_events \
             WHERE scene_id = $1 AND event->>'type' = 'interaction_state'",
@@ -987,8 +1021,79 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            transitions >= 2,
-            "start and consumption need revisioned events"
+            transitions >= 3,
+            "start, consumption and expiry need revisioned events"
+        );
+
+        let participant = Uuid::new_v4();
+        let first_controller = Uuid::new_v4().to_string();
+        let second_controller = Uuid::new_v4().to_string();
+        for token in [&first_controller, &second_controller] {
+            let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            sqlx::query(
+                "INSERT INTO device_grants \
+                (id, session_id, participant_id, role, token_hash, csrf_hash, expires_at) \
+                VALUES ($1, $2, $3, 'controller', $4, $4, now() + interval '1 day')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(session)
+            .bind(participant)
+            .bind(token_hash.to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE scenes SET state = jsonb_set(state, \
+            '{interactionLimits,lastSceneFeedMs}', '0'::jsonb, true) WHERE id = $1",
+        )
+        .bind(scene_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let fresh_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let first_controller_command = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            expires_at: fresh_ms + 8_000,
+            ..command.clone()
+        };
+        let accepted = realtime::process_command(
+            &store,
+            GrantKind::Controller,
+            &first_controller,
+            session,
+            &first_controller_command,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        sqlx::query(
+            "UPDATE scenes SET state = jsonb_set(state, \
+            '{interactionLimits,lastSceneFeedMs}', '0'::jsonb, true) WHERE id = $1",
+        )
+        .bind(scene_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let second_controller_command = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            ..first_controller_command
+        };
+        let cooldown = realtime::process_command(
+            &store,
+            GrantKind::Controller,
+            &second_controller,
+            session,
+            &second_controller_command,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cooldown["code"], "FEED_COOLDOWN",
+            "a new grant for the same participant must not bypass cooldown"
         );
     }
 

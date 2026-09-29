@@ -16,7 +16,7 @@ import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { Scene } from '@babylonjs/core/scene';
-import type { Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
+import type { ActiveAction, Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
 
 const modelByDefinition: Record<string, string> = {
@@ -30,7 +30,9 @@ export class BabylonRendererAdapter implements RendererAdapter {
   readonly scene: Scene;
   private readonly camera: FreeCamera;
   private readonly fallbackMaterial: StandardMaterial;
+  private feedMaterial?: StandardMaterial;
   private readonly markers = new Map<string, TransformNode>();
+  private readonly feedMarkers = new Map<string, { root: TransformNode; source: AbstractMesh; point: Point2 }>();
   private readonly loadingMarkers = new Map<string, AbstractMesh>();
   private readonly modelCache = new Map<string, Promise<AssetContainer>>();
   private readonly modelEntries = new Map<string, InstantiatedEntries>();
@@ -60,7 +62,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     new HemisphericLight('ambient', new Vector3(0, 1, -1), this.scene).intensity = 1.2;
     this.fallbackMaterial = new StandardMaterial('fish-loading', this.scene);
     this.fallbackMaterial.diffuseColor = new Color3(.9, .72, .28);
-    this.engine.runRenderLoop(() => { this.interpolate(); this.scene.render(); });
+    this.engine.runRenderLoop(() => { this.interpolate(); this.animateFeed(); this.scene.render(); });
     this.resizeObserver = new ResizeObserver(() => this.resizeToBudget());
     this.resizeObserver.observe(canvas);
     requestAnimationFrame(() => this.resizeToBudget());
@@ -94,6 +96,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.revision = snapshot.revision;
     this.simulationTick = snapshot.simulationTick;
     for (const entity of snapshot.entities) this.upsert(entity);
+    this.syncFeed(snapshot.activeActions ?? []);
   }
 
   applyDelta(delta: SceneDelta): void {
@@ -101,6 +104,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
         delta.revision !== this.revision + 1) throw new Error('REVISION_GAP');
     for (const id of delta.remove) this.removeMarker(id);
     for (const entity of delta.upsert) this.upsert(entity);
+    if (delta.event?.type === 'interaction_state') this.syncFeed(delta.event.activeActions);
     this.revision = delta.revision;
   }
 
@@ -138,6 +142,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.disposed = true;
     this.resizeObserver.disconnect();
     for (const id of [...this.markers.keys()]) this.removeMarker(id);
+    for (const id of [...this.feedMarkers.keys()]) this.removeFeed(id);
     this.scene.dispose();
     this.engine.dispose();
   }
@@ -180,6 +185,61 @@ export class BabylonRendererAdapter implements RendererAdapter {
     const marker = this.markers.get(id);
     marker?.dispose();
     this.markers.delete(id);
+  }
+
+  private syncFeed(actions: ActiveAction[]): void {
+    const active = new Set<string>();
+    for (const action of actions) {
+      if (action.interactionId !== 'feed' || !Number.isFinite(action.point.x) ||
+          !Number.isFinite(action.point.y) || !Number.isInteger(action.remaining) ||
+          action.remaining < 1 || action.remaining > 10 || active.has(action.id)) continue;
+      active.add(action.id);
+      let marker = this.feedMarkers.get(action.id);
+      if (!marker) {
+        const root = new TransformNode(action.id, this.scene);
+        const source = MeshBuilder.CreateSphere(`${action.id}/source`,
+          { diameter: .28, segments: 6 }, this.scene);
+        source.parent = root;
+        source.material = this.ensureFeedMaterial();
+        marker = { root, source, point: action.point };
+        this.feedMarkers.set(action.id, marker);
+      }
+      marker.point = action.point;
+      marker.root.position.set(action.point.x, action.point.y, -.35);
+      marker.source.scaling.setAll(.55 + action.remaining * .045);
+    }
+    for (const id of [...this.feedMarkers.keys()]) {
+      if (!active.has(id)) this.removeFeed(id);
+    }
+  }
+
+  private removeFeed(id: string): void {
+    const marker = this.feedMarkers.get(id);
+    marker?.source.dispose();
+    marker?.root.dispose();
+    this.feedMarkers.delete(id);
+    if (this.feedMarkers.size === 0) {
+      this.feedMaterial?.dispose();
+      this.feedMaterial = undefined;
+    }
+  }
+
+  private ensureFeedMaterial(): StandardMaterial {
+    if (!this.feedMaterial) {
+      const material = new StandardMaterial('feed-source', this.scene);
+      material.diffuseColor = new Color3(1, .77, .27);
+      material.emissiveColor = new Color3(.7, .42, .08);
+      material.disableLighting = true;
+      this.feedMaterial = material;
+    }
+    return this.feedMaterial;
+  }
+
+  private animateFeed(): void {
+    const seconds = performance.now() / 1000;
+    for (const [id, marker] of this.feedMarkers) {
+      marker.root.position.y = marker.point.y + .035 * Math.sin(seconds * 2 + id.length);
+    }
   }
 
   private async loadModel(entity: SceneEntity, marker: TransformNode): Promise<void> {

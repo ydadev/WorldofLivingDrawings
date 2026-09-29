@@ -143,6 +143,38 @@ try {
       !adapter.scene.materials.some(material => /^fish-[12]\/paint$/.test(material.name));
   });
   assert(removed);
+  const feed = await desktop.evaluate(() => {
+    const adapter = window.coreAdapter;
+    const id = 'feed-000000000000000000000000000000ab';
+    const source = (remaining) => ({ id, interactionId: 'feed',
+      point: { x: 0, y: 0 }, remaining, expiresAtTick: 300 });
+    adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 3,
+      simulationTick: 20, upsert: [], remove: [], event: { type: 'interaction_state',
+        activeActions: [source(10)], appliedCommandIds: ['command-1'], simulationTick: 20 } });
+    const mesh = adapter.scene.getMeshByName(`${id}/source`);
+    const startScale = mesh?.scaling.x;
+    adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 4,
+      simulationTick: 40, upsert: [], remove: [], event: { type: 'interaction_state',
+        activeActions: [source(9)], appliedCommandIds: [], simulationTick: 40 } });
+    const afterEating = mesh?.scaling.x;
+    adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 5,
+      simulationTick: 300, upsert: [], remove: [], event: { type: 'interaction_state',
+        activeActions: [], appliedCommandIds: [], simulationTick: 300 } });
+    const cleared = !adapter.scene.getMeshByName(`${id}/source`);
+    adapter.applySnapshot({ schemaVersion: 1, sceneEpoch: 2, revision: 0,
+      simulationTick: 40, worldId: 'underwater', worldVersion: 1,
+      entities: [], activeActions: [source(9)] });
+    const restored = !!adapter.scene.getMeshByName(`${id}/source`);
+    adapter.applySnapshot({ schemaVersion: 1, sceneEpoch: 2, revision: 1,
+      simulationTick: 301, worldId: 'underwater', worldVersion: 1,
+      entities: [], activeActions: [] });
+    return { startScale, afterEating, cleared, restored,
+      clearedOnSnapshot: !adapter.scene.getMeshByName(`${id}/source`),
+      materialCleared: !adapter.scene.materials.some(material => material.name === 'feed-source') };
+  });
+  assert(feed.startScale > feed.afterEating && feed.cleared && feed.restored &&
+    feed.clearedOnSnapshot && feed.materialCleared,
+    `Feed source must follow server state and reconnect snapshot: ${JSON.stringify(feed)}`);
   const budget = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     const canvas = document.querySelector('#core-scene');
@@ -198,7 +230,7 @@ try {
   assert(profile.frames > 10, `No sustained frames: ${JSON.stringify(profile)}`);
   console.log(`Short software-GPU 100-fish LOW probe: ${JSON.stringify(profile)}`);
   if (errors.length) throw new Error(`Browser errors: ${errors.join(' | ')}`);
-  console.log('CORE-04 Chrome: fixed view, snapshot/delta, two painted GLB instances, interpolation and cleanup: PASS');
+  console.log('CORE-04 Chrome: fixed view, painted GLB, feed state, interpolation and cleanup: PASS');
 } finally {
   await browser?.close();
   server.kill();

@@ -93,7 +93,7 @@ fn validate_interaction(
 fn feed_limit_code(
     state: &Value,
     world: &World,
-    grant_id: Uuid,
+    actor_id: Uuid,
     now_ms: i64,
 ) -> Result<Option<&'static str>, AccessError> {
     let pending = match state.get("pendingInteractions") {
@@ -119,10 +119,10 @@ fn feed_limit_code(
         {
             return Ok(Some("FEED_SCENE_COOLDOWN"));
         }
-        let grant_key = grant_id.to_string();
+        let actor_key = actor_id.to_string();
         if limits
-            .get("feedByGrantMs")
-            .and_then(|map| map.get(grant_key.as_str()))
+            .get("feedByActorMs")
+            .and_then(|map| map.get(actor_key.as_str()))
             .and_then(Value::as_i64)
             .is_some_and(|last| now_ms.saturating_sub(last) < 1000)
         {
@@ -134,7 +134,7 @@ fn feed_limit_code(
 
 fn record_feed_acceptance(
     state: &mut Value,
-    grant_id: Uuid,
+    actor_id: Uuid,
     now_ms: i64,
 ) -> Result<(), AccessError> {
     let object = state.as_object_mut().ok_or(AccessError::SceneState)?;
@@ -143,17 +143,17 @@ fn record_feed_acceptance(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or(AccessError::SceneState)?;
-    let by_grant = limits
-        .entry("feedByGrantMs")
+    let by_actor = limits
+        .entry("feedByActorMs")
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .ok_or(AccessError::SceneState)?;
-    by_grant.retain(|_, value| {
+    by_actor.retain(|_, value| {
         value
             .as_i64()
             .is_some_and(|last| now_ms.saturating_sub(last) < 1000)
     });
-    by_grant.insert(grant_id.to_string(), json!(now_ms));
+    by_actor.insert(actor_id.to_string(), json!(now_ms));
     limits.insert("lastSceneFeedMs".into(), json!(now_ms));
     Ok(())
 }
@@ -511,6 +511,21 @@ pub async fn process_command(
             .execute(&mut *tx)
             .await?;
     }
+    let actor_id: Uuid = match kind {
+        GrantKind::Owner => {
+            sqlx::query_scalar("SELECT account_id FROM owner_grants WHERE id = $1")
+                .bind(access.grant_id)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+        GrantKind::Controller => {
+            sqlx::query_scalar("SELECT participant_id FROM device_grants WHERE id = $1")
+                .bind(access.grant_id)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+        GrantKind::Viewer => access.grant_id,
+    };
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AccessError::Crypto)?
@@ -550,7 +565,7 @@ pub async fn process_command(
             }
             simulation::initial_world(access.scene.scene_id).map_err(|_| AccessError::SceneState)?
         };
-        code = feed_limit_code(&state, &world, access.grant_id, now_ms)?;
+        code = feed_limit_code(&state, &world, actor_id, now_ms)?;
         if code.is_none() {
             let point = SimPoint {
                 x: command.point.x as f32,
@@ -597,7 +612,7 @@ pub async fn process_command(
             object.entry("entities").or_insert_with(|| json!([]));
         }
         if command.interaction_id == "feed" {
-            record_feed_acceptance(&mut state, access.grant_id, now_ms)?;
+            record_feed_acceptance(&mut state, actor_id, now_ms)?;
         }
         sqlx::query(
             "UPDATE scenes SET revision = $1, updated_at = now(), state = $3::jsonb WHERE id = $2",
