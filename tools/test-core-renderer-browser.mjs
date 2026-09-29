@@ -69,7 +69,21 @@ try {
   });
   assert(result.gapRejected && result.wrongWorldRejected);
   assert.deepEqual(result.inserted, [2, -1, 0]);
-  await desktop.waitForTimeout(100);
+  await desktop.evaluate(() => window.coreAdapter.applyPositions({
+    type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
+    revision: 1, simulationTick: 10,
+    positions: [{ id: 'fish-1', position: { x: 3, y: -1 }, heading: { x: 1, y: 0 } }],
+  }));
+  await desktop.waitForFunction(() => Math.abs(window.coreAdapter.scene.getMeshByName('fish-1')?.position.x - 3) < .01,
+    null, { timeout: 3000 });
+  const afterStale = await desktop.evaluate(() => {
+    const adapter = window.coreAdapter;
+    adapter.applyPositions({ type: 'positions', schemaVersion: 1, sceneId: 'scene-1',
+      sceneEpoch: 1, revision: 1, simulationTick: 9,
+      positions: [{ id: 'fish-1', position: { x: -3, y: -1 }, heading: { x: -1, y: 0 } }] });
+    return adapter.scene.getMeshByName('fish-1').position.x;
+  });
+  assert(Math.abs(afterStale - 3) < .01, 'stale position frame must not move the mesh');
   mkdirSync(path.join(root, '.local'), { recursive: true });
   await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') });
   const removed = await desktop.evaluate(() => {

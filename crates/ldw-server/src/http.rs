@@ -23,6 +23,7 @@ const VIEWER_CLAIM_COOKIE: &str = "__Host-ldw-viewer-claim";
 pub struct AppState {
     pub access: AccessStore,
     pub public_origin: Arc<str>,
+    pub simulation_hub: crate::simulation::SimulationHub,
 }
 
 pub fn router(state: AppState) -> Router {

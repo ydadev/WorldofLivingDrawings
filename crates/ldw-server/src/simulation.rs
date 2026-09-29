@@ -2,12 +2,13 @@
 //! are separate; this module never writes a frame to PostgreSQL.
 
 use ldw_sim::{Bounds, World, WorldCheckpoint};
+use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::{collections::HashSet, time::Duration};
 use thiserror::Error;
 use tokio::{
-    sync::watch,
+    sync::{broadcast, watch},
     task::JoinSet,
     time::{MissedTickBehavior, interval},
 };
@@ -27,8 +28,72 @@ pub enum SimulationError {
 
 pub struct LoadedScene {
     pub epoch: i64,
+    pub revision: i64,
     pub persisted_tick: i64,
     pub world: World,
+}
+
+#[derive(Clone)]
+pub struct SimulationHub {
+    sender: broadcast::Sender<PositionFrame>,
+}
+
+impl Default for SimulationHub {
+    fn default() -> Self {
+        let (sender, _) = broadcast::channel(32);
+        Self { sender }
+    }
+}
+
+impl SimulationHub {
+    pub fn subscribe(&self) -> broadcast::Receiver<PositionFrame> {
+        self.sender.subscribe()
+    }
+
+    pub fn publish(&self, frame: PositionFrame) {
+        let _ = self.sender.send(frame);
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionFrame {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub schema_version: u8,
+    pub scene_id: Uuid,
+    pub scene_epoch: i64,
+    pub revision: i64,
+    pub simulation_tick: u64,
+    pub positions: Vec<EntityPosition>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EntityPosition {
+    pub id: String,
+    pub position: ldw_sim::Point,
+    pub heading: ldw_sim::Point,
+}
+
+fn position_frame(scene_id: Uuid, scene: &LoadedScene) -> PositionFrame {
+    PositionFrame {
+        kind: "positions",
+        schema_version: 1,
+        scene_id,
+        scene_epoch: scene.epoch,
+        revision: scene.revision,
+        simulation_tick: scene.world.tick_number(),
+        positions: scene
+            .world
+            .fish()
+            .iter()
+            .map(|fish| EntityPosition {
+                id: format!("fish-{:032x}", fish.id),
+                position: fish.position,
+                heading: fish.heading,
+            })
+            .collect(),
+    }
 }
 
 fn underwater_bounds() -> Result<Bounds, SimulationError> {
@@ -46,14 +111,20 @@ fn underwater_bounds() -> Result<Bounds, SimulationError> {
 }
 
 pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, SimulationError> {
-    let (world_id, world_version, epoch, tick, state): (String, i32, i64, i64, Value) =
-        sqlx::query_as(
-            "SELECT world_id, world_version, scene_epoch, simulation_tick, state \
+    let (world_id, world_version, epoch, revision, tick, state): (
+        String,
+        i32,
+        i64,
+        i64,
+        i64,
+        Value,
+    ) = sqlx::query_as(
+        "SELECT world_id, world_version, scene_epoch, revision, simulation_tick, state \
              FROM scenes WHERE id = $1",
-        )
-        .bind(scene_id)
-        .fetch_one(pool)
-        .await?;
+    )
+    .bind(scene_id)
+    .fetch_one(pool)
+    .await?;
     if world_id != "underwater" || world_version != 1 || tick < 0 {
         return Err(SimulationError::InvalidScene);
     }
@@ -78,6 +149,7 @@ pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, Si
     };
     Ok(LoadedScene {
         epoch,
+        revision,
         persisted_tick: tick,
         world,
     })
@@ -118,7 +190,11 @@ pub async fn save_checkpoint(
 
 /// Run active scenes with a checkpoint. A newly created empty scene has no work
 /// until a fish is published with its first checkpoint by the creation flow.
-pub async fn run(pool: PgPool, mut shutdown: watch::Receiver<bool>) -> Result<(), SimulationError> {
+pub async fn run(
+    pool: PgPool,
+    mut shutdown: watch::Receiver<bool>,
+    hub: SimulationHub,
+) -> Result<(), SimulationError> {
     let mut scan = interval(Duration::from_secs(1));
     scan.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut workers = JoinSet::new();
@@ -151,8 +227,9 @@ pub async fn run(pool: PgPool, mut shutdown: watch::Receiver<bool>) -> Result<()
                     if active.insert(scene_id) {
                         let pool = pool.clone();
                         let shutdown = shutdown.clone();
+                        let hub = hub.clone();
                         workers.spawn(async move {
-                            (scene_id, run_scene(pool, scene_id, shutdown, Duration::from_millis(50)).await)
+                            (scene_id, run_scene(pool, scene_id, shutdown, hub, Duration::from_millis(50)).await)
                         });
                     }
                 }
@@ -176,6 +253,7 @@ async fn run_scene(
     pool: PgPool,
     scene_id: Uuid,
     mut shutdown: watch::Receiver<bool>,
+    hub: SimulationHub,
     period: Duration,
 ) -> Result<(), SimulationError> {
     let mut scene = load_scene(&pool, scene_id).await?;
@@ -197,6 +275,9 @@ async fn run_scene(
                     if !running { break; }
                 }
                 scene.world.step();
+                if scene.world.tick_number() % 10 == 0 {
+                    hub.publish(position_frame(scene_id, &scene));
+                }
                 if scene.world.tick_number() % 100 == 0
                     && !save_checkpoint(&pool, scene_id, &mut scene).await?
                 {
@@ -305,12 +386,25 @@ mod tests {
             .await
             .unwrap();
         let (stop, receiver) = watch::channel(false);
+        let hub = SimulationHub::default();
+        let mut positions = hub.subscribe();
         let worker = tokio::spawn(run_scene(
             pool.clone(),
             ticking,
             receiver,
+            hub,
             Duration::from_millis(1),
         ));
+        let first_frame = timeout(Duration::from_secs(5), positions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_frame.scene_id, ticking);
+        assert_eq!(first_frame.simulation_tick, 10);
+        assert_eq!(
+            first_frame.positions[0].id,
+            format!("fish-{:032x}", ticking.as_u128())
+        );
         timeout(Duration::from_secs(5), async {
             loop {
                 let tick: i64 =

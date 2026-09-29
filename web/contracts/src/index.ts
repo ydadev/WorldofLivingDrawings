@@ -98,6 +98,15 @@ export interface RealtimeDelta extends SceneDelta {
   sceneId: string;
   event: InteractionRequested;
 }
+export interface ScenePositions {
+  type: 'positions';
+  schemaVersion: 1;
+  sceneId: string;
+  sceneEpoch: number;
+  revision: number;
+  simulationTick: number;
+  positions: { id: string; position: Point2; heading: Point2 }[];
+}
 export interface RealtimeCommand {
   type: 'command';
   commandId: string;

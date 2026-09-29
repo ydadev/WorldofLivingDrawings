@@ -59,10 +59,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let listener = tokio::net::TcpListener::bind(address).await?;
             access.bump_active_epochs().await?;
             let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            let simulation_task = tokio::spawn(simulation::run(simulation_pool, shutdown_rx));
+            let hub = simulation::SimulationHub::default();
+            let simulation_task =
+                tokio::spawn(simulation::run(simulation_pool, shutdown_rx, hub.clone()));
             let app = router(AppState {
                 access,
                 public_origin: Arc::from(origin),
+                simulation_hub: hub,
             });
             axum::serve(
                 listener,

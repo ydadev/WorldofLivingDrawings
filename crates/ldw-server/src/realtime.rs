@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::{
     access::{AccessError, AccessStore, GrantKind, SceneAccess},
     http::AppState,
+    simulation::SimulationHub,
 };
 
 const OWNER_COOKIE: &str = "__Host-ldw-owner";
@@ -147,7 +148,16 @@ pub async fn websocket(
         .map_err(access_status)?;
     Ok(ws
         .max_message_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| serve(socket, state.access, kind, token, session_id)))
+        .on_upgrade(move |socket| {
+            serve(
+                socket,
+                state.access,
+                state.simulation_hub,
+                kind,
+                token,
+                session_id,
+            )
+        }))
 }
 
 fn access_status(error: AccessError) -> StatusCode {
@@ -160,6 +170,7 @@ fn access_status(error: AccessError) -> StatusCode {
 async fn serve(
     mut socket: WebSocket,
     store: AccessStore,
+    hub: SimulationHub,
     kind: GrantKind,
     token: String,
     session_id: Uuid,
@@ -188,6 +199,7 @@ async fn serve(
     let Ok(mut access) = store.scene_access(kind, &token, session_id).await else {
         return;
     };
+    let mut positions = hub.subscribe();
     let Ok((snapshot, mut cursor)) = load_snapshot(store.pool(), &access).await else {
         return;
     };
@@ -206,6 +218,18 @@ async fn serve(
     let mut last_pong = Instant::now();
     loop {
         tokio::select! {
+            frame = positions.recv() => {
+                match frame {
+                    Ok(frame) if frame.scene_id == access.scene.scene_id
+                        && frame.scene_epoch == access.scene.scene_epoch
+                        && frame.revision <= cursor => {
+                        let Ok(value) = serde_json::to_value(frame) else { break };
+                        if send_json(&mut socket, &value).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
+                }
+            }
             received = socket.recv() => {
                 let Some(Ok(message)) = received else { break };
                 match message {

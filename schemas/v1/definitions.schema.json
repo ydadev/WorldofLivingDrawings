@@ -109,6 +109,23 @@
         "event": { "$ref": "#/$defs/interactionRequested" }
       }
     },
+    "scenePositions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "schemaVersion", "sceneId", "sceneEpoch", "revision", "simulationTick", "positions"],
+      "properties": {
+        "type": { "const": "positions" }, "schemaVersion": { "const": 1 },
+        "sceneId": { "type": "string" }, "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
+        "revision": { "$ref": "#/$defs/nonnegativeInt" },
+        "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
+        "positions": { "type": "array", "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "position", "heading"],
+          "properties": { "id": { "$ref": "#/$defs/id" },
+            "position": { "$ref": "#/$defs/point" },
+            "heading": { "$ref": "#/$defs/point" } }
+        } }
+      }
+    },
     "interactionRequested": {
       "type": "object", "additionalProperties": false,
       "required": ["type", "commandId", "interactionId", "point"],

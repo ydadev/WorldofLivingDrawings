@@ -558,9 +558,11 @@ mod tests {
             Err(access::AccessError::RateLimited)
         ));
 
+        let simulation_hub = simulation::SimulationHub::default();
         let app = http::router(http::AppState {
             access: store.clone(),
             public_origin: Arc::from("https://world.example.test"),
+            simulation_hub: simulation_hub.clone(),
         });
         let readiness = Request::builder()
             .uri("/health/ready")
@@ -954,6 +956,43 @@ mod tests {
         let writer_snapshot: serde_json::Value =
             serde_json::from_str(writer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(writer_snapshot["revision"], reader_snapshot["revision"]);
+        simulation_hub.publish(simulation::PositionFrame {
+            kind: "positions",
+            schema_version: 1,
+            scene_id: first_scene.scene_id,
+            scene_epoch: writer_snapshot["sceneEpoch"].as_i64().unwrap(),
+            revision: 1,
+            simulation_tick: 10,
+            positions: vec![simulation::EntityPosition {
+                id: format!("fish-{:032x}", Uuid::new_v4().as_u128()),
+                position: ldw_sim::Point { x: 1.0, y: -1.0 },
+                heading: ldw_sim::Point { x: 1.0, y: 0.0 },
+            }],
+        });
+        let writer_positions: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        let reader_positions: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(writer_positions, reader_positions);
+        assert_eq!(writer_positions["type"], "positions");
+        assert_eq!(writer_positions["simulationTick"], 10);
+        assert_eq!(writer_positions["revision"], 1);
         let command = realtime::InteractionCommand {
             command_id: Uuid::new_v4(),
             scene_epoch: 2,

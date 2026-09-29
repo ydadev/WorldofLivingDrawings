@@ -79,6 +79,13 @@ valid('sceneDelta', { type: 'delta', sceneId: 'scene-uuid', schemaVersion: 1,
   sceneEpoch: 1, revision: 1, simulationTick: 0, upsert: [], remove: [], event: requested });
 invalid('sceneDelta', { schemaVersion: 1, sceneEpoch: 1, revision: 0,
   simulationTick: 1, upsert: [], remove: [] });
+const positions = { type: 'positions', schemaVersion: 1, sceneId: 'scene-uuid',
+  sceneEpoch: 1, revision: 0, simulationTick: 10,
+  positions: [{ id: 'fish-00000000000000000000000000000001',
+    position: { x: 1, y: -1 }, heading: { x: 1, y: 0 } }] };
+valid('scenePositions', positions);
+invalid('scenePositions', { ...positions, simulationTick: -1 });
+invalid('scenePositions', { ...positions, positions: [{ ...positions.positions[0], id: '1' }] });
 valid('interactionIntent', { schemaVersion: 1, commandId: 'command-1', sceneEpoch: 1,
   interactionId: 'feed', point: { x: 2, y: -1 } });
 invalid('interactionIntent', { schemaVersion: 1, commandId: 'command-1', sceneEpoch: 1,

@@ -1,10 +1,11 @@
-import type { Point2, RealtimeAck, RealtimeCommand, RealtimeDelta, RealtimeSnapshot } from '@ldw/contracts';
+import type { Point2, RealtimeAck, RealtimeCommand, RealtimeDelta, RealtimeSnapshot, ScenePositions } from '@ldw/contracts';
 
 export type ConnectionState = 'offline' | 'connecting' | 'syncing' | 'ready';
 export interface RealtimeCallbacks {
   onState(state: ConnectionState): void;
   onSnapshot(snapshot: RealtimeSnapshot): void;
   onDelta(delta: RealtimeDelta): void;
+  onPositions(frame: ScenePositions): void;
   /** null means the original action was never confirmed and is now too old to retry. */
   onCommandResult(commandId: string, result: RealtimeAck | null): void;
 }
@@ -27,6 +28,7 @@ export class SceneConnection {
   private sceneId: string | null = null;
   private sceneEpoch = 0;
   private revision = 0;
+  private simulationTick = 0;
   private serverOffsetMs = 0;
   private pending = new Map<string, RealtimeCommand>();
   private readonly createSocket: (url: string) => WebSocket;
@@ -136,6 +138,7 @@ export class SceneConnection {
       this.sceneId = snapshot.sceneId;
       this.sceneEpoch = snapshot.sceneEpoch;
       this.revision = snapshot.revision;
+      this.simulationTick = snapshot.simulationTick;
       this.serverOffsetMs = snapshot.serverTime - this.now();
       this.retry = 0;
       this.options.onSnapshot(snapshot);
@@ -144,7 +147,7 @@ export class SceneConnection {
         this.socket?.send(JSON.stringify({ type: 'status', commandId }));
       }
     } else if (value.type === 'delta') {
-      if (this.state !== 'ready' || value.sceneId !== this.sceneId ||
+      if (this.state !== 'ready' || value.schemaVersion !== 1 || value.sceneId !== this.sceneId ||
           value.sceneEpoch !== this.sceneEpoch || !Number.isSafeInteger(value.revision)) {
         this.reconnectNow(); return;
       }
@@ -153,6 +156,18 @@ export class SceneConnection {
       if (delta.revision !== this.revision + 1) { this.reconnectNow(); return; }
       this.revision = delta.revision;
       this.options.onDelta(delta);
+    } else if (value.type === 'positions') {
+      if (this.state !== 'ready' || value.schemaVersion !== 1 || value.sceneId !== this.sceneId ||
+          value.sceneEpoch !== this.sceneEpoch || typeof value.revision !== 'number' ||
+          !Number.isSafeInteger(value.revision) || value.revision > this.revision ||
+          typeof value.simulationTick !== 'number' || !Number.isSafeInteger(value.simulationTick) ||
+          value.simulationTick <= this.simulationTick || !Array.isArray(value.positions) ||
+          value.positions.length > 100 || !value.positions.every(item =>
+            item && typeof item.id === 'string' && item.position && item.heading &&
+            Number.isFinite(item.position.x) && Number.isFinite(item.position.y) &&
+            Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y))) return;
+      this.simulationTick = value.simulationTick;
+      this.options.onPositions(value as unknown as ScenePositions);
     } else if (value.type === 'ack') {
       const commandId = value.commandId;
       if (typeof commandId !== 'string' || !this.pending.has(commandId)) return;

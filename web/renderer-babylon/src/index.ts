@@ -10,7 +10,7 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { Scene } from '@babylonjs/core/scene';
-import type { Point2, SceneDelta, SceneEntity, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
+import type { Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
 
 /** Minimal WebGL 2 renderer for the empty synchronized scene in CORE-01. */
@@ -19,11 +19,13 @@ export class BabylonRendererAdapter implements RendererAdapter {
   readonly scene: Scene;
   private readonly camera: FreeCamera;
   private readonly markers = new Map<string, AbstractMesh>();
+  private readonly movement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
   private world?: WorldDefinition;
   private sceneEpoch = 0;
   private revision = 0;
+  private simulationTick = 0;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.engine = new Engine(canvas, true);
@@ -34,7 +36,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.camera.setTarget(Vector3.Zero());
     this.scene.activeCamera = this.camera;
     new HemisphericLight('ambient', new Vector3(0, 1, -1), this.scene).intensity = 1.2;
-    this.engine.runRenderLoop(() => this.scene.render());
+    this.engine.runRenderLoop(() => { this.interpolate(); this.scene.render(); });
     this.resizeObserver = new ResizeObserver(() => this.engine.resize());
     this.resizeObserver.observe(canvas);
     requestAnimationFrame(() => this.engine.resize());
@@ -55,8 +57,10 @@ export class BabylonRendererAdapter implements RendererAdapter {
     if (!this.world || snapshot.schemaVersion !== 1 || snapshot.worldId !== this.world.id ||
         snapshot.worldVersion !== this.world.version) throw new Error('WORLD_VERSION_MISMATCH');
     for (const id of this.markers.keys()) this.removeMarker(id);
+    this.movement.clear();
     this.sceneEpoch = snapshot.sceneEpoch;
     this.revision = snapshot.revision;
+    this.simulationTick = snapshot.simulationTick;
     for (const entity of snapshot.entities) this.upsert(entity);
   }
 
@@ -66,6 +70,23 @@ export class BabylonRendererAdapter implements RendererAdapter {
     for (const id of delta.remove) this.removeMarker(id);
     for (const entity of delta.upsert) this.upsert(entity);
     this.revision = delta.revision;
+  }
+
+  applyPositions(frame: ScenePositions): void {
+    if (frame.sceneEpoch !== this.sceneEpoch || frame.revision > this.revision ||
+        frame.simulationTick <= this.simulationTick) return;
+    const now = performance.now();
+    this.interpolate(now);
+    this.simulationTick = frame.simulationTick;
+    for (const item of frame.positions) {
+      const marker = this.markers.get(item.id);
+      if (!marker) continue;
+      this.movement.set(item.id, {
+        from: { x: marker.position.x, y: marker.position.y },
+        to: item.position,
+        started: now,
+      });
+    }
   }
 
   pickWorldPoint(clientX: number, clientY: number): Point2 | null {
@@ -88,6 +109,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   }
 
   private upsert(entity: SceneEntity): void {
+    this.movement.delete(entity.id);
     let marker = this.markers.get(entity.id);
     if (!marker) {
       marker = MeshBuilder.CreateSphere(entity.id, { diameter: .45 }, this.scene);
@@ -100,9 +122,21 @@ export class BabylonRendererAdapter implements RendererAdapter {
   }
 
   private removeMarker(id: string): void {
+    this.movement.delete(id);
     const marker = this.markers.get(id);
     marker?.material?.dispose();
     marker?.dispose();
     this.markers.delete(id);
+  }
+
+  private interpolate(now = performance.now()): void {
+    for (const [id, move] of this.movement) {
+      const marker = this.markers.get(id);
+      if (!marker) { this.movement.delete(id); continue; }
+      const progress = Math.min(1, (now - move.started) / 500);
+      marker.position.x = move.from.x + (move.to.x - move.from.x) * progress;
+      marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
+      if (progress === 1) this.movement.delete(id);
+    }
   }
 }
