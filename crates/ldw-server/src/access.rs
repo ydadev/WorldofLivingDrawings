@@ -24,6 +24,10 @@ pub enum AccessError {
     ControllerLimit,
     #[error("viewer limit reached")]
     ViewerLimit,
+    #[error("too many pending viewer activations")]
+    ViewerClaimLimit,
+    #[error("viewer activation awaits owner approval")]
+    ViewerPending,
     #[error("owner approval required")]
     OwnerApprovalRequired,
     #[error("cryptographic operation failed")]
@@ -77,6 +81,14 @@ pub struct ViewerGrant {
     pub session_id: Uuid,
     pub role: String,
     pub token: String,
+    pub csrf: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerClaim {
+    pub id: Uuid,
+    pub code: String,
+    pub claim_token: String,
     pub csrf: String,
 }
 
@@ -414,6 +426,155 @@ impl AccessStore {
         })
     }
 
+    pub async fn request_viewer_claim(&self, session_id: Uuid) -> Result<ViewerClaim, AccessError> {
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM sessions WHERE id = $1 FOR UPDATE")
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM viewer_claims WHERE session_id = $1 AND expires_at > now() AND consumed_at IS NULL",
+        )
+        .bind(session_id).fetch_one(&mut *tx).await?;
+        if pending >= 5 {
+            return Err(AccessError::ViewerClaimLimit);
+        }
+        let code = loop {
+            let candidate = random_display_code()?;
+            let exists: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM viewer_claims WHERE session_id = $1 AND display_code_hash = $2 AND expires_at > now()"
+            ).bind(session_id).bind(self.pin_mac(session_id, &candidate))
+                .fetch_optional(&mut *tx).await?;
+            if exists.is_none() {
+                break candidate;
+            }
+        };
+        let claim_token = random_token()?;
+        let csrf = random_token()?;
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO viewer_claims (id, session_id, claim_hash, csrf_hash, display_code_hash, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, now() + interval '5 minutes')",
+        )
+        .bind(id).bind(session_id).bind(hash_token(&claim_token).to_vec())
+        .bind(hash_token(&csrf).to_vec()).bind(self.pin_mac(session_id, &code))
+        .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(ViewerClaim {
+            id,
+            code,
+            claim_token,
+            csrf,
+        })
+    }
+
+    pub async fn approve_viewer_claim(
+        &self,
+        owner_token: &str,
+        csrf: &str,
+        session_id: Uuid,
+        code: &str,
+        interact: bool,
+    ) -> Result<(), AccessError> {
+        if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(AccessError::Forbidden);
+        }
+        self.check_owner_csrf(owner_token, csrf).await?;
+        let (account_id, role) = self.owner_principal(owner_token).await?;
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE id = $1 AND (owner_id = $2 OR $3 = 'admin') FOR UPDATE"
+        ).bind(session_id).bind(account_id).bind(role).fetch_optional(&mut *tx).await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        let chosen_role = if interact {
+            "viewer_interact"
+        } else {
+            "viewer"
+        };
+        let changed = sqlx::query(
+            "UPDATE viewer_claims SET approved_role = $3 WHERE session_id = $1 AND display_code_hash = $2 \
+             AND expires_at > now() AND consumed_at IS NULL AND approved_role IS NULL",
+        )
+        .bind(session_id).bind(self.pin_mac(session_id, code)).bind(chosen_role)
+        .execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(AccessError::Forbidden);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn activate_viewer_claim(
+        &self,
+        session_id: Uuid,
+        claim_id: Uuid,
+        claim_token: &str,
+        csrf: &str,
+    ) -> Result<ViewerGrant, AccessError> {
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM sessions WHERE id = $1 FOR UPDATE")
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT approved_role FROM viewer_claims WHERE id = $1 AND session_id = $2 \
+             AND claim_hash = $3 AND csrf_hash = $4 AND expires_at > now() \
+             AND consumed_at IS NULL FOR UPDATE",
+        )
+        .bind(claim_id)
+        .bind(session_id)
+        .bind(hash_token(claim_token).to_vec())
+        .bind(hash_token(csrf).to_vec())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let role = match row {
+            Some((Some(role),)) => role,
+            Some((None,)) => return Err(AccessError::ViewerPending),
+            None => return Err(AccessError::Forbidden),
+        };
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM device_grants WHERE session_id = $1 AND role IN ('viewer', 'viewer_interact') \
+             AND revoked_at IS NULL AND expires_at > now()",
+        ).bind(session_id).fetch_one(&mut *tx).await?;
+        if active >= 2 {
+            return Err(AccessError::ViewerLimit);
+        }
+        let token = random_token()?;
+        let csrf = random_token()?;
+        sqlx::query(
+            "INSERT INTO device_grants (id, session_id, role, token_hash, csrf_hash, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, now() + interval '7 days')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(session_id)
+        .bind(&role)
+        .bind(hash_token(&token).to_vec())
+        .bind(hash_token(&csrf).to_vec())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE viewer_claims SET consumed_at = now() WHERE id = $1")
+            .bind(claim_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(ViewerGrant {
+            session_id,
+            role,
+            token,
+            csrf,
+        })
+    }
+
     pub async fn viewer_scene(
         &self,
         token: &str,
@@ -669,6 +830,17 @@ fn random_pin() -> Result<String, AccessError> {
         let value = u32::from_le_bytes(bytes) as u64;
         if value < 4_294_000_000 {
             return Ok(format!("{:06}", value % 1_000_000));
+        }
+    }
+}
+
+fn random_display_code() -> Result<String, AccessError> {
+    loop {
+        let mut bytes = [0u8; 4];
+        getrandom::fill(&mut bytes).map_err(|_| AccessError::Crypto)?;
+        let value = u32::from_le_bytes(bytes) as u64;
+        if value < 4_200_000_000 {
+            return Ok(format!("{:08}", value % 100_000_000));
         }
     }
 }

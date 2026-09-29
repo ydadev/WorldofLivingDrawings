@@ -253,6 +253,7 @@ async fn load_snapshot(pool: &PgPool, access: &SceneAccess) -> Result<(Value, i6
         json!({
             "type":"snapshot", "schemaVersion":1, "sceneId":access.scene.scene_id,
             "sceneEpoch":epoch, "revision":revision, "simulationTick":tick,
+            "serverTime":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
             "worldId":world_id, "worldVersion":world_version,
             "simulationVersion":1,
             "entities":state.get("entities").cloned().unwrap_or(json!([])),

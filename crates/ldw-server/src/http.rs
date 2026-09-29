@@ -17,6 +17,7 @@ use crate::access::{AccessError, AccessStore, PairCode};
 const OWNER_COOKIE: &str = "__Host-ldw-owner";
 const CONTROLLER_COOKIE: &str = "__Host-ldw-controller";
 const VIEWER_COOKIE: &str = "__Host-ldw-viewer";
+const VIEWER_CLAIM_COOKIE: &str = "__Host-ldw-viewer-claim";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -33,6 +34,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{id}/scene", get(scene))
         .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
         .route("/api/sessions/{id}/viewers", post(create_viewer))
+        .route(
+            "/api/sessions/{id}/viewer-claims",
+            post(request_viewer_claim),
+        )
+        .route(
+            "/api/sessions/{id}/viewer-claims/approve",
+            post(approve_viewer_claim),
+        )
+        .route(
+            "/api/sessions/{id}/viewer-claims/{claim_id}/activate",
+            post(activate_viewer_claim),
+        )
         .route("/api/sessions/{id}/invitation", post(open_invitation))
         .route("/api/sessions/{id}/pair", post(pair))
         .layer(middleware::map_response(no_store))
@@ -75,6 +88,10 @@ impl From<AccessError> for ApiError {
             AccessError::RateLimited => Self(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED"),
             AccessError::ControllerLimit => Self(StatusCode::CONFLICT, "CONTROLLER_LIMIT"),
             AccessError::ViewerLimit => Self(StatusCode::CONFLICT, "VIEWER_LIMIT"),
+            AccessError::ViewerClaimLimit => {
+                Self(StatusCode::TOO_MANY_REQUESTS, "VIEWER_CLAIM_LIMIT")
+            }
+            AccessError::ViewerPending => Self(StatusCode::ACCEPTED, "VIEWER_PENDING"),
             AccessError::OwnerApprovalRequired => {
                 Self(StatusCode::FORBIDDEN, "OWNER_APPROVAL_REQUIRED")
             }
@@ -275,6 +292,89 @@ async fn create_viewer(
         jar.add(auth_cookie(VIEWER_COOKIE, grant.token)),
         Json(response),
     ))
+}
+
+#[derive(Serialize)]
+struct ViewerClaimResponse {
+    claim_id: Uuid,
+    code: String,
+    csrf: String,
+    expires_in_seconds: u32,
+}
+
+async fn request_viewer_claim(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<(CookieJar, Json<ViewerClaimResponse>), ApiError> {
+    require_origin(&headers, &state)?;
+    let claim = state.access.request_viewer_claim(session_id).await?;
+    let cookie = Cookie::build((VIEWER_CLAIM_COOKIE, claim.claim_token))
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::minutes(5))
+        .build();
+    Ok((
+        jar.add(cookie),
+        Json(ViewerClaimResponse {
+            claim_id: claim.id,
+            code: claim.code,
+            csrf: claim.csrf,
+            expires_in_seconds: 300,
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ApproveViewerRequest {
+    code: String,
+    interact: bool,
+}
+
+async fn approve_viewer_claim(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<ApproveViewerRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_origin(&headers, &state)?;
+    state
+        .access
+        .approve_viewer_claim(
+            cookie_token(&jar, OWNER_COOKIE)?,
+            csrf(&headers)?,
+            session_id,
+            &input.code,
+            input.interact,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn activate_viewer_claim(
+    State(state): State<AppState>,
+    Path((session_id, claim_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Response, ApiError> {
+    require_origin(&headers, &state)?;
+    let token = cookie_token(&jar, VIEWER_CLAIM_COOKIE)?;
+    let grant = state
+        .access
+        .activate_viewer_claim(session_id, claim_id, token, csrf(&headers)?)
+        .await?;
+    Ok((
+        jar.add(auth_cookie(VIEWER_COOKIE, grant.token)),
+        Json(ViewerResponse {
+            role: grant.role,
+            csrf: grant.csrf,
+        }),
+    )
+        .into_response())
 }
 
 #[derive(Serialize)]

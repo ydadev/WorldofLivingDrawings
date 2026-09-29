@@ -12,7 +12,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
 mod tests {
     use super::*;
     use axum::{
-        body::Body,
+        body::{Body, to_bytes},
         extract::ConnectInfo,
         http::{Request, StatusCode, header},
     };
@@ -591,6 +591,143 @@ mod tests {
             .unwrap();
         assert_eq!(
             app.clone().oneshot(viewer_mutation).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let tv_session = store
+            .create_session(&first.token, &first.csrf)
+            .await
+            .unwrap();
+        let claim_request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/sessions/{}/viewer-claims",
+                tv_session.session_id
+            ))
+            .header(header::ORIGIN, "https://world.example.test")
+            .body(Body::empty())
+            .unwrap();
+        let claim_response = app.clone().oneshot(claim_request).await.unwrap();
+        assert_eq!(claim_response.status(), StatusCode::OK);
+        let claim_cookie = claim_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(claim_cookie.starts_with("__Host-ldw-viewer-claim="));
+        let claim_body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(claim_response.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(claim_body["code"].as_str().unwrap().len(), 8);
+        let activation_uri = format!(
+            "/api/sessions/{}/viewer-claims/{}/activate",
+            tv_session.session_id,
+            claim_body["claim_id"].as_str().unwrap()
+        );
+        let pending_request = Request::builder()
+            .method("POST")
+            .uri(&activation_uri)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header(header::COOKIE, &claim_cookie)
+            .header("x-csrf-token", claim_body["csrf"].as_str().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(pending_request).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let claim_without_csrf = Request::builder()
+            .method("POST")
+            .uri(&activation_uri)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header(header::COOKIE, &claim_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(claim_without_csrf)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let approve_body =
+            serde_json::json!({"code":claim_body["code"],"interact":false}).to_string();
+        let wrong_approval = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/sessions/{}/viewer-claims/approve",
+                tv_session.session_id
+            ))
+            .header(header::COOKIE, &second_owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", &second.csrf)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(approve_body.clone()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(wrong_approval).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let approval = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/sessions/{}/viewer-claims/approve",
+                tv_session.session_id
+            ))
+            .header(header::COOKIE, &owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", &first.csrf)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(approve_body))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(approval).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        let activate = Request::builder()
+            .method("POST")
+            .uri(&activation_uri)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header(header::COOKIE, &claim_cookie)
+            .header("x-csrf-token", claim_body["csrf"].as_str().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        let activated = app.clone().oneshot(activate).await.unwrap();
+        assert_eq!(activated.status(), StatusCode::OK);
+        let tv_cookie = activated
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let tv_scene = Request::builder()
+            .uri(format!("/api/sessions/{}/scene", tv_session.session_id))
+            .header(header::COOKIE, tv_cookie)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(tv_scene).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let replay_activate = Request::builder()
+            .method("POST")
+            .uri(&activation_uri)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header(header::COOKIE, &claim_cookie)
+            .header("x-csrf-token", claim_body["csrf"].as_str().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(replay_activate).await.unwrap().status(),
             StatusCode::FORBIDDEN
         );
 
