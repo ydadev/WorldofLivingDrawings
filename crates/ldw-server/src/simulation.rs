@@ -2240,6 +2240,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_boat_cancel_restores_feeding_after_checkpoint_reload() {
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scene_id = Uuid::new_v4();
+        let token = Uuid::new_v4().to_string();
+        let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("priority-{owner}")).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+             VALUES ($1, $2, $3, $3, now() + interval '1 day')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(token_hash.to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+            .bind(session)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version) VALUES ($1, $2, 'underwater', 1)")
+            .bind(scene_id).bind(session).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        publish_first_fish(
+            &pool,
+            scene_id,
+            Uuid::new_v4(),
+            "coral-fish",
+            "paint-priority",
+            Point { x: -5.0, y: 0.0 },
+        )
+        .await
+        .unwrap();
+        let store = AccessStore::new(pool.clone(), [9; 32]);
+        let command = |interaction_id: &str, point: realtime::Point| InteractionCommand {
+            kind: "command".into(),
+            command_id: Uuid::new_v4(),
+            session_id: session,
+            scene_id,
+            scene_epoch: 1,
+            interaction_id: interaction_id.into(),
+            point,
+            target_action_id: None,
+            expires_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+                + 8_000,
+        };
+        let feed = command("feed", realtime::Point { x: -4.0, y: 0.0 });
+        let feed_id = feed.command_id.simple().to_string();
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &feed)
+                .await
+                .unwrap()["accepted"],
+            true
+        );
+        let mut scene = load_scene(&pool, scene_id).await.unwrap();
+        assert!(
+            apply_pending_interactions(&pool, scene_id, &mut scene)
+                .await
+                .unwrap()
+        );
+        scene.world.step();
+        assert_eq!(
+            scene.world.fish()[0].feeding.as_deref(),
+            Some(feed_id.as_str())
+        );
+        assert!(!scene.world.fish()[0].fleeing);
+        assert!(save_checkpoint(&pool, scene_id, &mut scene).await.unwrap());
+
+        let boat = command("boat", realtime::Point { x: 1.0, y: 0.0 });
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &boat)
+                .await
+                .unwrap()["accepted"],
+            true
+        );
+        let mut restored = load_scene(&pool, scene_id).await.unwrap();
+        assert!(
+            apply_pending_interactions(&pool, scene_id, &mut restored)
+                .await
+                .unwrap()
+        );
+        restored.world.step();
+        assert!(restored.world.fish()[0].fleeing);
+        assert!(restored.world.fish()[0].feeding.is_none());
+        assert!(
+            save_checkpoint(&pool, scene_id, &mut restored)
+                .await
+                .unwrap()
+        );
+
+        let mut cancel = command("cancel_boat", realtime::Point { x: 0.0, y: 0.0 });
+        cancel.target_action_id = Some(format!("boat-{}", boat.command_id.simple()));
+        assert_eq!(
+            realtime::process_command(&store, GrantKind::Owner, &token, session, &cancel)
+                .await
+                .unwrap()["accepted"],
+            true
+        );
+        let mut restored = load_scene(&pool, scene_id).await.unwrap();
+        assert!(
+            apply_pending_interactions(&pool, scene_id, &mut restored)
+                .await
+                .unwrap()
+        );
+        assert!(restored.world.boat().is_none());
+        assert!(!restored.world.fish()[0].fleeing);
+        assert_eq!(
+            restored.world.fish()[0].target,
+            restored.world.fish()[0].position
+        );
+        restored.world.step();
+        assert_eq!(
+            restored.world.fish()[0].feeding.as_deref(),
+            Some(feed_id.as_str())
+        );
+        assert!(
+            save_checkpoint(&pool, scene_id, &mut restored)
+                .await
+                .unwrap()
+        );
+        let after_restart = load_scene(&pool, scene_id).await.unwrap();
+        assert_eq!(
+            after_restart.world.checkpoint(),
+            restored.world.checkpoint()
+        );
+        assert_eq!(after_restart.world.feed_sources()[0].remaining, 10);
+    }
+
+    #[tokio::test]
     async fn owner_cancels_pending_feed_once_and_controller_cannot_cancel_it() {
         let pool = crate::test_pool().await;
         let owner = Uuid::new_v4();
