@@ -1,9 +1,9 @@
 //! Persisted boundary for the server-owned simulation. The timer and broadcaster
 //! are separate; this module never writes a frame to PostgreSQL.
 
-use ldw_sim::{Bounds, World, WorldCheckpoint};
+use ldw_sim::{Bounds, Point, World, WorldCheckpoint};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::{collections::HashSet, time::Duration};
 use thiserror::Error;
@@ -24,6 +24,8 @@ pub enum SimulationError {
     InvalidPackage,
     #[error("invalid simulation checkpoint: {0}")]
     Checkpoint(#[from] serde_json::Error),
+    #[error("invalid first fish publication")]
+    InvalidPublication,
 }
 
 pub struct LoadedScene {
@@ -108,6 +110,96 @@ fn underwater_bounds() -> Result<Bounds, SimulationError> {
         min_y: bounds[2],
         max_y: bounds[3],
     })
+}
+
+/// Trusted publication boundary: the caller must already own and validate the
+/// PaintResult blob. This transaction establishes the first Entity and tick-0
+/// checkpoint together; the supervisor discovers the new scene on its next scan.
+pub(crate) async fn publish_first_fish(
+    pool: &PgPool,
+    scene_id: Uuid,
+    fish_id: Uuid,
+    definition_id: &str,
+    paint_blob_id: &str,
+    position: Point,
+) -> Result<Value, SimulationError> {
+    if !matches!(definition_id, "coral-fish" | "stream-fish")
+        || paint_blob_id.len() < 2
+        || paint_blob_id.len() > 64
+        || !paint_blob_id
+            .bytes()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+        || !paint_blob_id
+            .bytes()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == b'-')
+    {
+        return Err(SimulationError::InvalidPublication);
+    }
+    let mut tx = pool.begin().await?;
+    let row: Option<(String, i32, i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.world_id, c.world_version, c.scene_epoch, c.revision, c.simulation_tick, \
+         c.state, s.status, s.active_scene_id FROM scenes c JOIN sessions s ON s.id = c.session_id \
+         WHERE c.id = $1 FOR UPDATE OF c",
+    )
+    .bind(scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((world_id, world_version, epoch, revision, tick, state, status, active_scene)) = row
+    else {
+        return Err(SimulationError::InvalidScene);
+    };
+    if world_id != "underwater"
+        || world_version != 1
+        || status != "running"
+        || active_scene != Some(scene_id)
+        || tick != 0
+        || state.get("simulation").is_some()
+        || state
+            .get("entities")
+            .is_some_and(|value| !matches!(value, Value::Array(entities) if entities.is_empty()))
+    {
+        return Err(SimulationError::InvalidScene);
+    }
+    let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
+    let mut world =
+        World::new(underwater_bounds()?, seed).map_err(|_| SimulationError::InvalidPackage)?;
+    world
+        .spawn_fish(fish_id.as_u128(), position, 1.2)
+        .map_err(|_| SimulationError::InvalidPublication)?;
+    let entity = json!({
+        "id": format!("fish-{:032x}", fish_id.as_u128()),
+        "definitionId": definition_id,
+        "definitionVersion": 1,
+        "paintBlobId": paint_blob_id,
+        "position": position,
+    });
+    let event = json!({"type":"entity_published", "entity":entity});
+    let new_revision = revision
+        .checked_add(1)
+        .ok_or(SimulationError::InvalidScene)?;
+    sqlx::query(
+        "UPDATE scenes SET revision = $2, updated_at = now(), \
+         state = jsonb_set(jsonb_set(state, '{simulation}', $3::jsonb, true), \
+         '{entities}', $4::jsonb, true) WHERE id = $1",
+    )
+    .bind(scene_id)
+    .bind(new_revision)
+    .bind(serde_json::to_value(world.checkpoint())?)
+    .bind(json!([entity]))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(scene_id)
+    .bind(new_revision)
+    .bind(epoch)
+    .bind(&event)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(event)
 }
 
 pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, SimulationError> {

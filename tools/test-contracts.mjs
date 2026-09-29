@@ -77,6 +77,15 @@ valid('sceneDelta', { schemaVersion: 1, sceneEpoch: 1, revision: 1,
   simulationTick: 1, upsert: [], remove: [] });
 valid('sceneDelta', { type: 'delta', sceneId: 'scene-uuid', schemaVersion: 1,
   sceneEpoch: 1, revision: 1, simulationTick: 0, upsert: [], remove: [], event: requested });
+const fishEntity = { id: 'fish-00000000000000000000000000000001',
+  definitionId: 'coral-fish', definitionVersion: 1, paintBlobId: 'paint-first',
+  position: { x: 0.5, y: -0.5 } };
+valid('sceneDelta', { type: 'delta', sceneId: 'scene-uuid', schemaVersion: 1,
+  sceneEpoch: 1, revision: 2, simulationTick: 0, upsert: [fishEntity], remove: [],
+  event: { type: 'entity_published', entity: fishEntity } });
+invalid('sceneDelta', { type: 'delta', sceneId: 'scene-uuid', schemaVersion: 1,
+  sceneEpoch: 1, revision: 2, simulationTick: 0, upsert: [fishEntity], remove: [],
+  event: { type: 'entity_published', entity: { ...fishEntity, id: '1' } } });
 invalid('sceneDelta', { schemaVersion: 1, sceneEpoch: 1, revision: 0,
   simulationTick: 1, upsert: [], remove: [] });
 const positions = { type: 'positions', schemaVersion: 1, sceneId: 'scene-uuid',

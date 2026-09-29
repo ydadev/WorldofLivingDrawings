@@ -75,6 +75,10 @@ export interface InteractionRequested {
   interactionId: string;
   point: Point2;
 }
+export interface EntityPublished {
+  type: 'entity_published';
+  entity: SceneEntity;
+}
 export interface RealtimeSnapshot extends SceneSnapshot {
   type: 'snapshot';
   sceneId: string;
@@ -96,7 +100,7 @@ export interface SceneDelta {
 export interface RealtimeDelta extends SceneDelta {
   type: 'delta';
   sceneId: string;
-  event: InteractionRequested;
+  event: InteractionRequested | EntityPublished;
 }
 export interface ScenePositions {
   type: 'positions';

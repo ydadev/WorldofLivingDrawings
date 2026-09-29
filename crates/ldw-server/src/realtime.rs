@@ -269,9 +269,14 @@ async fn serve(
                         gap = true;
                         break;
                     }
+                    let upsert = if event.get("type").and_then(Value::as_str) == Some("entity_published") {
+                        event.get("entity").cloned().map(|entity| json!([entity])).unwrap_or(json!([]))
+                    } else {
+                        json!([])
+                    };
                     let delta = json!({"type":"delta", "sceneId":access.scene.scene_id,
                         "schemaVersion":1, "sceneEpoch":epoch, "revision":revision,
-                        "simulationTick":0, "upsert":[], "remove":[], "event":event});
+                        "simulationTick":0, "upsert":upsert, "remove":[], "event":event});
                     if send_json(&mut socket, &delta).await.is_err() { return; }
                     cursor = revision;
                 }

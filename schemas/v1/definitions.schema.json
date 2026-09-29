@@ -106,7 +106,10 @@
         "revision": { "$ref": "#/$defs/positiveInt" }, "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
         "upsert": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
         "remove": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-        "event": { "$ref": "#/$defs/interactionRequested" }
+        "event": { "oneOf": [
+          { "$ref": "#/$defs/interactionRequested" },
+          { "$ref": "#/$defs/entityPublished" }
+        ] }
       }
     },
     "scenePositions": {
@@ -134,6 +137,14 @@
         "commandId": { "type": "string" },
         "interactionId": { "$ref": "#/$defs/id" },
         "point": { "$ref": "#/$defs/point" }
+      }
+    },
+    "entityPublished": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "entity"],
+      "properties": {
+        "type": { "const": "entity_published" },
+        "entity": { "$ref": "#/$defs/sceneEntity" }
       }
     },
     "assetManifest": {

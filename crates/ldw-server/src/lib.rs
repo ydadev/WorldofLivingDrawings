@@ -1037,6 +1037,77 @@ mod tests {
         assert_eq!(writer_delta, reader_delta);
         assert_eq!(writer_delta["type"], "delta");
         assert_eq!(writer_delta["revision"], 2);
+        assert!(
+            simulation::publish_first_fish(
+                store.pool(),
+                first_scene.scene_id,
+                Uuid::new_v4(),
+                "coral-fish",
+                "paint-invalid",
+                ldw_sim::Point { x: 99.0, y: 0.0 },
+            )
+            .await
+            .is_err()
+        );
+        let first_fish = Uuid::new_v4();
+        let published = simulation::publish_first_fish(
+            store.pool(),
+            first_scene.scene_id,
+            first_fish,
+            "coral-fish",
+            "paint-first",
+            ldw_sim::Point { x: 0.5, y: -0.5 },
+        )
+        .await
+        .unwrap();
+        let fish_entity = &published["entity"];
+        assert_eq!(
+            fish_entity["id"],
+            format!("fish-{:032x}", first_fish.as_u128())
+        );
+        assert!(
+            simulation::publish_first_fish(
+                store.pool(),
+                first_scene.scene_id,
+                Uuid::new_v4(),
+                "coral-fish",
+                "paint-second",
+                ldw_sim::Point { x: 0.0, y: 0.0 },
+            )
+            .await
+            .is_err(),
+            "a second first-fish transaction must not overwrite the checkpoint"
+        );
+        let loaded = simulation::load_scene(store.pool(), first_scene.scene_id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.world.fish().len(), 1);
+        assert_eq!(loaded.world.fish()[0].id, first_fish.as_u128());
+        assert_eq!(loaded.world.tick_number(), 0);
+        let published_delta: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(published_delta["revision"], 3);
+        assert_eq!(published_delta["event"], published);
+        assert_eq!(published_delta["upsert"][0], *fish_entity);
+        let writer_published: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(writer_published, published_delta);
         drop(reader);
         let mut reconnect_request = url.as_str().into_client_request().unwrap();
         reconnect_request
@@ -1067,7 +1138,8 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(recovered["revision"], 2);
+        assert_eq!(recovered["revision"], 3);
+        assert_eq!(recovered["entities"][0], *fish_entity);
         assert_eq!(
             recovered["pendingInteractions"].as_array().unwrap().len(),
             2
