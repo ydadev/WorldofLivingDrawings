@@ -12,7 +12,7 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
-use ldw_sim::{Point as SimPoint, World, WorldCheckpoint};
+use ldw_sim::{Point as SimPoint, TICKS_PER_SECOND, World, WorldCheckpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -138,7 +138,7 @@ fn feed_limit_code(
             .count(),
         _ => return Err(AccessError::SceneState),
     };
-    if world.feed_sources().len() + pending >= 3 {
+    if world.feed_sources().len() + pending >= world.interaction_rules().feed.max_active {
         return Ok(Some("FEED_LIMIT"));
     }
     let limits = state.get("interactionLimits");
@@ -149,7 +149,10 @@ fn feed_limit_code(
         if limits
             .get("lastSceneFeedMs")
             .and_then(Value::as_i64)
-            .is_some_and(|last| now_ms.saturating_sub(last) < 500)
+            .is_some_and(|last| {
+                now_ms.saturating_sub(last)
+                    < cooldown_ms(world.interaction_rules().feed.cooldown_ticks)
+            })
         {
             return Ok(Some("FEED_SCENE_COOLDOWN"));
         }
@@ -214,7 +217,10 @@ fn boat_limit_code(
         if limits
             .get("lastSceneBoatMs")
             .and_then(Value::as_i64)
-            .is_some_and(|last| now_ms.saturating_sub(last) < 10_000)
+            .is_some_and(|last| {
+                now_ms.saturating_sub(last)
+                    < cooldown_ms(world.interaction_rules().boat.cooldown_ticks)
+            })
         {
             return Ok(Some("BOAT_SCENE_COOLDOWN"));
         }
@@ -232,6 +238,10 @@ fn record_boat_acceptance(state: &mut Value, now_ms: i64) -> Result<(), AccessEr
         .ok_or(AccessError::SceneState)?;
     limits.insert("lastSceneBoatMs".into(), json!(now_ms));
     Ok(())
+}
+
+fn cooldown_ms(ticks: u64) -> i64 {
+    (ticks * 1000 / TICKS_PER_SECOND) as i64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -805,4 +815,57 @@ pub async fn process_command(
         .execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+    use ldw_sim::{Bounds, WorldInteractionRules};
+
+    #[test]
+    fn scene_limits_follow_checkpointed_rules() {
+        let mut rules = WorldInteractionRules::default();
+        rules.feed.max_active = 1;
+        rules.feed.cooldown_ticks = 4;
+        rules.boat.cooldown_ticks = 40;
+        let mut world = World::new_with_rules(
+            Bounds {
+                min_x: -8.0,
+                max_x: 8.0,
+                min_y: -4.0,
+                max_y: 4.0,
+            },
+            1,
+            rules,
+        )
+        .unwrap();
+        let actor = Uuid::new_v4();
+        let state = json!({"interactionLimits": {"lastSceneFeedMs": 1000,
+            "lastSceneBoatMs": 1000}});
+        assert_eq!(
+            feed_limit_code(&state, &world, actor, 1199).unwrap(),
+            Some("FEED_SCENE_COOLDOWN")
+        );
+        assert_eq!(feed_limit_code(&state, &world, actor, 1200).unwrap(), None);
+        assert_eq!(
+            boat_limit_code(&state, &world, 2999).unwrap(),
+            Some("BOAT_SCENE_COOLDOWN")
+        );
+        assert_eq!(boat_limit_code(&state, &world, 3000).unwrap(), None);
+        world
+            .start_feed(
+                "00000000000000000000000000000001",
+                SimPoint { x: 0.0, y: 0.0 },
+            )
+            .unwrap();
+        assert_eq!(
+            feed_limit_code(&state, &world, actor, 3000).unwrap(),
+            Some("FEED_LIMIT")
+        );
+        let restored = World::restore(world.checkpoint()).unwrap();
+        assert_eq!(
+            feed_limit_code(&state, &restored, actor, 3000).unwrap(),
+            Some("FEED_LIMIT")
+        );
+    }
 }

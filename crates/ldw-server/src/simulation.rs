@@ -1,8 +1,8 @@
 //! Persisted boundary for the server-owned simulation. The timer and broadcaster
 //! are separate; this module never writes a frame to PostgreSQL.
 
-use ldw_sim::{Bounds, Point, World, WorldCheckpoint};
-use serde::Serialize;
+use ldw_sim::{Bounds, EffectRule, Point, World, WorldCheckpoint, WorldInteractionRules};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::{collections::HashSet, time::Duration};
@@ -175,9 +175,71 @@ fn underwater_bounds() -> Result<Bounds, SimulationError> {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PackageInteraction {
+    schema_version: u32,
+    id: String,
+    version: u32,
+    effect: String,
+    allowed_zone_id: String,
+    required_capability: String,
+    radius: f32,
+    duration_ticks: u64,
+    max_active: usize,
+    cooldown_ticks: u64,
+    priority: i32,
+}
+
+fn underwater_interaction_rules() -> Result<WorldInteractionRules, SimulationError> {
+    parse_interaction_rules(include_str!(
+        "../../../content/underwater/interactions.json"
+    ))
+}
+
+fn parse_interaction_rules(source: &str) -> Result<WorldInteractionRules, SimulationError> {
+    let definitions: Vec<PackageInteraction> =
+        serde_json::from_str(source).map_err(|_| SimulationError::InvalidPackage)?;
+    if definitions.len() != 2 {
+        return Err(SimulationError::InvalidPackage);
+    }
+    let mut feed = None;
+    let mut boat = None;
+    for definition in definitions {
+        if definition.schema_version != 1
+            || definition.version == 0
+            || definition.allowed_zone_id != "water"
+        {
+            return Err(SimulationError::InvalidPackage);
+        }
+        let rule = EffectRule {
+            definition_version: definition.version,
+            radius: definition.radius,
+            duration_ticks: definition.duration_ticks,
+            max_active: definition.max_active,
+            cooldown_ticks: definition.cooldown_ticks,
+            priority: definition.priority,
+        };
+        match (
+            definition.id.as_str(),
+            definition.effect.as_str(),
+            definition.required_capability.as_str(),
+        ) {
+            ("feed", "attraction", "consume-food") if feed.replace(rule).is_none() => {}
+            ("boat", "threat", "avoid-threat") if boat.replace(rule).is_none() => {}
+            _ => return Err(SimulationError::InvalidPackage),
+        }
+    }
+    Ok(WorldInteractionRules {
+        feed: feed.ok_or(SimulationError::InvalidPackage)?,
+        boat: boat.ok_or(SimulationError::InvalidPackage)?,
+    })
+}
+
 pub(crate) fn initial_world(scene_id: Uuid) -> Result<World, SimulationError> {
     let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
-    World::new(underwater_bounds()?, seed).map_err(|_| SimulationError::InvalidPackage)
+    World::new_with_rules(underwater_bounds()?, seed, underwater_interaction_rules()?)
+        .map_err(|_| SimulationError::InvalidPackage)
 }
 
 fn active_actions(world: &World) -> Value {
@@ -983,6 +1045,45 @@ mod tests {
     use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
 
     const INITIAL_LOAD_FISH: usize = ldw_sim::MAX_FISH - 2;
+
+    #[test]
+    fn new_underwater_scene_uses_versioned_interaction_definitions() {
+        let world = initial_world(Uuid::new_v4()).unwrap();
+        let rules = world.interaction_rules();
+        assert_eq!(rules.feed.radius, 4.0);
+        assert_eq!(rules.feed.definition_version, 1);
+        assert_eq!(rules.feed.duration_ticks, 300);
+        assert_eq!(rules.feed.max_active, 3);
+        assert_eq!(rules.feed.cooldown_ticks, 10);
+        assert_eq!(rules.boat.radius, 3.2);
+        assert_eq!(rules.boat.duration_ticks, 600);
+        assert_eq!(rules.boat.cooldown_ticks, 200);
+        assert!(rules.boat.priority > rules.feed.priority);
+        assert_eq!(
+            World::restore(world.checkpoint())
+                .unwrap()
+                .interaction_rules(),
+            rules
+        );
+    }
+
+    #[test]
+    fn versioned_package_can_change_effect_parameters_without_server_code() {
+        let mut package: Value = serde_json::from_str(include_str!(
+            "../../../content/underwater/interactions.json"
+        ))
+        .unwrap();
+        package[0]["version"] = json!(2);
+        package[0]["radius"] = json!(4.5);
+        package[0]["durationTicks"] = json!(120);
+        let rules = parse_interaction_rules(&package.to_string()).unwrap();
+        let world = World::new_with_rules(underwater_bounds().unwrap(), 1, rules).unwrap();
+        assert_eq!(world.interaction_rules().feed.definition_version, 2);
+        assert_eq!(world.interaction_rules().feed.radius, 4.5);
+        assert_eq!(world.interaction_rules().feed.duration_ticks, 120);
+        package[0]["effect"] = json!("threat");
+        assert!(parse_interaction_rules(&package.to_string()).is_err());
+    }
 
     fn load_paint_png(value: u8) -> Vec<u8> {
         let mut raw = Vec::new();

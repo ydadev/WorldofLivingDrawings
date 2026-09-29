@@ -10,16 +10,67 @@ const FISH_RADIUS: f32 = 0.18;
 pub const MIN_DEPTH: f32 = -1.5;
 pub const MAX_DEPTH: f32 = 1.5;
 const DEPTH_SPEED: f32 = 0.55;
-const FEED_DETECTION_RADIUS: f32 = 3.75;
 const FEED_EATING_RADIUS: f32 = 0.3;
-const FEED_DURATION_TICKS: u64 = 300;
-const MAX_FEED_SOURCES: usize = 3;
 const BOAT_RADIUS: f32 = 0.45;
 const BOAT_SPEED: f32 = 2.0;
-const BOAT_DURATION_TICKS: u64 = 600;
-const THREAT_ENTER_RADIUS: f32 = 3.0;
-const THREAT_EXIT_RADIUS: f32 = 3.75;
 const THREAT_HOLD_TICKS: u64 = 20;
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectRule {
+    pub definition_version: u32,
+    pub radius: f32,
+    pub duration_ticks: u64,
+    pub max_active: usize,
+    pub cooldown_ticks: u64,
+    pub priority: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldInteractionRules {
+    pub feed: EffectRule,
+    pub boat: EffectRule,
+}
+
+impl Default for WorldInteractionRules {
+    fn default() -> Self {
+        // Old checkpoints predate this field and must keep their old behavior.
+        Self {
+            feed: EffectRule {
+                definition_version: 1,
+                radius: 3.75,
+                duration_ticks: 300,
+                max_active: 3,
+                cooldown_ticks: 10,
+                priority: 1,
+            },
+            boat: EffectRule {
+                definition_version: 1,
+                radius: 3.0,
+                duration_ticks: 600,
+                max_active: 1,
+                cooldown_ticks: 200,
+                priority: 10,
+            },
+        }
+    }
+}
+
+impl WorldInteractionRules {
+    pub fn valid(self, bounds: Bounds) -> bool {
+        let width = bounds.max_x - bounds.min_x;
+        [self.feed, self.boat].iter().all(|rule| {
+            rule.definition_version > 0
+                && rule.radius.is_finite()
+                && rule.radius > 0.0
+                && rule.radius < width / 2.0
+                && (1..=1200).contains(&rule.duration_ticks)
+                && rule.cooldown_ticks <= 1200
+        }) && (1..=3).contains(&self.feed.max_active)
+            && self.boat.max_active == 1
+            && self.boat.priority > self.feed.priority
+            && self.boat.radius * 1.25 < width / 2.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
@@ -144,6 +195,7 @@ pub enum SimError {
     InvalidBoatId,
     BoatLimit,
     InvalidBoatRoute,
+    InvalidInteractionRules,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -154,6 +206,8 @@ pub struct WorldCheckpoint {
     pub obstacles: Vec<Circle>,
     pub tick: u64,
     pub seed: u64,
+    #[serde(default)]
+    pub interaction_rules: WorldInteractionRules,
     #[serde(default)]
     pub feed_sources: Vec<FeedSource>,
     #[serde(default)]
@@ -167,14 +221,26 @@ pub struct World {
     obstacles: Vec<Circle>,
     tick: u64,
     seed: u64,
+    interaction_rules: WorldInteractionRules,
     feed_sources: Vec<FeedSource>,
     boat: Option<Boat>,
 }
 
 impl World {
     pub fn new(bounds: Bounds, seed: u64) -> Result<Self, SimError> {
+        Self::new_with_rules(bounds, seed, WorldInteractionRules::default())
+    }
+
+    pub fn new_with_rules(
+        bounds: Bounds,
+        seed: u64,
+        interaction_rules: WorldInteractionRules,
+    ) -> Result<Self, SimError> {
         if !bounds.valid() {
             return Err(SimError::InvalidBounds);
+        }
+        if !interaction_rules.valid(bounds) {
+            return Err(SimError::InvalidInteractionRules);
         }
         Ok(Self {
             bounds,
@@ -182,6 +248,7 @@ impl World {
             obstacles: Vec::new(),
             tick: 0,
             seed,
+            interaction_rules,
             feed_sources: Vec::new(),
             boat: None,
         })
@@ -189,6 +256,10 @@ impl World {
 
     pub fn tick_number(&self) -> u64 {
         self.tick
+    }
+
+    pub fn interaction_rules(&self) -> WorldInteractionRules {
+        self.interaction_rules
     }
 
     pub fn checkpoint(&self) -> WorldCheckpoint {
@@ -199,6 +270,7 @@ impl World {
             obstacles: self.obstacles.clone(),
             tick: self.tick,
             seed: self.seed,
+            interaction_rules: self.interaction_rules,
             feed_sources: self.feed_sources.clone(),
             boat: self.boat.clone(),
         }
@@ -207,9 +279,10 @@ impl World {
     pub fn restore(checkpoint: WorldCheckpoint) -> Result<Self, SimError> {
         if checkpoint.schema_version != 1
             || !checkpoint.bounds.valid()
+            || !checkpoint.interaction_rules.valid(checkpoint.bounds)
             || checkpoint.fish.len() > MAX_FISH
             || checkpoint.obstacles.len() > MAX_OBSTACLES
-            || checkpoint.feed_sources.len() > MAX_FEED_SOURCES
+            || checkpoint.feed_sources.len() > checkpoint.interaction_rules.feed.max_active
         {
             return Err(SimError::InvalidCheckpoint);
         }
@@ -282,6 +355,7 @@ impl World {
             obstacles: checkpoint.obstacles,
             tick: checkpoint.tick,
             seed: checkpoint.seed,
+            interaction_rules: checkpoint.interaction_rules,
             feed_sources: checkpoint.feed_sources,
             boat: checkpoint.boat,
         })
@@ -328,7 +402,9 @@ impl World {
             entry,
             via,
             exit,
-            expires_at_tick: self.tick.saturating_add(BOAT_DURATION_TICKS),
+            expires_at_tick: self
+                .tick
+                .saturating_add(self.interaction_rules.boat.duration_ticks),
             phase: 0,
         };
         if !boat_route_valid(&boat, self.bounds, &self.obstacles) {
@@ -360,14 +436,16 @@ impl World {
         if self.feed_sources.iter().any(|source| source.id == id) {
             return Err(SimError::DuplicateFeed);
         }
-        if self.feed_sources.len() >= MAX_FEED_SOURCES {
+        if self.feed_sources.len() >= self.interaction_rules.feed.max_active {
             return Err(SimError::FeedLimit);
         }
         self.feed_sources.push(FeedSource {
             id: id.to_owned(),
             position,
             remaining: 10,
-            expires_at_tick: self.tick.saturating_add(FEED_DURATION_TICKS),
+            expires_at_tick: self
+                .tick
+                .saturating_add(self.interaction_rules.feed.duration_ticks),
             fed_fish: Vec::new(),
         });
         Ok(())
@@ -500,13 +578,13 @@ impl World {
             };
             let distance_sq = fish.position.distance_squared(boat.position);
             let mut newly_fleeing = false;
-            if !fish.fleeing && distance_sq <= THREAT_ENTER_RADIUS.powi(2) {
+            if !fish.fleeing && distance_sq <= self.interaction_rules.boat.radius.powi(2) {
                 fish.fleeing = true;
                 newly_fleeing = true;
                 fish.threat_hold_until_tick = self.tick.saturating_add(THREAT_HOLD_TICKS);
                 fish.waypoint = None;
             } else if fish.fleeing
-                && distance_sq > THREAT_EXIT_RADIUS.powi(2)
+                && distance_sq > (self.interaction_rules.boat.radius * 1.25).powi(2)
                 && self.tick >= fish.threat_hold_until_tick
             {
                 fish.fleeing = false;
@@ -544,7 +622,7 @@ impl World {
                         && !fish.fleeing
                         && !source.fed_fish.contains(&fish_id(fish.id))
                         && fish.position.distance_squared(source.position)
-                            <= FEED_DETECTION_RADIUS.powi(2)
+                            <= self.interaction_rules.feed.radius.powi(2)
                         && (segment_clear(fish.position, source.position, &self.obstacles)
                             || plan_waypoint(
                                 fish.position,
@@ -1267,7 +1345,7 @@ mod tests {
             ),
             Err(SimError::InvalidPosition)
         );
-        for _ in 0..FEED_DURATION_TICKS {
+        for _ in 0..world.interaction_rules().feed.duration_ticks {
             world.step();
         }
         assert!(world.feed_sources().is_empty());
@@ -1313,6 +1391,53 @@ mod tests {
         assert_eq!(world.feed_sources()[0].id, second);
         assert!(!world.cancel_feed(first));
         World::restore(world.checkpoint()).unwrap();
+    }
+
+    #[test]
+    fn interaction_rules_change_attraction_and_survive_checkpoint() {
+        let mut rules = WorldInteractionRules::default();
+        rules.feed.definition_version = 2;
+        rules.feed.radius = 4.0;
+        rules.feed.duration_ticks = 40;
+        rules.feed.max_active = 1;
+        rules.boat.radius = 3.2;
+        rules.boat.duration_ticks = 80;
+        let mut configured = World::new_with_rules(bounds(), 77, rules).unwrap();
+        let mut legacy = World::new(bounds(), 77).unwrap();
+        for world in [&mut configured, &mut legacy] {
+            world.spawn_fish(7, Point { x: -2.0, y: 0.0 }, 1.0).unwrap();
+            world
+                .start_feed("00000000000000000000000000000001", Point { x: 2.0, y: 0.0 })
+                .unwrap();
+            world.step();
+        }
+        assert_eq!(
+            configured.fish()[0].feeding.as_deref(),
+            Some("00000000000000000000000000000001")
+        );
+        assert!(legacy.fish()[0].feeding.is_none());
+        assert_eq!(configured.feed_sources()[0].expires_at_tick, 40);
+        assert_eq!(
+            configured.start_feed("00000000000000000000000000000002", Point { x: 0.0, y: 0.0 }),
+            Err(SimError::FeedLimit)
+        );
+        let checkpoint = configured.checkpoint();
+        assert_eq!(
+            World::restore(checkpoint).unwrap().interaction_rules(),
+            rules
+        );
+        let mut old = serde_json::to_value(legacy.checkpoint()).unwrap();
+        old.as_object_mut().unwrap().remove("interaction_rules");
+        let restored = World::restore(serde_json::from_value(old).unwrap()).unwrap();
+        assert_eq!(
+            restored.interaction_rules(),
+            WorldInteractionRules::default()
+        );
+        rules.feed.radius = f32::NAN;
+        assert_eq!(
+            World::new_with_rules(bounds(), 77, rules).unwrap_err(),
+            SimError::InvalidInteractionRules
+        );
     }
 
     #[test]
