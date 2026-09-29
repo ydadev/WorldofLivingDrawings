@@ -420,6 +420,9 @@ impl World {
         }
         self.boat = None;
         for fish in &mut self.fish {
+            if fish.fleeing {
+                clear_action_target(fish);
+            }
             fish.fleeing = false;
             fish.threat_hold_until_tick = 0;
         }
@@ -460,6 +463,9 @@ impl World {
         for fish in &mut self.fish {
             if fish.feeding.as_deref() == Some(id) {
                 fish.feeding = None;
+                if !fish.fleeing {
+                    clear_action_target(fish);
+                }
             }
         }
         true
@@ -572,6 +578,9 @@ impl World {
         }
         for fish in &mut self.fish {
             let Some(boat) = &self.boat else {
+                if fish.fleeing {
+                    clear_action_target(fish);
+                }
                 fish.fleeing = false;
                 fish.threat_hold_until_tick = 0;
                 continue;
@@ -589,6 +598,7 @@ impl World {
             {
                 fish.fleeing = false;
                 fish.threat_hold_until_tick = 0;
+                clear_action_target(fish);
             }
             if fish.fleeing
                 && (newly_fleeing
@@ -648,6 +658,9 @@ impl World {
         }
         for (index, assigned) in assignments.iter().enumerate() {
             let fish = &mut self.fish[index];
+            if fish.feeding.is_some() && assigned.is_none() && !fish.fleeing {
+                clear_action_target(fish);
+            }
             fish.feeding = assigned.map(|source_index| self.feed_sources[source_index].id.clone());
             if let Some(source_index) = assigned {
                 let source = &self.feed_sources[*source_index];
@@ -783,6 +796,7 @@ impl World {
                 source.remaining -= 1;
                 source.fed_fish.push(fish_id(fish.id));
                 fish.feeding = None;
+                clear_action_target(fish);
             }
         }
         self.feed_sources.retain(|source| source.remaining > 0);
@@ -793,9 +807,19 @@ impl World {
                 .is_some_and(|id| !self.feed_sources.iter().any(|source| &source.id == id))
             {
                 fish.feeding = None;
+                if !fish.fleeing {
+                    clear_action_target(fish);
+                }
             }
         }
     }
+}
+
+fn clear_action_target(fish: &mut Fish) {
+    fish.target = fish.position;
+    fish.depth_target = fish.depth;
+    fish.waypoint = None;
+    fish.stuck_ticks = 0;
 }
 
 fn fish_id(id: u128) -> String {
@@ -1387,10 +1411,74 @@ mod tests {
         assert!(!world.cancel_feed("00000000000000000000000000000003"));
         assert!(world.cancel_feed(first));
         assert_eq!(world.fish()[0].feeding, None);
+        assert_eq!(world.fish()[0].target, world.fish()[0].position);
+        assert_eq!(world.fish()[0].depth_target, world.fish()[0].depth);
         assert_eq!(world.feed_sources().len(), 1);
         assert_eq!(world.feed_sources()[0].id, second);
         assert!(!world.cancel_feed(first));
         World::restore(world.checkpoint()).unwrap();
+    }
+
+    #[test]
+    fn expiring_feed_releases_the_fish_route_and_depth_goal() {
+        let mut rules = WorldInteractionRules::default();
+        rules.feed.duration_ticks = 2;
+        let mut world = World::new_with_rules(bounds(), 31, rules).unwrap();
+        world.spawn_fish(7, Point { x: -2.0, y: 0.0 }, 1.0).unwrap();
+        world
+            .start_feed("00000000000000000000000000000001", Point { x: 1.0, y: 0.0 })
+            .unwrap();
+        world.step();
+        let generation = world.fish()[0].target_generation;
+        assert!(world.fish()[0].feeding.is_some());
+        world.step();
+        assert!(world.feed_sources().is_empty());
+        assert!(world.fish()[0].feeding.is_none());
+        assert_eq!(
+            world.fish()[0].target_generation,
+            generation + 1,
+            "ordinary swimming must replace the expired feeding route immediately"
+        );
+        assert_ne!(world.fish()[0].depth_target, 0.0);
+    }
+
+    #[test]
+    fn boat_preempts_feed_then_expiry_restores_feeding_after_checkpoint() {
+        let mut rules = WorldInteractionRules::default();
+        rules.boat.duration_ticks = 3;
+        let mut world = World::new_with_rules(bounds(), 57, rules).unwrap();
+        world.spawn_fish(7, Point { x: 6.8, y: 0.0 }, 1.0).unwrap();
+        let feed = "00000000000000000000000000000001";
+        world.start_feed(feed, Point { x: 5.4, y: 0.0 }).unwrap();
+        world.step();
+        assert_eq!(world.fish()[0].feeding.as_deref(), Some(feed));
+        world
+            .start_boat(
+                "00000000000000000000000000000002",
+                Point { x: -0.1, y: 0.0 },
+            )
+            .unwrap();
+        world.step();
+        assert!(world.fish()[0].fleeing);
+        assert!(world.fish()[0].feeding.is_none());
+        world.step();
+        let mut restored = World::restore(world.checkpoint()).unwrap();
+        let mut cancelled = World::restore(world.checkpoint()).unwrap();
+        assert!(cancelled.cancel_boat("00000000000000000000000000000002"));
+        assert!(!cancelled.fish()[0].fleeing);
+        assert_eq!(cancelled.fish()[0].target, cancelled.fish()[0].position);
+        cancelled.step();
+        assert_eq!(cancelled.fish()[0].feeding.as_deref(), Some(feed));
+        world.step();
+        restored.step();
+        assert_eq!(world.checkpoint(), restored.checkpoint());
+        assert!(world.boat().is_none());
+        assert!(!world.fish()[0].fleeing);
+        assert_eq!(
+            world.fish()[0].feeding.as_deref(),
+            Some(feed),
+            "the fish must resume active food instead of its obsolete escape route"
+        );
     }
 
     #[test]
