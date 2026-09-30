@@ -1072,16 +1072,22 @@ impl World {
         let bounds = self.bounds;
         let obstacles = &self.obstacles;
         let mut order: Vec<_> = (0..self.fish.len()).collect();
-        order.sort_by(|left, right| self.fish[*left].position.x.total_cmp(&self.fish[*right].position.x)
-            .then(self.fish[*left].id.cmp(&self.fish[*right].id)));
+        order.sort_by(|left, right| {
+            self.fish[*left]
+                .position
+                .x
+                .total_cmp(&self.fish[*right].position.x)
+                .then(self.fish[*left].id.cmp(&self.fish[*right].id))
+        });
         for _ in 0..4 {
             let mut changed = false;
             for left_slot in 0..order.len() {
                 for right_slot in left_slot + 1..order.len() {
                     let a = order[left_slot];
                     let b = order[right_slot];
-                    if self.fish[b].position.x - self.fish[a].position.x >
-                        2.0 * BODY_HALF_LENGTH + BODY_CLEARANCE {
+                    if self.fish[b].position.x - self.fish[a].position.x
+                        > 2.0 * BODY_HALF_LENGTH + BODY_CLEARANCE
+                    {
                         break;
                     }
                     if (self.fish[a].position.y - self.fish[b].position.y).abs() > BODY_CLEARANCE {
@@ -1095,7 +1101,11 @@ impl World {
                     if gap >= -0.15 {
                         continue;
                     }
-                    let sign = if left.position.y >= right.position.y { 1.0 } else { -1.0 };
+                    let sign = if left.position.y >= right.position.y {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     let push = ((-0.15 - gap) * 0.5).min(0.12);
                     let left_next = Point {
                         x: left.position.x,
@@ -1365,7 +1375,7 @@ impl World {
                 && fish.ambient.is_none()
                 && (course_change
                     || (fish.position.distance_squared(fish.target) < 0.04
-                    && (fish.depth - fish.depth_target).abs() < 0.12)
+                        && (fish.depth - fish.depth_target).abs() < 0.12)
                     || fish.stuck_ticks > 80)
             {
                 fish.target_generation = fish.target_generation.wrapping_add(1);
@@ -1588,15 +1598,22 @@ fn body_axis(pose: BodyPose) -> ([f32; 3], [f32; 3]) {
     let offset_x = x * BODY_HALF_LENGTH;
     let offset_z = z * BODY_HALF_LENGTH;
     (
-        [pose.position.x - offset_x, pose.position.y, pose.depth - offset_z],
-        [pose.position.x + offset_x, pose.position.y, pose.depth + offset_z],
+        [
+            pose.position.x - offset_x,
+            pose.position.y,
+            pose.depth - offset_z,
+        ],
+        [
+            pose.position.x + offset_x,
+            pose.position.y,
+            pose.depth + offset_z,
+        ],
     )
 }
 
 // Closest distance of the two oriented body axes in the 3D water volume.
 fn body_gap(left: BodyPose, right: BodyPose) -> f32 {
-    let axis_lower_bound = ((left.position.x - right.position.x).abs()
-        - 2.0 * BODY_HALF_LENGTH)
+    let axis_lower_bound = ((left.position.x - right.position.x).abs() - 2.0 * BODY_HALF_LENGTH)
         .max((left.position.y - right.position.y).abs())
         .max((left.depth - right.depth).abs() - 2.0 * BODY_HALF_LENGTH)
         - BODY_CLEARANCE;
@@ -1622,9 +1639,11 @@ fn body_gap(left: BodyPose, right: BodyPose) -> f32 {
     let mut t = ((bb * s + ee) / cc).clamp(0.0, 1.0);
     s = ((bb * t - dd) / aa).clamp(0.0, 1.0);
     t = ((bb * s + ee) / cc).clamp(0.0, 1.0);
-    let closest = [w[0] + u[0] * s - v[0] * t,
+    let closest = [
+        w[0] + u[0] * s - v[0] * t,
         w[1] + u[1] * s - v[1] * t,
-        w[2] + u[2] * s - v[2] * t];
+        w[2] + u[2] * s - v[2] * t,
+    ];
     dot3(closest, closest).sqrt() - BODY_CLEARANCE
 }
 
@@ -2470,8 +2489,10 @@ mod tests {
         for _ in 0..160 {
             let before = [world.fish()[0].position, world.fish()[1].position];
             world.step();
-            let gap = body_gap(BodyPose::from(&world.fish()[0]),
-                BodyPose::from(&world.fish()[1]));
+            let gap = body_gap(
+                BodyPose::from(&world.fish()[0]),
+                BodyPose::from(&world.fish()[1]),
+            );
             assert!(gap >= -0.35, "fish bodies deeply overlapped by {gap}");
             closest = closest.min(gap);
             for (index, previous) in before.iter().enumerate() {
@@ -2481,7 +2502,10 @@ mod tests {
             }
         }
         assert!(closest < 0.4, "the fish should pass close to each other");
-        assert!(moving.iter().all(|ticks| *ticks > 80), "neither fish may wait for the other");
+        assert!(
+            moving.iter().all(|ticks| *ticks > 80),
+            "neither fish may wait for the other"
+        );
         assert!(world.fish()[0].position.x > 0.0);
         assert!(world.fish()[1].position.x < 0.0);
     }
