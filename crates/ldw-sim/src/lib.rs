@@ -302,9 +302,21 @@ impl AmbientBehavior {
 
     fn resume(&self) -> (Point, f32) {
         match self {
-            Self::Explore { resume_target, resume_depth, .. }
-            | Self::Approach { resume_target, resume_depth, .. }
-            | Self::Startled { resume_target, resume_depth, .. } => (*resume_target, *resume_depth),
+            Self::Explore {
+                resume_target,
+                resume_depth,
+                ..
+            }
+            | Self::Approach {
+                resume_target,
+                resume_depth,
+                ..
+            }
+            | Self::Startled {
+                resume_target,
+                resume_depth,
+                ..
+            } => (*resume_target, *resume_depth),
         }
     }
 }
@@ -922,16 +934,30 @@ impl World {
         for fish in &mut self.fish {
             if fish.feeding.is_some() || fish.fleeing {
                 fish.ambient = None;
-            } else if fish.ambient.as_ref().is_some_and(|state| state.until_tick() <= self.tick) {
+            } else if fish
+                .ambient
+                .as_ref()
+                .is_some_and(|state| state.until_tick() <= self.tick)
+            {
                 finish_ambient(fish);
             }
         }
-        let peers: Vec<_> = self.fish.iter().map(|fish| {
-            (fish.id, fish.position, fish.depth,
-                fish.feeding.is_none() && !fish.fleeing && fish.ambient.is_none())
-        }).collect();
+        let peers: Vec<_> = self
+            .fish
+            .iter()
+            .map(|fish| {
+                (
+                    fish.id,
+                    fish.position,
+                    fish.depth,
+                    fish.feeding.is_none() && !fish.fleeing && fish.ambient.is_none(),
+                )
+            })
+            .collect();
         for fish in &mut self.fish {
-            let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient else { continue };
+            let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient else {
+                continue;
+            };
             let id = u128::from_str_radix(peer_id, 16).expect("validated peer ID");
             if let Some((_, position, depth, true)) = peers.iter().find(|peer| peer.0 == id) {
                 fish.target = *position;
@@ -942,21 +968,36 @@ impl World {
             }
         }
         if self.fish.len() > 1 && self.tick.wrapping_add(self.seed) % 120 == 0 {
-            let available: Vec<_> = self.fish.iter().enumerate().filter(|(_, fish)| {
-                fish.ambient.is_none() && fish.feeding.is_none() && !fish.fleeing
-            }).map(|(index, _)| index).collect();
+            let available: Vec<_> = self
+                .fish
+                .iter()
+                .enumerate()
+                .filter(|(_, fish)| {
+                    fish.ambient.is_none() && fish.feeding.is_none() && !fish.fleeing
+                })
+                .map(|(index, _)| index)
+                .collect();
             if !available.is_empty() {
                 let choice = xorshift(self.seed ^ self.tick) as usize % available.len();
                 for step in 0..available.len() {
                     let initiator = available[(choice + step) % available.len()];
                     let fish = &self.fish[initiator];
-                    let peer = available.iter().copied().filter(|index| *index != initiator &&
-                        self.fish[*index].capabilities.avoid_threat &&
-                        (self.fish[*index].depth - fish.depth).abs() < 1.0 &&
-                        self.fish[*index].position.distance_squared(fish.position) < 9.0)
+                    let peer = available
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            *index != initiator
+                                && self.fish[*index].capabilities.avoid_threat
+                                && (self.fish[*index].depth - fish.depth).abs() < 1.0
+                                && self.fish[*index].position.distance_squared(fish.position) < 9.0
+                        })
                         .min_by(|left, right| {
-                            self.fish[*left].position.distance_squared(fish.position)
-                                .total_cmp(&self.fish[*right].position.distance_squared(fish.position))
+                            self.fish[*left]
+                                .position
+                                .distance_squared(fish.position)
+                                .total_cmp(
+                                    &self.fish[*right].position.distance_squared(fish.position),
+                                )
                                 .then(self.fish[*left].id.cmp(&self.fish[*right].id))
                         });
                     if let Some(peer) = peer {
@@ -965,8 +1006,10 @@ impl World {
                         let peer_id = fish_id(self.fish[peer].id);
                         let fish = &mut self.fish[initiator];
                         fish.ambient = Some(AmbientBehavior::Approach {
-                            until_tick: self.tick.saturating_add(100), peer_id,
-                            resume_target: fish.target, resume_depth: fish.depth_target,
+                            until_tick: self.tick.saturating_add(100),
+                            peer_id,
+                            resume_target: fish.target,
+                            resume_depth: fish.depth_target,
                         });
                         fish.target = target;
                         fish.depth_target = target_depth;
@@ -976,26 +1019,45 @@ impl World {
                 }
             }
         }
-        let pursued: Vec<_> = self.fish.iter().filter_map(|fish| {
-            if let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient {
-                u128::from_str_radix(peer_id, 16).ok()
-            } else { None }
-        }).collect();
+        let pursued: Vec<_> = self
+            .fish
+            .iter()
+            .filter_map(|fish| {
+                if let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient {
+                    u128::from_str_radix(peer_id, 16).ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
         for fish in &mut self.fish {
-            if fish.ambient.is_some() || fish.feeding.is_some() || fish.fleeing { continue; }
-            if pursued.contains(&fish.id) { continue; }
+            if fish.ambient.is_some() || fish.feeding.is_some() || fish.fleeing {
+                continue;
+            }
+            if pursued.contains(&fish.id) {
+                continue;
+            }
             let identity = xorshift(self.seed ^ folded_fish_id(fish.id));
             let period = 160 + identity % 120;
             let offset = (identity >> 16) % period;
-            if self.tick.wrapping_add(offset) % period != 0 ||
-                xorshift(identity ^ self.tick) % 4 != 0 { continue; }
+            if self.tick.wrapping_add(offset) % period != 0
+                || xorshift(identity ^ self.tick) % 4 != 0
+            {
+                continue;
+            }
             let surface = xorshift(identity ^ self.tick ^ 0xa0761d6478bd642f) & 1 == 0;
-            if let Some(destination) = exploration_target(fish.position, surface, self.bounds,
-                &self.obstacles, fish.id) {
+            if let Some(destination) = exploration_target(
+                fish.position,
+                surface,
+                self.bounds,
+                &self.obstacles,
+                fish.id,
+            ) {
                 fish.ambient = Some(AmbientBehavior::Explore {
                     until_tick: self.tick.saturating_add(260),
                     rest_until_tick: self.tick.saturating_add(12),
-                    resume_target: fish.target, resume_depth: fish.depth_target,
+                    resume_target: fish.target,
+                    resume_depth: fish.depth_target,
                 });
                 fish.target = destination;
                 fish.depth_target = if surface { -0.7 } else { 0.7 };
@@ -1006,31 +1068,52 @@ impl World {
 
     fn resolve_social_encounter(&mut self) {
         let encounter = self.fish.iter().enumerate().find_map(|(initiator, fish)| {
-            let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient else { return None };
+            let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient else {
+                return None;
+            };
             let id = u128::from_str_radix(peer_id, 16).ok()?;
             let peer = self.fish.iter().position(|other| other.id == id)?;
             let other = &self.fish[peer];
-            let close = fish.position.distance_squared(other.position) +
-                (fish.depth - other.depth).powi(2) < 0.81;
+            let close = fish.position.distance_squared(other.position)
+                + (fish.depth - other.depth).powi(2)
+                < 0.81;
             close.then_some((initiator, peer))
         });
-        let Some((initiator, peer)) = encounter else { return };
+        let Some((initiator, peer)) = encounter else {
+            return;
+        };
         let source = self.fish[initiator].position;
         let source_depth = self.fish[initiator].depth;
         let recipient = &self.fish[peer];
-        let escape = if recipient.ambient.is_none() && recipient.feeding.is_none() &&
-            !recipient.fleeing && recipient.capabilities.avoid_threat {
-            escape_target(recipient.position, source, recipient.id, self.bounds, &self.obstacles)
-        } else { None };
+        let escape = if recipient.ambient.is_none()
+            && recipient.feeding.is_none()
+            && !recipient.fleeing
+            && recipient.capabilities.avoid_threat
+        {
+            escape_target(
+                recipient.position,
+                source,
+                recipient.id,
+                self.bounds,
+                &self.obstacles,
+            )
+        } else {
+            None
+        };
         finish_ambient(&mut self.fish[initiator]);
         if let Some(escape) = escape {
             let fish = &mut self.fish[peer];
             fish.ambient = Some(AmbientBehavior::Startled {
                 until_tick: self.tick.saturating_add(60),
-                resume_target: fish.target, resume_depth: fish.depth_target,
+                resume_target: fish.target,
+                resume_depth: fish.depth_target,
             });
             fish.target = escape;
-            fish.depth_target = if fish.depth <= source_depth { -1.2 } else { 1.2 };
+            fish.depth_target = if fish.depth <= source_depth {
+                -1.2
+            } else {
+                1.2
+            };
             fish.waypoint = None;
         }
     }
@@ -1211,7 +1294,8 @@ impl World {
         self.update_ambient_behavior();
         for fish in &mut self.fish {
             if matches!(&fish.ambient, Some(AmbientBehavior::Explore { rest_until_tick, .. })
-                if self.tick < *rest_until_tick) {
+                if self.tick < *rest_until_tick)
+            {
                 fish.heading_depth = 0.0;
                 continue;
             }
@@ -1260,12 +1344,18 @@ impl World {
             };
             let distance = (delta.x * delta.x + delta.y * delta.y).sqrt();
             let cruise = fish.speed * cruise_speed_factor(self.seed, fish.id, self.tick);
-            let swim_speed = if fish.feeding.is_some() || fish.fleeing ||
-                matches!(fish.ambient.as_ref(), Some(AmbientBehavior::Approach { .. } |
-                    AmbientBehavior::Startled { .. })) {
+            let swim_speed = if fish.feeding.is_some()
+                || fish.fleeing
+                || matches!(
+                    fish.ambient.as_ref(),
+                    Some(AmbientBehavior::Approach { .. } | AmbientBehavior::Startled { .. })
+                ) {
                 fish.speed
-            } else if fish.ambient.is_some() { cruise.min(fish.speed * 0.65) }
-            else { cruise };
+            } else if fish.ambient.is_some() {
+                cruise.min(fish.speed * 0.65)
+            } else {
+                cruise
+            };
             let depth_heading = advance_depth(fish, swim_speed);
             let step_budget = swim_speed / TICKS_PER_SECOND as f32;
             fish.heading_depth = depth_heading;
@@ -1402,17 +1492,29 @@ fn cruise_speed_factor(seed: u64, id: u128, tick: u64) -> f32 {
     0.38 + 0.62 * (level(block) * (1.0 - smooth) + level(block.wrapping_add(1)) * smooth)
 }
 
-fn exploration_target(from: Point, surface: bool, bounds: Bounds,
-    obstacles: &[Circle], id: u128) -> Option<Point> {
-    let y = if surface { bounds.max_y - FISH_RADIUS - 0.3 }
-        else { bounds.min_y + FISH_RADIUS + 0.3 };
+fn exploration_target(
+    from: Point,
+    surface: bool,
+    bounds: Bounds,
+    obstacles: &[Circle],
+    id: u128,
+) -> Option<Point> {
+    let y = if surface {
+        bounds.max_y - FISH_RADIUS - 0.3
+    } else {
+        bounds.min_y + FISH_RADIUS + 0.3
+    };
     let side = if id & 1 == 0 { 1.0 } else { -1.0 };
     for offset in [0.0, 0.8, -0.8, 1.6, -1.6] {
-        let target = Point { x: (from.x + offset * side).clamp(
-            bounds.min_x + FISH_RADIUS, bounds.max_x - FISH_RADIUS), y };
-        if valid_point(target, bounds, obstacles) &&
-            (segment_clear(from, target, obstacles) ||
-                plan_waypoint(from, target, id, bounds, obstacles).is_some()) {
+        let target = Point {
+            x: (from.x + offset * side)
+                .clamp(bounds.min_x + FISH_RADIUS, bounds.max_x - FISH_RADIUS),
+            y,
+        };
+        if valid_point(target, bounds, obstacles)
+            && (segment_clear(from, target, obstacles)
+                || plan_waypoint(from, target, id, bounds, obstacles).is_some())
+        {
             return Some(target);
         }
     }
@@ -2077,13 +2179,26 @@ mod tests {
 
     #[test]
     fn idle_pace_varies_independently_and_smoothly() {
-        let speeds: Vec<_> = (0..2000).map(|tick| cruise_speed_factor(42, 1, tick)).collect();
-        let other: Vec<_> = (0..2000).map(|tick| cruise_speed_factor(42, 2, tick)).collect();
+        let speeds: Vec<_> = (0..2000)
+            .map(|tick| cruise_speed_factor(42, 1, tick))
+            .collect();
+        let other: Vec<_> = (0..2000)
+            .map(|tick| cruise_speed_factor(42, 2, tick))
+            .collect();
         let slow = speeds.iter().copied().fold(f32::INFINITY, f32::min);
         let fast = speeds.iter().copied().fold(0.0, f32::max);
         assert!(slow >= 0.38 && fast <= 1.0 && fast - slow > 0.3);
-        assert!(speeds.windows(2).all(|pair| (pair[1] - pair[0]).abs() < 0.02));
-        assert!(speeds.iter().zip(other).any(|(one, two)| (one - two).abs() > 0.2));
+        assert!(
+            speeds
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() < 0.02)
+        );
+        assert!(
+            speeds
+                .iter()
+                .zip(other)
+                .any(|(one, two)| (one - two).abs() > 0.2)
+        );
     }
 
     #[test]
@@ -2092,42 +2207,73 @@ mod tests {
         world.spawn_fish(1, Point { x: 0.0, y: 0.0 }, 1.2).unwrap();
         for _ in 0..3000 {
             world.step();
-            if matches!(world.fish()[0].ambient.as_ref(), Some(AmbientBehavior::Explore { .. })) { break; }
+            if matches!(
+                world.fish()[0].ambient.as_ref(),
+                Some(AmbientBehavior::Explore { .. })
+            ) {
+                break;
+            }
         }
-        assert!(matches!(world.fish()[0].ambient.as_ref(), Some(AmbientBehavior::Explore { .. })));
+        assert!(matches!(
+            world.fish()[0].ambient.as_ref(),
+            Some(AmbientBehavior::Explore { .. })
+        ));
         let resting = world.fish()[0].position;
         let mut restored = World::restore(world.checkpoint()).unwrap();
         for _ in 0..10 {
-            world.step(); restored.step();
+            world.step();
+            restored.step();
             assert_eq!(world.fish(), restored.fish());
-            assert_eq!(world.fish()[0].position, resting, "fish must pause before exploring");
+            assert_eq!(
+                world.fish()[0].position,
+                resting,
+                "fish must pause before exploring"
+            );
         }
         let mut moved_vertically = false;
         for _ in 0..280 {
-            world.step(); restored.step();
+            world.step();
+            restored.step();
             assert_eq!(world.fish(), restored.fish());
             moved_vertically |= (world.fish()[0].position.y - resting.y).abs() > 0.3;
         }
         assert!(moved_vertically);
-        assert!(!matches!(world.fish()[0].ambient.as_ref(), Some(AmbientBehavior::Explore { .. })));
+        assert!(!matches!(
+            world.fish()[0].ambient.as_ref(),
+            Some(AmbientBehavior::Explore { .. })
+        ));
     }
 
     #[test]
     fn a_close_approach_startles_one_fish_then_expires() {
         let mut world = World::new(bounds(), 0).unwrap();
-        world.spawn_fish(1, Point { x: -0.35, y: 0.0 }, 1.2).unwrap();
+        world
+            .spawn_fish(1, Point { x: -0.35, y: 0.0 }, 1.2)
+            .unwrap();
         world.spawn_fish(2, Point { x: 0.35, y: 0.0 }, 1.2).unwrap();
         world.tick = 119;
         world.step();
-        assert_eq!(world.fish().iter().filter(|fish|
-            matches!(fish.ambient.as_ref(), Some(AmbientBehavior::Startled { .. }))).count(), 1);
+        assert_eq!(
+            world
+                .fish()
+                .iter()
+                .filter(|fish| matches!(
+                    fish.ambient.as_ref(),
+                    Some(AmbientBehavior::Startled { .. })
+                ))
+                .count(),
+            1
+        );
         let mut restored = World::restore(world.checkpoint()).unwrap();
         for _ in 0..65 {
-            world.step(); restored.step();
+            world.step();
+            restored.step();
             assert_eq!(world.fish(), restored.fish());
         }
-        assert!(world.fish().iter().all(|fish|
-            !matches!(fish.ambient.as_ref(), Some(AmbientBehavior::Startled { .. }))));
+        assert!(world.fish().iter().all(|fish| !matches!(
+            fish.ambient.as_ref(),
+            Some(AmbientBehavior::Startled { .. })
+        )));
     }
 
     #[test]
@@ -2138,18 +2284,27 @@ mod tests {
         let resume = world.fish()[0].target;
         let resume_depth = world.fish()[0].depth_target;
         world.fish[0].ambient = Some(AmbientBehavior::Explore {
-            until_tick: 100, rest_until_tick: 10,
-            resume_target: resume, resume_depth,
+            until_tick: 100,
+            rest_until_tick: 10,
+            resume_target: resume,
+            resume_depth,
         });
-        world.start_feed("00000000000000000000000000000001", Point { x: 0.0, y: 0.0 }).unwrap();
+        world
+            .start_feed("00000000000000000000000000000001", Point { x: 0.0, y: 0.0 })
+            .unwrap();
         world.step();
-        assert!(world.fish()[0].ambient.is_none(), "food must interrupt exploration");
+        assert!(
+            world.fish()[0].ambient.is_none(),
+            "food must interrupt exploration"
+        );
         world.cancel_feed("00000000000000000000000000000001");
         let resume = world.fish()[0].target;
         let resume_depth = world.fish()[0].depth_target;
         world.fish[0].ambient = Some(AmbientBehavior::Approach {
-            until_tick: world.tick + 100, peer_id: fish_id(2),
-            resume_target: resume, resume_depth,
+            until_tick: world.tick + 100,
+            peer_id: fish_id(2),
+            resume_target: resume,
+            resume_depth,
         });
         world.remove_fish(2).unwrap();
         assert!(world.fish()[0].ambient.is_none());
