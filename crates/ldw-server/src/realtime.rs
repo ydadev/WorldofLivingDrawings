@@ -951,7 +951,11 @@ pub async fn process_command(
 #[cfg(test)]
 mod rule_tests {
     use super::*;
+    use crate::{blob_store::BlobStore, http};
+    use futures_util::{SinkExt, StreamExt};
     use ldw_sim::{Bounds, WorldInteractionRules};
+    use std::sync::Arc;
+    use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
 
     #[tokio::test]
     async fn frozen_catalog_accepts_extra_action_and_emits_v2() {
@@ -1004,6 +1008,59 @@ mod rule_tests {
         assert_eq!(revision, 0);
         assert_eq!(snapshot["schemaVersion"], 2);
         assert_eq!(snapshot["actionCatalog"][2]["id"], "feed-slow");
+        let blob_root = std::env::temp_dir().join(format!("ldw-catalog-blobs-{}", Uuid::new_v4()));
+        let hub = SimulationHub::default();
+        let app = http::router(AppState {
+            access: store.clone(),
+            blob_store: BlobStore::create(blob_root.clone()).unwrap(),
+            public_origin: Arc::from("https://world.example.test"),
+            simulation_hub: hub,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let url = format!("ws://{address}/api/sessions/{}/ws", ids.session_id);
+        let mut request = url.as_str().into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", "https://world.example.test".parse().unwrap());
+        request.headers_mut().insert(
+            "cookie",
+            format!("__Host-ldw-owner={token}").parse().unwrap(),
+        );
+        let (mut socket, _) = timeout(
+            Duration::from_secs(3),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        socket
+            .send(ClientMessage::text(
+                json!({"type":"hello","csrf":csrf}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let wire_snapshot: Value = serde_json::from_str(
+            timeout(Duration::from_secs(3), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(wire_snapshot["type"], "snapshot");
+        assert_eq!(wire_snapshot["schemaVersion"], 2);
+        assert_eq!(wire_snapshot["actionCatalog"][2]["id"], "feed-slow");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1019,10 +1076,36 @@ mod rule_tests {
             target_action_id: None,
             expires_at: now + 10_000,
         };
-        let accepted = process_command(&store, GrantKind::Owner, &token, ids.session_id, &command)
+        socket
+            .send(ClientMessage::text(
+                serde_json::to_string(&command).unwrap(),
+            ))
             .await
             .unwrap();
+        let accepted: Value = serde_json::from_str(
+            timeout(Duration::from_secs(3), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(accepted["accepted"], true);
+        let delta: Value = serde_json::from_str(
+            timeout(Duration::from_secs(3), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(delta["type"], "delta");
+        assert_eq!(delta["schemaVersion"], 2);
+        assert_eq!(delta["event"]["interactionId"], "feed-slow");
         assert_eq!(
             process_command(&store, GrantKind::Owner, &token, ids.session_id, &command)
                 .await
@@ -1064,6 +1147,9 @@ mod rule_tests {
         let wire = public_event(&event, &snapshot["actionCatalog"]).unwrap();
         assert_eq!(wire["activeActions"][0]["effect"], "attraction");
         assert!(event["activeActions"][0].get("effect").is_none());
+        socket.close(None).await.unwrap();
+        server.abort();
+        std::fs::remove_dir_all(blob_root).unwrap();
     }
 
     #[test]
