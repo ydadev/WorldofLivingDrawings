@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '../prototypes/wasm-webgl/node_modules/playwright-core/index.mjs';
+import { SWIM_LAP_SECONDS, swimPath } from '../prototypes/wasm-webgl/src/swim-path.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const web = path.join(root, 'prototypes/wasm-webgl');
@@ -260,6 +261,32 @@ try {
   });
   assert(forwardLap.every(dot => dot > .9),
     `Fish must lead with its nose throughout the depth lap: ${JSON.stringify(forwardLap)}`);
+  const previewLap = await desktop.evaluate(async samples => {
+    const adapter = window.coreAdapter;
+    const marker = adapter.scene.getTransformNodeByName('fish-1');
+    const eye = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.material?.name === 'eye');
+    const tail = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    const checks = [];
+    for (const [index, point] of samples.entries()) {
+      const start = marker.position.clone();
+      adapter.applyPositions({ type: 'positions', schemaVersion: 1,
+        sceneId: 'scene-1', sceneEpoch: 1, revision: 1, simulationTick: 19 + index,
+        positions: [{ id: 'fish-1', position: { x: point.x, y: point.y }, depth: point.depth,
+          heading: point.heading, headingDepth: point.headingDepth }] });
+      await new Promise(resolve => setTimeout(resolve, 550));
+      if (index === 0) continue;
+      const nose = eye.getBoundingInfo().boundingBox.centerWorld.subtract(
+        tail.getBoundingInfo().boundingBox.centerWorld);
+      const travel = { x: point.x - start.x, z: point.depth - start.z };
+      checks.push((nose.x * travel.x + nose.z * travel.z) /
+        (Math.hypot(nose.x, nose.z) * Math.hypot(travel.x, travel.z)));
+    }
+    return checks;
+  }, Array.from({ length: 13 }, (_, index) => swimPath(index * SWIM_LAP_SECONDS / 12)));
+  assert(previewLap.every(dot => dot > .85),
+    `The actual preview lap must keep the fish head-first: ${JSON.stringify(previewLap)}`);
   mkdirSync(path.join(root, '.local'), { recursive: true });
   const screenshot = PNG.sync.read(await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') }));
   let redPixels = 0, bluePixels = 0;
