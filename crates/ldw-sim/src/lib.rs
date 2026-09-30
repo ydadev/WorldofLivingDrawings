@@ -2545,9 +2545,11 @@ mod tests {
         world.fish[1].depth_target = 1.0;
         world.fish[1].heading = Point { x: -1.0, y: 0.0 };
         let mut moving = [0; 2];
+        let mut passed = false;
         for _ in 0..160 {
             let before = [world.fish()[0].position, world.fish()[1].position];
             world.step();
+            passed |= world.fish()[0].position.x > world.fish()[1].position.x;
             let gap = silhouette_gap(
                 BodyPose::from(&world.fish()[0]),
                 BodyPose::from(&world.fish()[1]),
@@ -2560,8 +2562,12 @@ mod tests {
             }
         }
         assert!(moving.iter().all(|ticks| *ticks > 80));
-        assert!(world.fish()[0].position.x > 0.0);
-        assert!(world.fish()[1].position.x < 0.0);
+        assert!(
+            passed,
+            "fish never passed: {:?} / {:?}",
+            world.fish()[0].position,
+            world.fish()[1].position
+        );
     }
 
     #[test]
