@@ -10,10 +10,8 @@ const FISH_RADIUS: f32 = 0.18;
 pub const MIN_DEPTH: f32 = -1.5;
 pub const MAX_DEPTH: f32 = 1.5;
 const DEPTH_SPEED: f32 = 0.55;
-const FEED_EATING_RADIUS: f32 = 0.3;
 const BOAT_RADIUS: f32 = 0.45;
 const BOAT_SPEED: f32 = 2.0;
-const THREAT_HOLD_TICKS: u64 = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EffectRule {
@@ -29,6 +27,52 @@ pub struct EffectRule {
 pub struct WorldInteractionRules {
     pub feed: EffectRule,
     pub boat: EffectRule,
+    #[serde(default)]
+    pub feed_behavior: FeedBehavior,
+    #[serde(default)]
+    pub boat_behavior: BoatBehavior,
+}
+
+// The bounded v2 behavior chain is compiled to these parameters before a scene
+// starts. Defaults preserve the exact behavior of v1 checkpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeedBehavior {
+    pub candidate_limit: usize,
+    pub reserve_limit: usize,
+    pub target_depth: f32,
+    pub eating_radius: f32,
+    pub eating_depth_tolerance: f32,
+}
+
+impl Default for FeedBehavior {
+    fn default() -> Self {
+        Self {
+            candidate_limit: MAX_FISH,
+            reserve_limit: 10,
+            target_depth: 0.0,
+            eating_radius: 0.3,
+            eating_depth_tolerance: 0.35,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BoatBehavior {
+    pub candidate_limit: usize,
+    pub hold_ticks: u64,
+    pub release_radius_factor: f32,
+    pub escape_depth: f32,
+}
+
+impl Default for BoatBehavior {
+    fn default() -> Self {
+        Self {
+            candidate_limit: MAX_FISH,
+            hold_ticks: 20,
+            release_radius_factor: 1.25,
+            escape_depth: MAX_DEPTH - 0.2,
+        }
+    }
 }
 
 impl Default for WorldInteractionRules {
@@ -51,6 +95,8 @@ impl Default for WorldInteractionRules {
                 cooldown_ticks: 200,
                 priority: 10,
             },
+            feed_behavior: FeedBehavior::default(),
+            boat_behavior: BoatBehavior::default(),
         }
     }
 }
@@ -68,7 +114,21 @@ impl WorldInteractionRules {
         }) && (1..=3).contains(&self.feed.max_active)
             && self.boat.max_active == 1
             && self.boat.priority > self.feed.priority
-            && self.boat.radius * 1.25 < width / 2.0
+            && (1..=MAX_FISH).contains(&self.feed_behavior.candidate_limit)
+            && (1..=10).contains(&self.feed_behavior.reserve_limit)
+            && self.feed_behavior.target_depth.is_finite()
+            && (MIN_DEPTH..=MAX_DEPTH).contains(&self.feed_behavior.target_depth)
+            && self.feed_behavior.eating_radius.is_finite()
+            && (0.1..=0.6).contains(&self.feed_behavior.eating_radius)
+            && self.feed_behavior.eating_depth_tolerance.is_finite()
+            && (0.1..=0.6).contains(&self.feed_behavior.eating_depth_tolerance)
+            && (1..=MAX_FISH).contains(&self.boat_behavior.candidate_limit)
+            && self.boat_behavior.hold_ticks <= 120
+            && self.boat_behavior.release_radius_factor.is_finite()
+            && (1.0..=2.0).contains(&self.boat_behavior.release_radius_factor)
+            && self.boat.radius * self.boat_behavior.release_radius_factor < width / 2.0
+            && self.boat_behavior.escape_depth.is_finite()
+            && (MIN_DEPTH..=MAX_DEPTH).contains(&self.boat_behavior.escape_depth)
     }
 }
 
@@ -608,6 +668,25 @@ impl World {
         {
             self.boat = None;
         }
+        let threatened_ids = self.boat.as_ref().map(|boat| {
+            let mut candidates: Vec<_> = self
+                .fish
+                .iter()
+                .filter(|fish| {
+                    fish.capabilities.avoid_threat
+                        && !fish.fleeing
+                        && fish.position.distance_squared(boat.position)
+                            <= self.interaction_rules.boat.radius.powi(2)
+                })
+                .map(|fish| (fish.position.distance_squared(boat.position), fish.id))
+                .collect();
+            candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            candidates
+                .into_iter()
+                .take(self.interaction_rules.boat_behavior.candidate_limit)
+                .map(|(_, id)| id)
+                .collect::<Vec<_>>()
+        });
         for fish in &mut self.fish {
             let Some(boat) = &self.boat else {
                 if fish.fleeing {
@@ -619,16 +698,21 @@ impl World {
             };
             let distance_sq = fish.position.distance_squared(boat.position);
             let mut newly_fleeing = false;
-            if fish.capabilities.avoid_threat
-                && !fish.fleeing
-                && distance_sq <= self.interaction_rules.boat.radius.powi(2)
+            if threatened_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&fish.id))
             {
                 fish.fleeing = true;
                 newly_fleeing = true;
-                fish.threat_hold_until_tick = self.tick.saturating_add(THREAT_HOLD_TICKS);
+                fish.threat_hold_until_tick = self
+                    .tick
+                    .saturating_add(self.interaction_rules.boat_behavior.hold_ticks);
                 fish.waypoint = None;
             } else if fish.fleeing
-                && distance_sq > (self.interaction_rules.boat.radius * 1.25).powi(2)
+                && distance_sq
+                    > (self.interaction_rules.boat.radius
+                        * self.interaction_rules.boat_behavior.release_radius_factor)
+                        .powi(2)
                 && self.tick >= fish.threat_hold_until_tick
             {
                 fish.fleeing = false;
@@ -649,7 +733,7 @@ impl World {
                 )
             {
                 fish.target = target;
-                fish.depth_target = MAX_DEPTH - 0.2;
+                fish.depth_target = self.interaction_rules.boat_behavior.escape_depth;
                 fish.waypoint = None;
                 fish.stuck_ticks = 0;
             }
@@ -688,7 +772,11 @@ impl World {
                 })
                 .collect();
             candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
-            for (index, _, _) in candidates.into_iter().take(source.remaining as usize) {
+            for (index, _, _) in candidates.into_iter().take(
+                (source.remaining as usize)
+                    .min(self.interaction_rules.feed_behavior.reserve_limit)
+                    .min(self.interaction_rules.feed_behavior.candidate_limit),
+            ) {
                 assignments[index] = Some(source_index);
             }
         }
@@ -708,7 +796,7 @@ impl World {
                     &self.obstacles,
                 )
                 .unwrap_or(source.position);
-                fish.depth_target = 0.0;
+                fish.depth_target = self.interaction_rules.feed_behavior.target_depth;
                 fish.waypoint = None;
             }
         }
@@ -823,8 +911,10 @@ impl World {
         for fish in &mut self.fish {
             let Some(source) = self.feed_sources.iter_mut().find(|source| {
                 fish.feeding.as_deref() == Some(source.id.as_str())
-                    && fish.position.distance_squared(source.position) <= FEED_EATING_RADIUS.powi(2)
-                    && fish.depth.abs() <= 0.35
+                    && fish.position.distance_squared(source.position)
+                        <= self.interaction_rules.feed_behavior.eating_radius.powi(2)
+                    && (fish.depth - self.interaction_rules.feed_behavior.target_depth).abs()
+                        <= self.interaction_rules.feed_behavior.eating_depth_tolerance
             }) else {
                 continue;
             };
@@ -1627,6 +1717,24 @@ mod tests {
             World::restore(checkpoint).unwrap().interaction_rules(),
             rules
         );
+        let mut previous_rules = serde_json::to_value(configured.checkpoint()).unwrap();
+        previous_rules["interaction_rules"]
+            .as_object_mut()
+            .unwrap()
+            .remove("feed_behavior");
+        previous_rules["interaction_rules"]
+            .as_object_mut()
+            .unwrap()
+            .remove("boat_behavior");
+        let restored = World::restore(serde_json::from_value(previous_rules).unwrap()).unwrap();
+        assert_eq!(
+            restored.interaction_rules().feed_behavior,
+            FeedBehavior::default()
+        );
+        assert_eq!(
+            restored.interaction_rules().boat_behavior,
+            BoatBehavior::default()
+        );
         let mut old = serde_json::to_value(legacy.checkpoint()).unwrap();
         old.as_object_mut().unwrap().remove("interaction_rules");
         let restored = World::restore(serde_json::from_value(old).unwrap()).unwrap();
@@ -1637,6 +1745,36 @@ mod tests {
         rules.feed.radius = f32::NAN;
         assert_eq!(
             World::new_with_rules(bounds(), 77, rules).unwrap_err(),
+            SimError::InvalidInteractionRules
+        );
+    }
+
+    #[test]
+    fn bounded_threat_behavior_limits_candidates_and_survives_checkpoint() {
+        let mut rules = WorldInteractionRules::default();
+        rules.boat_behavior.candidate_limit = 1;
+        rules.boat_behavior.hold_ticks = 2;
+        rules.boat_behavior.release_radius_factor = 1.1;
+        rules.boat_behavior.escape_depth = -0.8;
+        let mut world = World::new_with_rules(bounds(), 19, rules).unwrap();
+        world.spawn_fish(1, Point { x: -5.0, y: 0.0 }, 1.0).unwrap();
+        world.spawn_fish(2, Point { x: -4.8, y: 0.0 }, 1.0).unwrap();
+        world
+            .start_boat("00000000000000000000000000000001", Point { x: 1.0, y: 0.0 })
+            .unwrap();
+        world.step();
+        assert!(world.fish()[0].fleeing);
+        assert_eq!(world.fish()[0].depth_target, -0.8);
+        assert!(!world.fish()[1].fleeing);
+        let mut replay = World::restore(world.checkpoint()).unwrap();
+        for _ in 0..20 {
+            world.step();
+            replay.step();
+            assert_eq!(world.checkpoint(), replay.checkpoint());
+        }
+        rules.boat_behavior.candidate_limit = 0;
+        assert_eq!(
+            World::new_with_rules(bounds(), 19, rules).unwrap_err(),
             SimError::InvalidInteractionRules
         );
     }

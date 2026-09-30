@@ -9,9 +9,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const contentRoot = path.join(root, 'content/underwater');
 const readJson = relative => JSON.parse(readFileSync(path.join(root, relative), 'utf8'));
 const schema = readJson('schemas/v1/definitions.schema.json');
+const interactionSchemaV2 = readJson('schemas/v2/interactions.schema.json');
 const ajv = new Ajv2020({ strict: true, allErrors: true });
 ajv.addSchema(schema);
+ajv.addSchema(interactionSchemaV2);
 const validate = name => ajv.getSchema(`${schema.$id}#/$defs/${name}`);
+const validateInteractionV2 = ajv.getSchema(`${interactionSchemaV2.$id}#/$defs/interactionDefinition`);
 const valid = (name, value) => {
   const run = validate(name);
   assert(run, `Missing schema ${name}`);
@@ -25,7 +28,22 @@ const interactions = readJson('content/underwater/interactions.json');
 const manifest = readJson('content/underwater/manifest.json');
 valid('worldDefinition', world);
 for (const entity of entities) valid('entityDefinition', entity);
-for (const interaction of interactions) valid('interactionDefinition', interaction);
+for (const interaction of interactions) {
+  assert.equal(interaction.schemaVersion, 2);
+  assert(validateInteractionV2(interaction), ajv.errorsText(validateInteractionV2.errors));
+  assert(!validate('interactionDefinition')(interaction), 'v1 must reject a v2 behavior graph');
+}
+const legacyInteraction = { ...interactions[0], schemaVersion: 1, version: 1 };
+delete legacyInteraction.behavior;
+valid('interactionDefinition', legacyInteraction);
+assert(!validateInteractionV2(legacyInteraction), 'v2 must require behavior');
+assert(!validateInteractionV2({ ...interactions[0], behavior: [{ primitive: 'run-code' }] }));
+assert(!validateInteractionV2({ ...interactions[0], behavior: [
+  { primitive: 'find-candidates', maxCandidates: 101 }, ...interactions[0].behavior.slice(1)
+] }));
+assert(!validateInteractionV2({ ...interactions[0], behavior: [
+  { ...interactions[0].behavior[0], script: 'alert(1)' }, ...interactions[0].behavior.slice(1)
+] }));
 valid('assetManifest', manifest);
 assert.equal(new Set(entities.map(item => item.id)).size, entities.length);
 assert.equal(new Set(interactions.map(item => item.id)).size, interactions.length);

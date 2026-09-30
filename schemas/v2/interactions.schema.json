@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://world.routx.ru/schemas/v2/interactions.schema.json",
+  "$defs": {
+    "positiveInt": { "type": "integer", "minimum": 1 },
+    "nonnegativeInt": { "type": "integer", "minimum": 0 },
+    "step": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive", "maxCandidates"],
+          "properties": {
+            "primitive": { "const": "find-candidates" },
+            "maxCandidates": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive", "maxPerSource"],
+          "properties": {
+            "primitive": { "const": "reserve" },
+            "maxPerSource": { "type": "integer", "minimum": 1, "maximum": 10 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive", "depth"],
+          "properties": {
+            "primitive": { "const": "move-to" },
+            "depth": { "type": "number", "minimum": -1.5, "maximum": 1.5 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive", "radius", "depthTolerance"],
+          "properties": {
+            "primitive": { "const": "consume" },
+            "radius": { "type": "number", "minimum": 0.1, "maximum": 0.6 },
+            "depthTolerance": { "type": "number", "minimum": 0.1, "maximum": 0.6 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive", "holdTicks", "releaseRadiusFactor", "escapeDepth"],
+          "properties": {
+            "primitive": { "const": "flee" },
+            "holdTicks": { "type": "integer", "minimum": 0, "maximum": 120 },
+            "releaseRadiusFactor": { "type": "number", "minimum": 1, "maximum": 2 },
+            "escapeDepth": { "type": "number", "minimum": -1.5, "maximum": 1.5 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive"],
+          "properties": { "primitive": { "const": "timeout" } }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["primitive"],
+          "properties": { "primitive": { "const": "cleanup" } }
+        }
+      ]
+    },
+    "interactionDefinition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "id", "version", "effect", "allowedZoneId", "requiredCapability", "radius", "durationTicks", "maxActive", "cooldownTicks", "priority", "behavior"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "version": { "$ref": "#/$defs/positiveInt" },
+        "effect": { "enum": ["attraction", "threat"] },
+        "allowedZoneId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "requiredCapability": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "radius": { "type": "number", "exclusiveMinimum": 0 },
+        "durationTicks": { "$ref": "#/$defs/positiveInt" },
+        "maxActive": { "$ref": "#/$defs/positiveInt" },
+        "cooldownTicks": { "$ref": "#/$defs/nonnegativeInt" },
+        "priority": { "type": "integer" },
+        "behavior": {
+          "type": "array", "minItems": 4, "maxItems": 5,
+          "items": { "$ref": "#/$defs/step" }
+        }
+      }
+    }
+  }
+}

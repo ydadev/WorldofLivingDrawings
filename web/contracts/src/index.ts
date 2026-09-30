@@ -23,7 +23,7 @@ export interface EntityDefinition {
   paintTemplateVersion: number;
   capabilities: string[];
 }
-export interface InteractionDefinition {
+export interface InteractionDefinitionV1 {
   schemaVersion: 1;
   id: string;
   version: number;
@@ -36,6 +36,20 @@ export interface InteractionDefinition {
   cooldownTicks: number;
   priority: number;
 }
+export type BehaviorStep =
+  | { primitive: 'find-candidates'; maxCandidates: number }
+  | { primitive: 'reserve'; maxPerSource: number }
+  | { primitive: 'move-to'; depth: number }
+  | { primitive: 'consume'; radius: number; depthTolerance: number }
+  | { primitive: 'flee'; holdTicks: number; releaseRadiusFactor: number; escapeDepth: number }
+  | { primitive: 'timeout' }
+  | { primitive: 'cleanup' };
+export interface InteractionDefinitionV2 extends Omit<InteractionDefinitionV1, 'schemaVersion'> {
+  schemaVersion: 2;
+  /** Bounded, acyclic primitive chain; the server validates supported order before activation. */
+  behavior: BehaviorStep[];
+}
+export type InteractionDefinition = InteractionDefinitionV1 | InteractionDefinitionV2;
 export interface InteractionIntent {
   schemaVersion: 1;
   commandId: string;

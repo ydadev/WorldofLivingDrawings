@@ -2,7 +2,8 @@
 //! are separate; this module never writes a frame to PostgreSQL.
 
 use ldw_sim::{
-    Bounds, EffectRule, FishCapabilities, Point, World, WorldCheckpoint, WorldInteractionRules,
+    BoatBehavior, Bounds, EffectRule, FeedBehavior, FishCapabilities, Point, World,
+    WorldCheckpoint, WorldInteractionRules,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -194,6 +195,83 @@ struct PackageInteraction {
     max_active: usize,
     cooldown_ticks: u64,
     priority: i32,
+    behavior: Option<Vec<PackageBehaviorStep>>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "primitive", rename_all = "kebab-case", deny_unknown_fields)]
+enum PackageBehaviorStep {
+    FindCandidates {
+        #[serde(rename = "maxCandidates")]
+        max_candidates: usize,
+    },
+    Reserve {
+        #[serde(rename = "maxPerSource")]
+        max_per_source: usize,
+    },
+    MoveTo {
+        depth: f32,
+    },
+    Consume {
+        radius: f32,
+        #[serde(rename = "depthTolerance")]
+        depth_tolerance: f32,
+    },
+    Flee {
+        #[serde(rename = "holdTicks")]
+        hold_ticks: u64,
+        #[serde(rename = "releaseRadiusFactor")]
+        release_radius_factor: f32,
+        #[serde(rename = "escapeDepth")]
+        escape_depth: f32,
+    },
+    Timeout,
+    Cleanup,
+}
+
+fn compile_feed_behavior(steps: &[PackageBehaviorStep]) -> Result<FeedBehavior, SimulationError> {
+    let [
+        PackageBehaviorStep::FindCandidates { max_candidates },
+        PackageBehaviorStep::Reserve { max_per_source },
+        PackageBehaviorStep::MoveTo { depth },
+        PackageBehaviorStep::Consume {
+            radius,
+            depth_tolerance,
+        },
+        PackageBehaviorStep::Cleanup,
+    ] = steps
+    else {
+        return Err(SimulationError::InvalidPackage);
+    };
+    Ok(FeedBehavior {
+        candidate_limit: *max_candidates,
+        reserve_limit: *max_per_source,
+        target_depth: *depth,
+        eating_radius: *radius,
+        eating_depth_tolerance: *depth_tolerance,
+    })
+}
+
+fn compile_boat_behavior(steps: &[PackageBehaviorStep]) -> Result<BoatBehavior, SimulationError> {
+    let [
+        PackageBehaviorStep::FindCandidates { max_candidates },
+        PackageBehaviorStep::Flee {
+            hold_ticks,
+            release_radius_factor,
+            escape_depth,
+        },
+        PackageBehaviorStep::Timeout,
+        PackageBehaviorStep::Cleanup,
+    ] = steps
+    else {
+        return Err(SimulationError::InvalidPackage);
+    };
+    Ok(BoatBehavior {
+        candidate_limit: *max_candidates,
+        hold_ticks: *hold_ticks,
+        release_radius_factor: *release_radius_factor,
+        escape_depth: *escape_depth,
+    })
 }
 
 fn underwater_interaction_rules() -> Result<WorldInteractionRules, SimulationError> {
@@ -210,13 +288,20 @@ fn parse_interaction_rules(source: &str) -> Result<WorldInteractionRules, Simula
     }
     let mut feed = None;
     let mut boat = None;
+    let mut feed_behavior = None;
+    let mut boat_behavior = None;
     for definition in definitions {
-        if definition.schema_version != 1
+        if !matches!(definition.schema_version, 1 | 2)
             || definition.version == 0
             || definition.allowed_zone_id != "water"
         {
             return Err(SimulationError::InvalidPackage);
         }
+        let behavior = match (definition.schema_version, definition.behavior.as_deref()) {
+            (1, None) => None,
+            (2, Some(steps)) => Some(steps),
+            _ => return Err(SimulationError::InvalidPackage),
+        };
         let rule = EffectRule {
             definition_version: definition.version,
             radius: definition.radius,
@@ -230,15 +315,31 @@ fn parse_interaction_rules(source: &str) -> Result<WorldInteractionRules, Simula
             definition.effect.as_str(),
             definition.required_capability.as_str(),
         ) {
-            ("feed", "attraction", "consume-food") if feed.replace(rule).is_none() => {}
-            ("boat", "threat", "avoid-threat") if boat.replace(rule).is_none() => {}
+            ("feed", "attraction", "consume-food") if feed.replace(rule).is_none() => {
+                feed_behavior = Some(match behavior {
+                    Some(steps) => compile_feed_behavior(steps)?,
+                    None => FeedBehavior::default(),
+                });
+            }
+            ("boat", "threat", "avoid-threat") if boat.replace(rule).is_none() => {
+                boat_behavior = Some(match behavior {
+                    Some(steps) => compile_boat_behavior(steps)?,
+                    None => BoatBehavior::default(),
+                });
+            }
             _ => return Err(SimulationError::InvalidPackage),
         }
     }
-    Ok(WorldInteractionRules {
+    let rules = WorldInteractionRules {
         feed: feed.ok_or(SimulationError::InvalidPackage)?,
         boat: boat.ok_or(SimulationError::InvalidPackage)?,
-    })
+        feed_behavior: feed_behavior.ok_or(SimulationError::InvalidPackage)?,
+        boat_behavior: boat_behavior.ok_or(SimulationError::InvalidPackage)?,
+    };
+    if !rules.valid(underwater_bounds()?) {
+        return Err(SimulationError::InvalidPackage);
+    }
+    Ok(rules)
 }
 
 #[derive(Deserialize)]
@@ -1149,7 +1250,7 @@ mod tests {
         let world = initial_world(Uuid::new_v4()).unwrap();
         let rules = world.interaction_rules();
         assert_eq!(rules.feed.radius, 4.0);
-        assert_eq!(rules.feed.definition_version, 1);
+        assert_eq!(rules.feed.definition_version, 2);
         assert_eq!(rules.feed.duration_ticks, 300);
         assert_eq!(rules.feed.max_active, 3);
         assert_eq!(rules.feed.cooldown_ticks, 10);
@@ -1157,6 +1258,8 @@ mod tests {
         assert_eq!(rules.boat.duration_ticks, 600);
         assert_eq!(rules.boat.cooldown_ticks, 200);
         assert!(rules.boat.priority > rules.feed.priority);
+        assert_eq!(rules.feed_behavior, FeedBehavior::default());
+        assert_eq!(rules.boat_behavior, BoatBehavior::default());
         assert_eq!(
             World::restore(world.checkpoint())
                 .unwrap()
@@ -1171,15 +1274,59 @@ mod tests {
             "../../../content/underwater/interactions.json"
         ))
         .unwrap();
-        package[0]["version"] = json!(2);
+        package[0]["version"] = json!(3);
         package[0]["radius"] = json!(4.5);
         package[0]["durationTicks"] = json!(120);
+        package[0]["behavior"][0]["maxCandidates"] = json!(1);
+        package[0]["behavior"][2]["depth"] = json!(-0.5);
         let rules = parse_interaction_rules(&package.to_string()).unwrap();
         let world = World::new_with_rules(underwater_bounds().unwrap(), 1, rules).unwrap();
-        assert_eq!(world.interaction_rules().feed.definition_version, 2);
+        assert_eq!(world.interaction_rules().feed.definition_version, 3);
         assert_eq!(world.interaction_rules().feed.radius, 4.5);
         assert_eq!(world.interaction_rules().feed.duration_ticks, 120);
+        assert_eq!(rules.feed_behavior.candidate_limit, 1);
+        let mut world = world;
+        world.spawn_fish(1, Point { x: -1.0, y: 0.0 }, 1.0).unwrap();
+        world.spawn_fish(2, Point { x: 2.0, y: 0.0 }, 1.0).unwrap();
+        world
+            .start_feed("00000000000000000000000000000001", Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        world.step();
+        assert!(world.fish()[0].feeding.is_some());
+        assert_eq!(world.fish()[0].depth_target, -0.5);
+        assert!(world.fish()[1].feeding.is_none());
         package[0]["effect"] = json!("threat");
+        assert!(parse_interaction_rules(&package.to_string()).is_err());
+    }
+
+    #[test]
+    fn behavior_v2_rejects_unsupported_or_unbounded_chains_and_accepts_v1() {
+        let mut package: Value = serde_json::from_str(include_str!(
+            "../../../content/underwater/interactions.json"
+        ))
+        .unwrap();
+        let original = package.clone();
+        package[0]["behavior"][1]["primitive"] = json!("flee");
+        assert!(parse_interaction_rules(&package.to_string()).is_err());
+        package = original.clone();
+        package[0]["behavior"][0]["maxCandidates"] = json!(101);
+        assert!(parse_interaction_rules(&package.to_string()).is_err());
+        package = original.clone();
+        package[1]["behavior"][1]["holdTicks"] = json!(121);
+        assert!(parse_interaction_rules(&package.to_string()).is_err());
+        package = original.clone();
+        package[0].as_object_mut().unwrap().remove("behavior");
+        assert!(parse_interaction_rules(&package.to_string()).is_err());
+        package = original.clone();
+        for definition in package.as_array_mut().unwrap() {
+            definition["schemaVersion"] = json!(1);
+            definition["version"] = json!(1);
+            definition.as_object_mut().unwrap().remove("behavior");
+        }
+        let legacy = parse_interaction_rules(&package.to_string()).unwrap();
+        assert_eq!(legacy.feed_behavior, FeedBehavior::default());
+        assert_eq!(legacy.boat_behavior, BoatBehavior::default());
+        package[0]["behavior"] = original[0]["behavior"].clone();
         assert!(parse_interaction_rules(&package.to_string()).is_err());
     }
 
