@@ -2218,6 +2218,7 @@ mod tests {
             world.fish()[0].ambient.as_ref(),
             Some(AmbientBehavior::Explore { .. })
         ));
+        let original_until = world.fish()[0].ambient.as_ref().unwrap().until_tick();
         let resting = world.fish()[0].position;
         let mut restored = World::restore(world.checkpoint()).unwrap();
         for _ in 0..10 {
@@ -2231,17 +2232,20 @@ mod tests {
             );
         }
         let mut moved_vertically = false;
+        let mut resumed = false;
         for _ in 0..280 {
             world.step();
             restored.step();
             assert_eq!(world.fish(), restored.fish());
             moved_vertically |= (world.fish()[0].position.y - resting.y).abs() > 0.3;
+            resumed |= world.tick >= original_until
+                && world.fish()[0]
+                    .ambient
+                    .as_ref()
+                    .is_none_or(|state| state.until_tick() != original_until);
         }
         assert!(moved_vertically);
-        assert!(!matches!(
-            world.fish()[0].ambient.as_ref(),
-            Some(AmbientBehavior::Explore { .. })
-        ));
+        assert!(resumed, "the original investigation must end and release its goal");
     }
 
     #[test]

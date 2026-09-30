@@ -1,42 +1,47 @@
 import assert from 'node:assert/strict';
-import { SWIM_LAP_SECONDS, swimPath } from '../prototypes/wasm-webgl/src/swim-path.ts';
+import { PreviewSwimWorld } from '../prototypes/wasm-webgl/src/swim-path.ts';
 
-const near = swimPath(0);
-const turningAway = swimPath(10);
-const far = swimPath(14);
-const turningBack = swimPath(22);
-const lapEnd = swimPath(SWIM_LAP_SECONDS);
-assert(near.depth < -1.3 && near.heading.x > .9);
-assert(turningAway.x > 4.5 && turningAway.headingDepth > .9);
-assert(far.depth > 1.3 && far.heading.x < -.9);
-assert(turningBack.x < -4.5 && turningBack.headingDepth < -.9);
-assert(Math.hypot(near.x - lapEnd.x, near.y - lapEnd.y,
-  near.depth - lapEnd.depth) < 1e-8, 'the lap must join without a position jump');
-
-const samples = Array.from({ length: SWIM_LAP_SECONDS * 20 }, (_, index) =>
-  swimPath(index / 20));
-for (const point of samples) {
-  assert(Math.abs(point.x) < 5 && Math.abs(point.y) < .6 && Math.abs(point.depth) <= 1.4);
-  assert(Math.abs(Math.hypot(point.heading.x, point.heading.y, point.headingDepth) - 1) < 1e-6);
+const world = new PreviewSwimWorld(12345);
+const replay = new PreviewSwimWorld(12345);
+const otherSeed = new PreviewSwimWorld(54321);
+const initial = world.positions();
+assert.equal(initial.length, 3);
+assert.equal(initial[0].id, 'local-preview-fish');
+const pace = new Map(initial.map(fish => [fish.id, []]));
+const seen = new Set();
+let paused = false;
+let differentSeeds = false;
+for (let tick = 0; tick < 3600; tick++) {
+  const before = world.positions();
+  const after = world.step();
+  assert.deepEqual(after, replay.step(), 'same preview seed must replay exactly');
+  const alternate = otherSeed.step();
+  differentSeeds ||= Math.abs(after[0].x - alternate[0].x) > .1;
+  for (const [index, fish] of after.entries()) {
+    seen.add(fish.mode);
+    assert(Math.abs(fish.x) <= 4.8 && Math.abs(fish.y) <= 3.3 &&
+      Math.abs(fish.depth) <= 1.3, `fish left the aquarium: ${JSON.stringify(fish)}`);
+    const motion = [fish.x - before[index].x, fish.y - before[index].y,
+      fish.depth - before[index].depth];
+    const speed = Math.hypot(...motion);
+    if (speed > .005) {
+      const head = [fish.heading.x, fish.heading.y, fish.headingDepth];
+      const dot = motion.reduce((total, value, part) => total + value * head[part], 0) / speed;
+      assert(dot > .99, `fish moved tail-first: ${JSON.stringify({ tick, fish, dot })}`);
+      pace.get(fish.id).push(speed);
+    }
+    paused ||= fish.mode === 'explore' && speed < 1e-6;
+  }
+  assert(Math.hypot(after[0].x - after[1].x, after[0].y - after[1].y,
+    after[0].depth - after[1].depth) > .01, 'fish must not share one path');
 }
-assert(samples.filter(point => Math.abs(point.heading.x) > .7).length > samples.length * .65,
-  'the fish should be seen mostly from its painted side');
-for (const second of [1, 2, 3, 4, 5, 6]) {
-  const point = swimPath(second);
-  assert(point.depth === near.depth && point.heading.x > .99,
-    `the near pass must have an unambiguous rightward course at ${second}s`);
+assert(differentSeeds, 'different drawings must not repeat an identical route');
+assert(paused, 'a fish should sometimes stop before investigating');
+for (const mode of ['cruise', 'explore', 'approach', 'startled'])
+  assert(seen.has(mode), `behavior ${mode} never appeared`);
+for (const [id, samples] of pace) {
+  assert(Math.max(...samples) > Math.min(...samples) * 1.6,
+    `${id} never slowed or accelerated`);
 }
-for (const second of [13, 14, 15, 16, 17, 18]) {
-  const point = swimPath(second);
-  assert(point.depth === far.depth && point.heading.x < -.99,
-    `the far pass must have an unambiguous leftward course at ${second}s`);
-}
-for (let index = 0; index < samples.length; index++) {
-  const from = samples[index];
-  const to = swimPath((index + 1) / 20);
-  const travel = [to.x - from.x, to.y - from.y, to.depth - from.depth];
-  const dot = from.heading.x * travel[0] + from.heading.y * travel[1] +
-    from.headingDepth * travel[2];
-  assert(dot > 0, `fish moves tail-first at sample ${index}`);
-}
-console.log('Swimming path: straight near/far passes, depth turns, continuous head-first 3D lap — PASS');
+assert.notDeepEqual(world.positions()[0], initial[0], 'the demonstration must not loop');
+console.log('Preview behavior: distinct paths, changing pace, investigation, social reaction, head-first motion — PASS');
