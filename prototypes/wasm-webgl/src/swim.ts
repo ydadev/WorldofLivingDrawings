@@ -16,7 +16,7 @@ let generation = 0;
 let swimTimer: number | undefined;
 let simulationTick = 0;
 
-const adapter = new BabylonRendererAdapter(canvas, '/fish/', () => paintUrl ?? '');
+const adapter = new BabylonRendererAdapter(canvas, '/fish/', () => paintUrl ?? '', 50);
 adapter.setWorld(world);
 
 function stopSwim(): void {
@@ -57,9 +57,8 @@ async function showDraft(draft: PaintDraft): Promise<void> {
   adapter.applySnapshot(snapshot);
   if (previousUrl) window.setTimeout(() => URL.revokeObjectURL(previousUrl), 1000);
   const move = () => {
-    let positions = preview.positions();
-    for (let step = 0; step < 10; step++) positions = preview.step();
-    simulationTick += 10;
+    const positions = preview.step();
+    simulationTick++;
     const frame: ScenePositions = { type: 'positions', schemaVersion: 1,
       sceneId: 'local-preview', sceneEpoch: current, revision: 0,
       simulationTick,
@@ -69,7 +68,7 @@ async function showDraft(draft: PaintDraft): Promise<void> {
     adapter.applyPositions(frame);
   };
   move();
-  swimTimer = window.setInterval(move, 500);
+  swimTimer = window.setInterval(move, 50);
   status.textContent = 'Раскрашенная рыбка плавает среди двух соседей. Они выбирают разные цели и темп, иногда исследуют поверхность или дно и реагируют на сближение. Это локальный просмотр; в общем мире решения принимает сервер.';
 }
 

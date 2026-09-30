@@ -7,10 +7,12 @@ type Mode = PreviewPose['mode'];
 type FishState = { id: string; index: number; position: Point3; target: Point3;
   resume?: Point3; heading: Point3; baseSpeed: number; mode: Mode;
   untilTick: number; restUntilTick: number; nextExploreTick: number;
-  peer?: string; generation: number };
+  peer?: string; generation: number; nextWanderTick: number };
 
 const TICKS_PER_SECOND = 20;
 const limits = { x: 4.8, y: 3.3, depth: 1.3 };
+const BODY_HALF_LENGTH = 1.05;
+const BODY_CLEARANCE = .88;
 
 function distance(a: Point3, b: Point3): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.depth - b.depth);
@@ -24,6 +26,43 @@ function normalize(point: Point3): Point3 {
 
 function angleDifference(from: number, to: number): number {
   return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+}
+
+function dot(a: Point3, b: Point3): number {
+  return a.x * b.x + a.y * b.y + a.depth * b.depth;
+}
+
+function subtract(a: Point3, b: Point3): Point3 {
+  return { x: a.x - b.x, y: a.y - b.y, depth: a.depth - b.depth };
+}
+
+function bodyEndpoints(position: Point3, heading: Point3): [Point3, Point3] {
+  const forward = normalize({ x: heading.x, y: 0, depth: heading.depth });
+  const axis = { x: forward.x * BODY_HALF_LENGTH, y: 0,
+    depth: forward.depth * BODY_HALF_LENGTH };
+  return [subtract(position, axis), { x: position.x + axis.x,
+    y: position.y, depth: position.depth + axis.depth }];
+}
+
+// Distance between two oriented body axes, minus their combined thickness.
+// A slightly negative gap represents the rare gentle contact; it must not grow.
+export function bodyGap(position: Point3, heading: Point3,
+  otherPosition: Point3, otherHeading: Point3): number {
+  const [a, b] = bodyEndpoints(position, heading);
+  const [c, d] = bodyEndpoints(otherPosition, otherHeading);
+  const u = subtract(b, a), v = subtract(d, c), w = subtract(a, c);
+  const aa = dot(u, u), bb = dot(u, v), cc = dot(v, v);
+  const dd = dot(u, w), ee = dot(v, w);
+  const denominator = aa * cc - bb * bb;
+  let s = denominator > 1e-8 ? Math.max(0, Math.min(1,
+    (bb * ee - cc * dd) / denominator)) : 0;
+  let t = Math.max(0, Math.min(1, (bb * s + ee) / cc));
+  s = Math.max(0, Math.min(1, (bb * t - dd) / aa));
+  t = Math.max(0, Math.min(1, (bb * s + ee) / cc));
+  const closest = { x: w.x + u.x * s - v.x * t,
+    y: w.y + u.y * s - v.y * t,
+    depth: w.depth + u.depth * s - v.depth * t };
+  return Math.hypot(closest.x, closest.y, closest.depth) - BODY_CLEARANCE;
 }
 
 export class PreviewSwimWorld {
@@ -44,7 +83,7 @@ export class PreviewSwimWorld {
       heading: { x: index === 1 ? -1 : 1, y: 0, depth: 0 },
       baseSpeed: [.95, .72, 1.15][index], mode: 'cruise', untilTick: 0,
       restUntilTick: 0, nextExploreTick: 160 + index * 90,
-      generation: 0 }));
+      generation: 0, nextWanderTick: 220 + index * 75 }));
   }
 
   private random(index: number, salt: number): number {
@@ -60,9 +99,10 @@ export class PreviewSwimWorld {
 
   private randomTarget(index: number, generation: number): Point3 {
     const salt = generation * 3;
+    const far = (generation + index) % 2 === 0;
     return { x: -4.1 + this.random(index, salt) * 8.2,
       y: -2.6 + this.random(index, salt + 1) * 5.2,
-      depth: -1.05 + this.random(index, salt + 2) * 2.1 };
+      depth: (far ? 1 : -1) * (.65 + this.random(index, salt + 2) * .55) };
   }
 
   private resume(fish: FishState): void {
@@ -112,8 +152,12 @@ export class PreviewSwimWorld {
       if (!peer || peer.mode !== 'cruise') { this.resume(fish); return; }
       fish.target = peer.position;
     }
-    if (fish.mode === 'cruise' && distance(fish.position, fish.target) < .3)
+    if (fish.mode === 'cruise' && (distance(fish.position, fish.target) < .3 ||
+        this.tick >= fish.nextWanderTick)) {
       fish.target = this.randomTarget(fish.index, ++fish.generation);
+      fish.nextWanderTick = this.tick + 180 +
+        Math.floor(this.random(fish.index, fish.generation + 3000) * 160);
+    }
     const delta = { x: fish.target.x - fish.position.x,
       y: fish.target.y - fish.position.y,
       depth: fish.target.depth - fish.position.depth };
@@ -141,12 +185,47 @@ export class PreviewSwimWorld {
       fish.position.depth + direction.depth * step)) };
     const actual = { x: next.x - fish.position.x, y: next.y - fish.position.y,
       depth: next.depth - fish.position.depth };
-    if (Math.hypot(actual.x, actual.y, actual.depth) > 1e-5) fish.heading = normalize(actual);
+    const actualLength = Math.hypot(actual.x, actual.y, actual.depth);
+    const nextHeading = actualLength > 1e-5 ? normalize(actual) : fish.heading;
+    if (actualLength > 1e-5) fish.heading =
+      Math.hypot(actual.x, actual.depth) > .01 ? nextHeading :
+        { ...fish.heading, y: nextHeading.y };
     fish.position = next;
+  }
+
+  private separateBodies(previous: Point3[]): void {
+    for (let pass = 0; pass < 8; pass++) {
+      let changed = false;
+      for (let left = 0; left < this.fish.length; left++) for (let right = left + 1;
+        right < this.fish.length; right++) {
+        const a = this.fish[left], b = this.fish[right];
+        const gap = bodyGap(a.position, a.heading, b.position, b.heading);
+        if (gap >= -.08) continue;
+        const sign = a.position.y >= b.position.y ? 1 : -1;
+        const roomA = sign > 0 ? limits.y - a.position.y : a.position.y + limits.y;
+        const roomB = sign > 0 ? b.position.y + limits.y : limits.y - b.position.y;
+        const needed = Math.min(.2, -.08 - gap);
+        const moveA = Math.min(roomA, needed / 2);
+        const moveB = Math.min(roomB, needed - moveA);
+        a.position = { ...a.position, y: a.position.y + sign * moveA };
+        b.position = { ...b.position, y: b.position.y - sign * moveB };
+        changed = true;
+      }
+      if (!changed) break;
+    }
+    for (const [index, fish] of this.fish.entries()) {
+      const motion = subtract(fish.position, previous[index]);
+      if (Math.hypot(motion.x, motion.y, motion.depth) > 1e-5) {
+        const nextHeading = normalize(motion);
+        fish.heading = Math.hypot(motion.x, motion.depth) > .01 ? nextHeading :
+          { ...fish.heading, y: nextHeading.y };
+      }
+    }
   }
 
   step(): PreviewPose[] {
     this.tick++;
+    const previous = this.fish.map(fish => ({ ...fish.position }));
     for (const fish of this.fish) {
       if (fish.mode !== 'cruise' && fish.untilTick <= this.tick) this.resume(fish);
     }
@@ -158,11 +237,13 @@ export class PreviewSwimWorld {
           !pursued.has(fish.id)) this.startExploration(fish);
       this.move(fish);
     }
+    this.separateBodies(previous);
     for (const fish of this.fish) {
       if (fish.mode !== 'approach') continue;
       const peer = this.fish.find(other => other.id === fish.peer);
       if (!peer || peer.mode !== 'cruise') { this.resume(fish); continue; }
-      if (distance(fish.position, peer.position) > .82) continue;
+      if (bodyGap(fish.position, fish.heading,
+        peer.position, peer.heading) > .3) continue;
       this.resume(fish);
       peer.mode = 'startled';
       peer.untilTick = this.tick + 65;

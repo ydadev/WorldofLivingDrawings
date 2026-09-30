@@ -63,7 +63,10 @@ export class BabylonRendererAdapter implements RendererAdapter {
 
   constructor(private readonly canvas: HTMLCanvasElement,
     private readonly assetBaseUrl = '/content/underwater/assets/',
-    private readonly paintUrl: (blobId: string) => string = id => `/api/paint/${encodeURIComponent(id)}`) {
+    private readonly paintUrl: (blobId: string) => string = id => `/api/paint/${encodeURIComponent(id)}`,
+    private readonly fishFrameDurationMs = 500) {
+    if (!Number.isFinite(fishFrameDurationMs) || fishFrameDurationMs < 50 ||
+        fishFrameDurationMs > 1000) throw new Error('INVALID_FRAME_DURATION');
     this.engine = new Engine(canvas, true);
     this.scene = new Scene(this.engine);
     this.scene.clearColor = new Color4(.03, .15, .23, 1);
@@ -400,7 +403,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
     for (const [id, move] of this.movement) {
       const marker = this.markers.get(id);
       if (!marker) { this.movement.delete(id); continue; }
-      const progress = Math.min(1, (now - move.started) / 500);
+      const progress = Math.min(1, (now - move.started) / this.fishFrameDurationMs);
       marker.position.x = move.from.x + (move.to.x - move.from.x) * progress;
       marker.position.y = move.from.y + (move.to.y - move.from.y) * progress;
       marker.position.z = move.from.depth + (move.to.depth - move.from.depth) * progress;
