@@ -818,6 +818,21 @@ impl World {
         Ok(())
     }
 
+    /// Remove one participant while preserving the world's logical clock and
+    /// active action resources. The returned position and capabilities can be
+    /// used for an explicit restore, which starts with fresh behavior state.
+    pub fn remove_fish(&mut self, id: u128) -> Result<Fish, SimError> {
+        let index = self
+            .fish
+            .iter()
+            .position(|fish| fish.id == id)
+            .ok_or(SimError::UnknownFish)?;
+        // A source's fed_fish is consumed-portion history, not an assignment.
+        // Keep it so restoring the same fish during that source cannot eat a
+        // second portion. Current feeding/fleeing assignments leave with Fish.
+        Ok(self.fish.remove(index))
+    }
+
     pub fn set_target(&mut self, id: u128, target: Point) -> Result<(), SimError> {
         if !target.x.is_finite()
             || !target.y.is_finite()
@@ -1993,6 +2008,89 @@ mod tests {
         }
         assert!(world.feed_sources().is_empty());
         assert!(world.fish().iter().all(|fish| fish.feeding.is_none()));
+    }
+
+    #[test]
+    fn removed_fish_leaves_valid_active_actions_and_cannot_eat_twice_after_restore() {
+        let mut world = World::new(bounds(), 31).unwrap();
+        let fish_key = 0xab;
+        world
+            .spawn_fish(fish_key, Point { x: -1.0, y: 0.0 }, 1.2)
+            .unwrap();
+        let feed_id = "000000000000000000000000000000ab";
+        world.start_feed(feed_id, Point { x: 0.0, y: 0.0 }).unwrap();
+        for _ in 0..150 {
+            world.step();
+            if world.feed_sources()[0].fed_fish.contains(&fish_id(fish_key)) {
+                break;
+            }
+        }
+        assert_eq!(world.feed_sources()[0].remaining, 9);
+        let removed = world.remove_fish(fish_key).unwrap();
+        assert_eq!(removed.id, fish_key);
+        assert_eq!(world.remove_fish(fish_key), Err(SimError::UnknownFish));
+        let mut restored = World::restore(world.checkpoint()).unwrap();
+        assert!(restored.fish().is_empty());
+        assert_eq!(restored.feed_sources()[0].remaining, 9);
+        restored
+            .spawn_fish_with_capabilities(
+                removed.id,
+                removed.position,
+                removed.speed,
+                removed.capabilities,
+            )
+            .unwrap();
+        assert!(restored.fish()[0].feeding.is_none());
+        assert!(!restored.fish()[0].fleeing);
+        for _ in 0..20 {
+            restored.step();
+        }
+        assert_eq!(restored.feed_sources()[0].remaining, 9);
+        for _ in 0..280 {
+            restored.step();
+        }
+        assert!(restored.feed_sources().is_empty());
+        assert_eq!(restored.fish().len(), 1);
+    }
+
+    #[test]
+    fn removing_fish_during_boat_preserves_checkpoint_and_reuse_obeys_capacity() {
+        let mut world = World::new(bounds(), 44).unwrap();
+        for id in 1..=MAX_FISH as u128 {
+            world.spawn_fish(id, Point { x: 0.0, y: 0.0 }, 1.2).unwrap();
+        }
+        let boat_id = "000000000000000000000000000000bc";
+        world.start_boat(boat_id, Point { x: 0.0, y: 0.0 }).unwrap();
+        for _ in 0..10 {
+            world.step();
+        }
+        let removed = world.remove_fish(1).unwrap();
+        assert_eq!(world.fish().len(), MAX_FISH - 1);
+        let mut restored = World::restore(world.checkpoint()).unwrap();
+        assert!(restored.boat().is_some());
+        restored
+            .spawn_fish(101, Point { x: 0.0, y: 0.0 }, 1.2)
+            .unwrap();
+        assert_eq!(
+            restored.spawn_fish_with_capabilities(
+                removed.id,
+                removed.position,
+                removed.speed,
+                removed.capabilities,
+            ),
+            Err(SimError::FishLimit)
+        );
+        restored.remove_fish(101).unwrap();
+        restored
+            .spawn_fish_with_capabilities(
+                removed.id,
+                removed.position,
+                removed.speed,
+                removed.capabilities,
+            )
+            .unwrap();
+        assert_eq!(restored.fish().len(), MAX_FISH);
+        assert!(World::restore(restored.checkpoint()).is_ok());
     }
 
     #[test]

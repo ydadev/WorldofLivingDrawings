@@ -609,3 +609,7 @@ Owner может закрыть окно PIN/QR отдельным DELETE с Ori
 Первый Ubuntu CI для `1daecff` остановился на формате новых Rust-строк; миграция и тесты не запускались. Diff `rustfmt` применён без смены поведения. Повторный CI — NOT_RUN до push.
 
 Для `6a1eb73` [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36667524993) — PASS: миграция, серверные и конкурентные тесты, браузер с реальным сервером и потерянным ответом. [Browser risk probes](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36667347943) первого коммита и [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36667524944) исправленного коммита — PASS. MVP-04-UPLOAD-ID закрыта как программная часть; реальные устройства не проверялись.
+
+## 2026-09-30 — основа корзины рыбок (MVP-04-TRASH-CORE)
+
+Открыт [черновой PR #4](https://github.com/ydadev/WorldofLivingDrawings/pull/4) для идемпотентного создания uploadIntent. Следующая независимая часть MVP-04 — удаление рыбы из детерминированного состояния мира. Без этого нельзя безопасно фиксировать корзину и восстановление: Entity присутствует и в серверном checkpoint, а во время корма/лодки имеет временные назначения. MVP-04-TRASH-CORE переведена в `IN_PROGRESS`; проверки — NOT_RUN.
