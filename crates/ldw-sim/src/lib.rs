@@ -2021,7 +2021,10 @@ mod tests {
         world.start_feed(feed_id, Point { x: 0.0, y: 0.0 }).unwrap();
         for _ in 0..150 {
             world.step();
-            if world.feed_sources()[0].fed_fish.contains(&fish_id(fish_key)) {
+            if world.feed_sources()[0]
+                .fed_fish
+                .contains(&fish_id(fish_key))
+            {
                 break;
             }
         }
