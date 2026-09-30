@@ -176,8 +176,9 @@ async function writeDraft(): Promise<boolean> {
       layoutHash: doc.layout.contentHash, modelId: `fish/${doc.layout.templateId}.glb`, image }, draftRevision);
     draftRevision = saved.revision;
     savedNumber = snapshotNumber;
-    if (savedNumber === editNumber) draftMessage('Сохранено. Черновик хранится на этом устройстве.', 'saved');
     await refreshDrafts(saved.id);
+    if (savedNumber === editNumber && draftStatus.dataset.state !== 'error')
+      draftMessage('Сохранено. Черновик хранится на этом устройстве.', 'saved');
     return true;
   } catch (error) {
     const code = error instanceof DraftError ? error.code : 'unavailable';
