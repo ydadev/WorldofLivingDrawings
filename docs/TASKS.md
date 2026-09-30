@@ -75,3 +75,5 @@ INFRA-05, INFRA-06 и RISK-TV не блокируют локальный тех�
 Актуализация MVP-03-DATA от 2026-09-30: серверный каталог и дополнительный ID прошли [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36660154008). Следующий критерий — сквозной v2 WebSocket snapshot/delta и браузерный цикл; статус `IN_PROGRESS`.
 
 Сквозной v2 WebSocket-тест реализован: реальный Owner получает snapshot с каталогом, посылает `feed-slow` и принимает delta с исходным ID. PostgreSQL/Ubuntu CI — `NOT_RUN` до push. MVP-03-DATA остаётся `IN_PROGRESS` до проверки CI и аудита критерия.
+
+Для `72bcecb` [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36662669839) — PASS. Тест усилен: новый ID теперь поступает из валидного JSON-пакета через рабочий парсер сцены, затем проверяется WebSocket. Новый вариант — `NOT_RUN` до CI; MVP-03-DATA остаётся `IN_PROGRESS`.

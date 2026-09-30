@@ -575,3 +575,7 @@ Transport принимает snapshot/delta v1 или v2, хранит верс�
 ## 2026-09-30 — публичный v2-каталог через WebSocket
 
 PostgreSQL-тест frozen-каталога расширен до настоящего WebSocket: Owner проходит hello/CSRF, получает snapshot v2 с `feed-slow`, отправляет команду с новым ID, получает ack и delta v2 с исходным ID. Проверка dedup, общих лимитов, неизвестного ID и отмены сохранена. `cargo fmt --all`, 21 тест `ldw-sim`, `git diff --check` — PASS локально. Новый PostgreSQL/WebSocket-тест на Windows — NOT_RUN из-за отсутствующего `dlltool.exe`; Ubuntu CI — NOT_RUN до push.
+
+Для `b0b3644` [Browser risk probes](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36662420630) и [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36662420659) — PASS. Новый тест полного 3D-круга рыбки прошёл Chrome CI. Для `72bcecb` [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36662669839) и [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36662669882) — PASS: настоящий WebSocket передал v2 snapshot и delta с дополнительным ID.
+
+Проверка §5.4 усилена: тест теперь формирует третье определение в JSON-пакете, пропускает его через тот же парсер, что используется при создании сцены, замораживает полученный checkpoint и только затем выполняет WebSocket-сценарий. Это убирает ручное конструирование ActionDefinition внутри теста. `cargo fmt --all -- --check` и `git diff --check` — PASS локально; обновлённый PostgreSQL/WebSocket-тест — NOT_RUN до Ubuntu CI.

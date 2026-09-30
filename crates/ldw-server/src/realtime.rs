@@ -984,16 +984,23 @@ mod rule_tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let mut initial: WorldCheckpoint =
+        let frozen: WorldCheckpoint =
             serde_json::from_value(stored.get("initialSimulation").cloned().unwrap()).unwrap();
-        assert_eq!(initial.action_definitions.len(), 2);
-        let mut extra = initial.action_definitions[0].clone();
-        extra.id = "feed-slow".into();
-        extra.label = "Медленный корм".into();
-        extra.rule.cooldown_ticks = 40;
-        extra.feed_behavior.as_mut().unwrap().target_depth = -0.8;
-        initial.action_definitions.push(extra);
-        World::restore(initial.clone()).unwrap();
+        assert_eq!(frozen.action_definitions.len(), 2);
+        let mut package: Value = serde_json::from_str(include_str!(
+            "../../../content/underwater/interactions.json"
+        ))
+        .unwrap();
+        let mut extra = package[0].clone();
+        extra["id"] = json!("feed-slow");
+        extra["label"] = json!("Медленный корм");
+        extra["cooldownTicks"] = json!(40);
+        extra["behavior"][2]["depth"] = json!(-0.8);
+        package.as_array_mut().unwrap().push(extra);
+        let initial = simulation::initial_world_with_package(ids.scene_id, &package.to_string())
+            .unwrap()
+            .checkpoint();
+        assert_eq!(initial.action_definitions[2].id, "feed-slow");
         sqlx::query("UPDATE scenes SET state = $1::jsonb WHERE id = $2")
             .bind(json!({"initialSimulation":initial}))
             .bind(ids.scene_id)

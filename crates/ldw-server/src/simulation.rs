@@ -276,12 +276,6 @@ fn compile_boat_behavior(steps: &[PackageBehaviorStep]) -> Result<BoatBehavior, 
     })
 }
 
-fn underwater_interaction_package() -> Result<InteractionPackage, SimulationError> {
-    parse_interaction_package(include_str!(
-        "../../../content/underwater/interactions.json"
-    ))
-}
-
 struct InteractionPackage {
     rules: WorldInteractionRules,
     catalog: Vec<ActionDefinition>,
@@ -469,9 +463,19 @@ fn underwater_fish_definition(id: &str) -> Result<FishDefinition, SimulationErro
 }
 
 pub(crate) fn initial_world(scene_id: Uuid) -> Result<World, SimulationError> {
+    initial_world_with_package(
+        scene_id,
+        include_str!("../../../content/underwater/interactions.json"),
+    )
+}
+
+pub(crate) fn initial_world_with_package(
+    scene_id: Uuid,
+    interactions: &str,
+) -> Result<World, SimulationError> {
     underwater_entity_definitions()?;
     let seed = (scene_id.as_u128() as u64) ^ ((scene_id.as_u128() >> 64) as u64);
-    let package = underwater_interaction_package()?;
+    let package = parse_interaction_package(interactions)?;
     World::new_with_catalog(underwater_bounds()?, seed, package.rules, package.catalog)
         .map_err(|_| SimulationError::InvalidPackage)
 }
