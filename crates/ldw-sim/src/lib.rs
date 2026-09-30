@@ -1468,7 +1468,7 @@ impl World {
                 } else {
                     1.0
                 };
-                let weight = ((1.1 - gap) * 1.8).clamp(0.0, 2.2);
+                let weight = ((1.1 - gap) * 0.8).clamp(0.0, 0.9);
                 let x = desired.x + side.x * sign * weight;
                 let y = desired.y + side.y * sign * weight;
                 let length = x.hypot(y);
