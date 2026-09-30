@@ -39,6 +39,7 @@ interface Publication {
   paint: PaintResult;
   point: Point2;
   scene: SceneInfo;
+  requestId: string;
   intentId?: string;
 }
 let readyPaint: PaintResult | null = null;
@@ -171,6 +172,7 @@ async function savePublication(): Promise<void> {
       if (scene.scene_id !== attempt.scene.scene_id || scene.scene_epoch !== attempt.scene.scene_epoch)
         throw new Error('STALE_SCENE');
       const created = await request<{ intentId: string }>(`${sessionPath()}/upload-intents`, 'POST', {
+        requestId: attempt.requestId,
         sceneEpoch: scene.scene_epoch,
         definitionId: attempt.paint.templateId === 'coral' ? 'coral-fish' : 'stream-fish',
         templateId: attempt.paint.templateId,
@@ -197,7 +199,7 @@ async function savePublication(): Promise<void> {
     completePublication();
   } catch (error) {
     const code = error instanceof Error ? error.message : 'UNKNOWN_ERROR';
-    if (['STALE_SCENE', 'UPLOAD_INTENT_EXPIRED', 'SCENE_FULL', 'PAINT_TOO_LARGE',
+    if (['STALE_SCENE', 'UPLOAD_INTENT_EXPIRED', 'SCENE_FULL', 'COMMAND_CONFLICT', 'PAINT_TOO_LARGE',
       'INVALID_PAINT_IMAGE', 'INVALID_PAINT_RESULT', 'ACCESS_DENIED'].includes(code)) {
       publication = null;
       if (code === 'STALE_SCENE' || code === 'UPLOAD_INTENT_EXPIRED') {
@@ -206,6 +208,7 @@ async function savePublication(): Promise<void> {
     }
     const message: Record<string, string> = {
       STALE_SCENE: 'Мир изменился. Рисунок сохранён на этом экране; выберите место заново.',
+      COMMAND_CONFLICT: 'Запрос рисунка изменился. Выберите место заново.',
       UPLOAD_INTENT_EXPIRED: 'Время загрузки истекло. Рисунок остался здесь; выберите место заново.',
       SCENE_FULL: 'В этом мире уже 100 рыбок. Рисунок остался в редакторе.',
       SIMULATED_SESSION_LIMIT: 'Уже работают три мира. Рисунок остался в редакторе; повторите, когда освободится место.',
@@ -239,7 +242,7 @@ function placeFish(point: Point2): void {
     });
     return;
   }
-  publication = { paint: readyPaint, scene: preparedScene, point };
+  publication = { paint: readyPaint, scene: preparedScene, point, requestId: crypto.randomUUID() };
   controlsForPublication();
   void savePublication();
 }

@@ -4,6 +4,7 @@
 use ldw_sim::Point;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -17,6 +18,7 @@ use crate::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadIntentRequest {
+    pub request_id: Uuid,
     pub scene_epoch: i64,
     pub definition_id: String,
     pub template_id: String,
@@ -55,6 +57,8 @@ pub enum UploadError {
     InvalidExpiry,
     #[error("uploaded image conflicts with the frozen drawing")]
     Conflict,
+    #[error("request ID was used for a different upload intent")]
+    CommandConflict,
     #[error("invalid persisted scene state")]
     InvalidScene,
     #[error("database operation failed: {0}")]
@@ -127,22 +131,13 @@ pub async fn create_upload_intent(
     if kind == GrantKind::Viewer {
         return Err(UploadError::Forbidden);
     }
-    if !valid_template(input)
-        || access.scene.world_id != "underwater"
-        || access.scene.world_version != 1
-    {
+    if input.request_id.is_nil() {
         return Err(UploadError::InvalidPaint);
     }
-    if input.scene_epoch != access.scene.scene_epoch {
-        return Err(UploadError::StaleScene);
-    }
-    let intent_id = Uuid::new_v4();
-    let fish_id = Uuid::new_v4();
-    let mut probe =
-        simulation::initial_world(access.scene.scene_id).map_err(|_| UploadError::InvalidScene)?;
-    probe
-        .spawn_fish(fish_id.as_u128(), input.position, 1.2)
-        .map_err(|_| UploadError::InvalidPaint)?;
+    let request_hash = Sha256::digest(
+        serde_json::to_vec(input).map_err(|_| UploadError::InvalidPaint)?,
+    )
+    .to_vec();
 
     let mut tx = pool.begin().await?;
     // Every competing publication or reservation locks the scene; the session
@@ -159,6 +154,39 @@ pub async fn create_upload_intent(
     let Some((epoch, world_id, version, state, status, active_scene)) = row else {
         return Err(UploadError::StaleScene);
     };
+    let principal = principal_id(&mut tx, kind, access).await?;
+    let principal_kind = if kind == GrantKind::Owner {
+        "owner"
+    } else {
+        "controller"
+    };
+    let previous: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, request_hash FROM upload_intents \
+         WHERE session_id = $1 AND principal_kind = $2 AND principal_id = $3 AND request_id = $4",
+    )
+    .bind(access.scene.session_id)
+    .bind(principal_kind)
+    .bind(principal)
+    .bind(input.request_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((intent_id, old_hash)) = previous {
+        return if old_hash == request_hash {
+            Ok(UploadIntentResponse {
+                intent_id,
+                expires_in_seconds: 600,
+                reservation_seconds: 120,
+            })
+        } else {
+            Err(UploadError::CommandConflict)
+        };
+    }
+    if !valid_template(input)
+        || access.scene.world_id != "underwater"
+        || access.scene.world_version != 1
+    {
+        return Err(UploadError::InvalidPaint);
+    }
     if epoch != input.scene_epoch
         || world_id != "underwater"
         || version != 1
@@ -167,7 +195,13 @@ pub async fn create_upload_intent(
     {
         return Err(UploadError::StaleScene);
     }
-    let principal = principal_id(&mut tx, kind, access).await?;
+    let intent_id = Uuid::new_v4();
+    let fish_id = Uuid::new_v4();
+    let mut probe =
+        simulation::initial_world(access.scene.scene_id).map_err(|_| UploadError::InvalidScene)?;
+    probe
+        .spawn_fish(fish_id.as_u128(), input.position, 1.2)
+        .map_err(|_| UploadError::InvalidPaint)?;
     let entity_count = match state.get("entities") {
         None => 0,
         Some(Value::Array(items)) => items.len(),
@@ -197,22 +231,20 @@ pub async fn create_upload_intent(
     }
     sqlx::query(
         "INSERT INTO upload_intents \
-         (id, session_id, scene_id, scene_epoch, principal_kind, principal_id, fish_id, \
+         (id, session_id, scene_id, scene_epoch, principal_kind, principal_id, request_id, request_hash, fish_id, \
           definition_id, template_id, template_version, layout_hash, source_kind, \
           position_x, position_y, reservation_until, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, \
                  now() + interval '2 minutes', now() + interval '10 minutes')",
     )
     .bind(intent_id)
     .bind(access.scene.session_id)
     .bind(access.scene.scene_id)
     .bind(epoch)
-    .bind(if kind == GrantKind::Owner {
-        "owner"
-    } else {
-        "controller"
-    })
+    .bind(principal_kind)
     .bind(principal)
+    .bind(input.request_id)
+    .bind(request_hash)
     .bind(fish_id)
     .bind(&input.definition_id)
     .bind(&input.template_id)
@@ -668,6 +700,7 @@ mod tests {
         ))
         .unwrap();
         UploadIntentRequest {
+            request_id: Uuid::new_v4(),
             scene_epoch: epoch,
             definition_id: "coral-fish".into(),
             template_id: "coral".into(),
@@ -785,6 +818,36 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+        let replay = app
+            .clone()
+            .oneshot(http_request(
+                "https://example.test",
+                &owner.csrf,
+                &owner_cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        let replay_body: Value =
+            serde_json::from_slice(&to_bytes(replay.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(replay_body["intentId"], intent_id.to_string());
+        let mut changed_body = payload.clone();
+        changed_body.position.x = 0.5;
+        let conflicting_request = Request::builder()
+            .method("POST")
+            .uri(&url)
+            .header(header::ORIGIN, "https://example.test")
+            .header("x-csrf-token", &owner.csrf)
+            .header(header::COOKIE, &owner_cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&changed_body).unwrap()))
+            .unwrap();
+        let conflicting = app.clone().oneshot(conflicting_request).await.unwrap();
+        assert_eq!(conflicting.status(), StatusCode::CONFLICT);
+        let conflict_body: Value =
+            serde_json::from_slice(&to_bytes(conflicting.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(conflict_body["error"], "COMMAND_CONFLICT");
         let image_url = format!(
             "/api/sessions/{}/upload-intents/{intent_id}/paint",
             scene.session_id
@@ -996,18 +1059,21 @@ mod tests {
         ));
 
         let mut stale = payload.clone();
+        stale.request_id = Uuid::new_v4();
         stale.scene_epoch += 1;
         assert!(matches!(
             create_upload_intent(&pool, GrantKind::Owner, &access, &stale).await,
             Err(UploadError::StaleScene)
         ));
         let mut bad = payload.clone();
+        bad.request_id = Uuid::new_v4();
         bad.layout_hash = "0".repeat(64);
         assert!(matches!(
             create_upload_intent(&pool, GrantKind::Owner, &access, &bad).await,
             Err(UploadError::InvalidPaint)
         ));
         let mut bad = payload.clone();
+        bad.request_id = Uuid::new_v4();
         bad.position.x = 20.0;
         assert!(matches!(
             create_upload_intent(&pool, GrantKind::Owner, &access, &bad).await,
@@ -1031,22 +1097,35 @@ mod tests {
             .scene_access(GrantKind::Controller, &controller.token, scene.session_id)
             .await
             .unwrap();
-        create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload)
+        let controller_intent = create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload)
             .await
             .unwrap();
+        assert_ne!(controller_intent.intent_id, intent_id,
+            "same request ID belongs to each principal separately");
+        assert_eq!(
+            create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload)
+                .await
+                .unwrap()
+                .intent_id,
+            controller_intent.intent_id
+        );
         assert!(matches!(
-            create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload).await,
+            create_upload_intent(&pool, GrantKind::Controller, &controller_access,
+                &request(access.scene.scene_epoch)).await,
             Err(UploadError::IntentLimit)
         ));
 
         for _ in 0..7 {
-            create_upload_intent(&pool, GrantKind::Owner, &access, &payload)
+            create_upload_intent(&pool, GrantKind::Owner, &access,
+                &request(access.scene.scene_epoch))
                 .await
                 .unwrap();
         }
+        let last_left = request(access.scene.scene_epoch);
+        let last_right = request(access.scene.scene_epoch);
         let (left, right) = tokio::join!(
-            create_upload_intent(&pool, GrantKind::Owner, &access, &payload),
-            create_upload_intent(&pool, GrantKind::Owner, &access, &payload),
+            create_upload_intent(&pool, GrantKind::Owner, &access, &last_left),
+            create_upload_intent(&pool, GrantKind::Owner, &access, &last_right),
         );
         assert_eq!(left.is_ok() as u8 + right.is_ok() as u8, 1);
         let reserved: i64 = sqlx::query_scalar(
@@ -1065,9 +1144,13 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        create_upload_intent(&pool, GrantKind::Owner, &access, &payload)
-            .await
-            .expect("expired reservation frees a scene slot");
+        let repeat_after_expiry = request(access.scene.scene_epoch);
+        let (left, right) = tokio::join!(
+            create_upload_intent(&pool, GrantKind::Owner, &access, &repeat_after_expiry),
+            create_upload_intent(&pool, GrantKind::Owner, &access, &repeat_after_expiry),
+        );
+        assert_eq!(left.unwrap().intent_id, right.unwrap().intent_id,
+            "concurrent retries reserve one slot");
 
         // Leave only the uploaded intent active, then finalize the first fish.
         sqlx::query(
@@ -1189,7 +1272,8 @@ mod tests {
             .unwrap();
         assert_eq!(state["entities"].as_array().unwrap().len(), 1);
 
-        let second = create_upload_intent(&pool, GrantKind::Owner, &access, &payload)
+        let second = create_upload_intent(&pool, GrantKind::Owner, &access,
+            &request(access.scene.scene_epoch))
             .await
             .unwrap();
         let normalized = crate::paint_image::normalize_png(&image(43)).unwrap();
@@ -1299,6 +1383,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state["entities"].as_array().unwrap().len(), 1);
+        sqlx::query("UPDATE scenes SET scene_epoch = scene_epoch + 1 WHERE id = $1")
+            .bind(scene.scene_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let new_access = store
+            .scene_access(GrantKind::Owner, &owner.token, scene.session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            create_upload_intent(&pool, GrantKind::Owner, &new_access, &payload)
+                .await
+                .unwrap()
+                .intent_id,
+            intent_id,
+            "an old acknowledged request remains the same after epoch changes"
+        );
+        assert!(matches!(
+            create_upload_intent(
+                &pool,
+                GrantKind::Owner,
+                &new_access,
+                &request(payload.scene_epoch)
+            )
+            .await,
+            Err(UploadError::StaleScene)
+        ));
         std::fs::remove_dir_all(blob_directory).unwrap();
     }
 }

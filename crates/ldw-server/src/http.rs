@@ -153,6 +153,7 @@ impl From<UploadError> for ApiError {
             UploadError::Expired => Self(StatusCode::CONFLICT, "UPLOAD_INTENT_EXPIRED"),
             UploadError::InvalidExpiry => Self(StatusCode::CONFLICT, "UPLOAD_COMMAND_EXPIRED"),
             UploadError::Conflict => Self(StatusCode::CONFLICT, "UPLOAD_CONFLICT"),
+            UploadError::CommandConflict => Self(StatusCode::CONFLICT, "COMMAND_CONFLICT"),
             UploadError::Simulation(crate::simulation::SimulationError::InvalidPublication) => {
                 Self(StatusCode::CONFLICT, "SCENE_FULL")
             }
