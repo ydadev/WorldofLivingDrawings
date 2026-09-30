@@ -134,10 +134,8 @@ pub async fn create_upload_intent(
     if input.request_id.is_nil() {
         return Err(UploadError::InvalidPaint);
     }
-    let request_hash = Sha256::digest(
-        serde_json::to_vec(input).map_err(|_| UploadError::InvalidPaint)?,
-    )
-    .to_vec();
+    let request_hash =
+        Sha256::digest(serde_json::to_vec(input).map_err(|_| UploadError::InvalidPaint)?).to_vec();
 
     let mut tx = pool.begin().await?;
     // Every competing publication or reservation locks the scene; the session
@@ -1097,11 +1095,14 @@ mod tests {
             .scene_access(GrantKind::Controller, &controller.token, scene.session_id)
             .await
             .unwrap();
-        let controller_intent = create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload)
-            .await
-            .unwrap();
-        assert_ne!(controller_intent.intent_id, intent_id,
-            "same request ID belongs to each principal separately");
+        let controller_intent =
+            create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload)
+                .await
+                .unwrap();
+        assert_ne!(
+            controller_intent.intent_id, intent_id,
+            "same request ID belongs to each principal separately"
+        );
         assert_eq!(
             create_upload_intent(&pool, GrantKind::Controller, &controller_access, &payload)
                 .await
@@ -1110,16 +1111,25 @@ mod tests {
             controller_intent.intent_id
         );
         assert!(matches!(
-            create_upload_intent(&pool, GrantKind::Controller, &controller_access,
-                &request(access.scene.scene_epoch)).await,
+            create_upload_intent(
+                &pool,
+                GrantKind::Controller,
+                &controller_access,
+                &request(access.scene.scene_epoch)
+            )
+            .await,
             Err(UploadError::IntentLimit)
         ));
 
         for _ in 0..7 {
-            create_upload_intent(&pool, GrantKind::Owner, &access,
-                &request(access.scene.scene_epoch))
-                .await
-                .unwrap();
+            create_upload_intent(
+                &pool,
+                GrantKind::Owner,
+                &access,
+                &request(access.scene.scene_epoch),
+            )
+            .await
+            .unwrap();
         }
         let last_left = request(access.scene.scene_epoch);
         let last_right = request(access.scene.scene_epoch);
@@ -1149,8 +1159,11 @@ mod tests {
             create_upload_intent(&pool, GrantKind::Owner, &access, &repeat_after_expiry),
             create_upload_intent(&pool, GrantKind::Owner, &access, &repeat_after_expiry),
         );
-        assert_eq!(left.unwrap().intent_id, right.unwrap().intent_id,
-            "concurrent retries reserve one slot");
+        assert_eq!(
+            left.unwrap().intent_id,
+            right.unwrap().intent_id,
+            "concurrent retries reserve one slot"
+        );
 
         // Leave only the uploaded intent active, then finalize the first fish.
         sqlx::query(
@@ -1272,10 +1285,14 @@ mod tests {
             .unwrap();
         assert_eq!(state["entities"].as_array().unwrap().len(), 1);
 
-        let second = create_upload_intent(&pool, GrantKind::Owner, &access,
-            &request(access.scene.scene_epoch))
-            .await
-            .unwrap();
+        let second = create_upload_intent(
+            &pool,
+            GrantKind::Owner,
+            &access,
+            &request(access.scene.scene_epoch),
+        )
+        .await
+        .unwrap();
         let normalized = crate::paint_image::normalize_png(&image(43)).unwrap();
         store_paint(
             &pool,
