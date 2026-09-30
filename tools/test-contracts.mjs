@@ -38,8 +38,10 @@ for (const interaction of interactions) {
 }
 const legacyInteraction = { ...interactions[0], schemaVersion: 1, version: 1 };
 delete legacyInteraction.behavior;
+delete legacyInteraction.label;
 valid('interactionDefinition', legacyInteraction);
 assert(!validateInteractionV2(legacyInteraction), 'v2 must require behavior');
+assert(!validateInteractionV2({ ...interactions[0], label: '' }));
 assert(!validateInteractionV2({ ...interactions[0], behavior: [{ primitive: 'run-code' }] }));
 assert(!validateInteractionV2({ ...interactions[0], behavior: [
   { primitive: 'find-candidates', maxCandidates: 101 }, ...interactions[0].behavior.slice(1)

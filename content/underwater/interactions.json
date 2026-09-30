@@ -1,6 +1,6 @@
 [
   {
-    "schemaVersion": 2, "id": "feed", "version": 2, "effect": "attraction",
+    "schemaVersion": 2, "id": "feed", "label": "Корм", "version": 2, "effect": "attraction",
     "allowedZoneId": "water", "requiredCapability": "consume-food",
     "radius": 4, "durationTicks": 300, "maxActive": 3, "cooldownTicks": 10, "priority": 1,
     "behavior": [
@@ -12,7 +12,7 @@
     ]
   },
   {
-    "schemaVersion": 2, "id": "boat", "version": 2, "effect": "threat",
+    "schemaVersion": 2, "id": "boat", "label": "Лодка", "version": 2, "effect": "threat",
     "allowedZoneId": "water", "requiredCapability": "avoid-threat",
     "radius": 3.2, "durationTicks": 600, "maxActive": 1, "cooldownTicks": 200, "priority": 10,
     "behavior": [

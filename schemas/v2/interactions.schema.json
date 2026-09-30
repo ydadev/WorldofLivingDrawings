@@ -67,6 +67,7 @@
       "properties": {
         "schemaVersion": { "const": 2 },
         "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
         "version": { "$ref": "#/$defs/positiveInt" },
         "effect": { "enum": ["attraction", "threat"] },
         "allowedZoneId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$" },

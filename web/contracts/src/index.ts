@@ -46,6 +46,8 @@ export type BehaviorStep =
   | { primitive: 'cleanup' };
 export interface InteractionDefinitionV2 extends Omit<InteractionDefinitionV1, 'schemaVersion'> {
   schemaVersion: 2;
+  /** Public action name; additional definitions require it. */
+  label?: string;
   /** Bounded, acyclic primitive chain; the server validates supported order before activation. */
   behavior: BehaviorStep[];
 }
