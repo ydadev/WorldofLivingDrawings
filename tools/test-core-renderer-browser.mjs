@@ -335,6 +335,35 @@ try {
   });
   assert(boat.created && boat.moved && boat.removed && boat.materialCleared,
     `Boat must follow server frames and clean up after exit: ${JSON.stringify(boat)}`);
+  const catalogVisual = await desktop.evaluate(() => {
+    const adapter = window.coreAdapter;
+    const feedId = 'feed-000000000000000000000000000000cd';
+    const boatId = 'boat-000000000000000000000000000000de';
+    const actionCatalog = [
+      { id: 'feed', effect: 'attraction', label: 'Корм', allowedZoneId: 'water' },
+      { id: 'boat', effect: 'threat', label: 'Лодка', allowedZoneId: 'water' },
+      { id: 'feed-slow', effect: 'attraction', label: 'Медленный корм', allowedZoneId: 'water' },
+      { id: 'boat-red', effect: 'threat', label: 'Красная лодка', allowedZoneId: 'water' },
+    ];
+    adapter.applySnapshot({ schemaVersion: 2, sceneEpoch: 4, revision: 0,
+      simulationTick: 0, worldId: 'underwater', worldVersion: 1, entities: [], actionCatalog,
+      activeActions: [
+        { id: feedId, interactionId: 'feed-slow', effect: 'attraction',
+          point: { x: 0, y: 0 }, remaining: 5, expiresAtTick: 100 },
+        { id: boatId, interactionId: 'boat-red', effect: 'threat',
+          point: { x: 2, y: 0 }, position: { x: -7, y: 0 },
+          entry: { x: -7, y: 0 }, exit: { x: 7, y: 0 }, expiresAtTick: 200 },
+      ] });
+    const created = !!adapter.scene.getMeshByName(`${feedId}/source`) &&
+      !!adapter.scene.getMeshByName(`${boatId}/hull`);
+    adapter.applyDelta({ schemaVersion: 2, sceneEpoch: 4, revision: 1,
+      simulationTick: 1, upsert: [], remove: [], event: { type: 'interaction_state',
+        activeActions: [], appliedCommandIds: [], simulationTick: 1 } });
+    return { created, removed: !adapter.scene.getMeshByName(`${feedId}/source`) &&
+      !adapter.scene.getMeshByName(`${boatId}/hull`) };
+  });
+  assert(catalogVisual.created && catalogVisual.removed,
+    `v2 actions must render by effect and clean up: ${JSON.stringify(catalogVisual)}`);
   const budget = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     const canvas = document.querySelector('#core-scene');

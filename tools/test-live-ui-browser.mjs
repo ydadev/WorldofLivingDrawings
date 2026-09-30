@@ -173,6 +173,24 @@ try {
     mobile.waitForFunction(() => !document.querySelector('#action-feed').disabled),
     interactiveViewer.waitForFunction(() => !document.querySelector('#action-feed').disabled),
     viewer.waitForFunction(() => document.querySelector('#interaction-status')?.textContent.includes('Режим просмотра'))]);
+  if (process.env.LDW_LIVE_SCHEMA === '2') {
+    const extra = '[data-interaction-id="feed-slow"]';
+    await desktop.locator(extra).waitFor({ state: 'visible' });
+    assert(await desktop.locator(extra).textContent() === 'Медленный корм',
+      'v2 catalog label must be visible');
+    await desktop.locator(extra).click();
+    await point(desktop, .5, .5);
+    state = await waitCommands(7);
+    assert(state.commands[6].interactionId === 'feed-slow' && state.commands[6].accepted,
+      'Owner must send the catalog ID');
+    await desktop.waitForFunction(() => document.querySelector('#active-actions')
+      ?.textContent.includes('Медленный корм'));
+    await mobile.locator(extra).click();
+    await point(mobile, .25, .75, true);
+    state = await waitCommands(8);
+    assert(state.commands[7].interactionId === 'feed-slow' && state.commands[7].accepted,
+      'Phone must send the same catalog ID');
+  }
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
   console.log('CORE-04 live UI: Owner + Viewer + Controller, coordinates, keyboard, rejection and reconnect: PASS');
 } finally {

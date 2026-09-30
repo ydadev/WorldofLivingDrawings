@@ -1,10 +1,14 @@
-import type { ActiveAction, Point2, RealtimeAck, RealtimeDelta, RealtimeSnapshot, WorldDefinition } from '@ldw/contracts';
+import type { ActionCatalogEntry, AnyActiveAction, AnyRealtimeDelta, AnyRealtimeSnapshot, InteractionEffect, Point2, RealtimeAck, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter, RendererFactory } from '@ldw/renderer';
 import { SceneConnection, type ConnectionState } from '@ldw/transport';
 
-type Action = 'feed' | 'boat';
 type CancelAction = 'cancel_feed' | 'cancel_boat';
-type Selection = Action | 'fish';
+type Selection = string;
+
+const BASE_ACTIONS: ActionCatalogEntry[] = [
+  { id: 'feed', effect: 'attraction', label: 'Корм', allowedZoneId: 'water' },
+  { id: 'boat', effect: 'threat', label: 'Подводная лодка', allowedZoneId: 'water' },
+];
 
 export interface WorldUiElements {
   canvas: HTMLCanvasElement;
@@ -17,6 +21,7 @@ export interface WorldUiElements {
   toggle?: HTMLButtonElement;
   placeFish?: HTMLButtonElement;
   activeActions?: HTMLElement;
+  actionChoices?: HTMLElement;
 }
 
 export interface WorldUiOptions {
@@ -56,9 +61,12 @@ export class WorldInteractionUi {
   private readonly connection: SceneConnection;
   private renderer: RendererAdapter | null = null;
   private selected: Selection | null = null;
-  private pending: { id: string; action: Action | CancelAction; targetActionId?: string;
+  private pending: { id: string; action: string; targetActionId?: string;
     accepted: boolean; absentInSnapshot: boolean } | null = null;
-  private activeActions: ActiveAction[] = [];
+  private activeActions: AnyActiveAction[] = [];
+  private catalog = new Map(BASE_ACTIONS.map(action => [action.id, action]));
+  private actionButtons = new Map<string, HTMLButtonElement>();
+  private extraActionButtons: HTMLButtonElement[] = [];
   private pointer: { id: number; x: number; y: number; at: number } | null = null;
   private keyboardPoint: Point2 = { x: 0, y: 0 };
   private state: ConnectionState = 'offline';
@@ -89,6 +97,7 @@ export class WorldInteractionUi {
       onPositions: frame => this.renderer?.applyPositions(frame),
       onCommandResult: (id, result) => this.onCommandResult(id, result),
     });
+    this.renderActionChoices();
     if (options.onDemand) {
       elements.stage.hidden = true;
       elements.toggle?.setAttribute('aria-expanded', 'false');
@@ -143,6 +152,8 @@ export class WorldInteractionUi {
     const { elements } = this.options;
     elements.feed.removeEventListener('click', this.onFeed);
     elements.boat.removeEventListener('click', this.onBoat);
+    for (const button of this.extraActionButtons) button.remove();
+    this.extraActionButtons = [];
     elements.cancel.removeEventListener('click', this.onCancel);
     elements.placeFish?.removeEventListener('click', this.onPlaceFish);
     elements.canvas.removeEventListener('pointerdown', this.onPointerDown);
@@ -153,8 +164,8 @@ export class WorldInteractionUi {
     document.removeEventListener('visibilitychange', this.onVisibility);
   }
 
-  private readonly onFeed = (): void => this.choose('feed');
-  private readonly onBoat = (): void => this.choose('boat');
+  private readonly onFeed = (): void => this.choose(this.options.elements.feed.dataset.interactionId ?? 'feed');
+  private readonly onBoat = (): void => this.choose(this.options.elements.boat.dataset.interactionId ?? 'boat');
   private readonly onPlaceFish = (): void => this.choose('fish');
   private readonly onCancel = (): void => this.cancelSelection();
   private readonly onToggle = (): void => { if (this.opened) this.close(); else this.open(); };
@@ -165,11 +176,12 @@ export class WorldInteractionUi {
   private choose(action: Selection): void {
     if (!this.canInteract()) return;
     if (action === 'fish' && !this.options.onPlaceFish) return;
+    if (action !== 'fish' && !this.catalog.has(action)) return;
     this.selected = action;
     this.pointer = null;
     this.keyboardPoint = { x: 0, y: 0 };
     this.showCrosshair();
-    const label = action === 'feed' ? 'корма' : action === 'boat' ? 'лодки' : 'рыбки';
+    const label = action === 'fish' ? 'рыбки' : `«${this.catalog.get(action)?.label}»`;
     this.setStatus(`Укажите место для ${label} в воде. Стрелки и Enter тоже работают.`);
     this.updateControls();
   }
@@ -209,7 +221,9 @@ export class WorldInteractionUi {
       if (event.key === 'ArrowRight') this.keyboardPoint.x += step;
       if (event.key === 'ArrowUp') this.keyboardPoint.y += step;
       if (event.key === 'ArrowDown') this.keyboardPoint.y -= step;
-      const bounds = this.options.world.zones.find(item => item.id === 'water')?.bounds;
+      const zoneId = this.selected === 'fish' ? 'water' :
+        this.catalog.get(this.selected)?.allowedZoneId;
+      const bounds = this.options.world.zones.find(item => item.id === zoneId)?.bounds;
       if (bounds) {
         this.keyboardPoint.x = Math.max(bounds[0], Math.min(bounds[1], this.keyboardPoint.x));
         this.keyboardPoint.y = Math.max(bounds[2], Math.min(bounds[3], this.keyboardPoint.y));
@@ -223,7 +237,9 @@ export class WorldInteractionUi {
 
   private send(point: Point2): void {
     if (!this.selected || !this.canInteract()) return;
-    const zone = this.options.world.zones.find(item => item.id === 'water');
+    const zoneId = this.selected === 'fish' ? 'water' :
+      this.catalog.get(this.selected)?.allowedZoneId;
+    const zone = this.options.world.zones.find(item => item.id === zoneId);
     if (!zone || point.x < zone.bounds[0] || point.x > zone.bounds[1] ||
         point.y < zone.bounds[2] || point.y > zone.bounds[3]) {
       this.setStatus('Выберите точку внутри воды.');
@@ -247,9 +263,14 @@ export class WorldInteractionUi {
     this.updateControls();
   }
 
-  private cancelActiveAction(action: ActiveAction): void {
+  private actionEffect(action: AnyActiveAction): InteractionEffect {
+    return 'effect' in action ? action.effect :
+      (action.interactionId === 'feed' ? 'attraction' : 'threat');
+  }
+
+  private cancelActiveAction(action: AnyActiveAction): void {
     if (!this.options.canCancelActions || !this.canInteract()) return;
-    const kind: CancelAction = action.interactionId === 'feed' ? 'cancel_feed' : 'cancel_boat';
+    const kind: CancelAction = this.actionEffect(action) === 'attraction' ? 'cancel_feed' : 'cancel_boat';
     const id = this.connection.sendInteraction(kind, action.point, action.id);
     if (!id) {
       this.setStatus('Связь прервалась. Дождитесь подключения.');
@@ -273,12 +294,14 @@ export class WorldInteractionUi {
       const row = document.createElement('div');
       row.className = 'active-action';
       const label = document.createElement('span');
-      label.textContent = action.interactionId === 'feed'
-        ? `Корм: осталось ${action.remaining} порций` : 'Подводная лодка плывёт';
+      const effect = this.actionEffect(action);
+      const actionLabel = this.catalog.get(action.interactionId)?.label ?? action.interactionId;
+      label.textContent = effect === 'attraction' && 'remaining' in action
+        ? `${actionLabel}: осталось ${action.remaining} порций` : `${actionLabel} плывёт`;
       const button = document.createElement('button');
       button.type = 'button';
       button.dataset.actionId = action.id;
-      button.textContent = action.interactionId === 'feed' ? 'Убрать корм' : 'Убрать лодку';
+      button.textContent = effect === 'attraction' ? 'Убрать корм' : 'Убрать лодку';
       button.disabled = !this.canInteract();
       button.addEventListener('click', () => this.cancelActiveAction(action));
       row.append(label, button);
@@ -295,7 +318,12 @@ export class WorldInteractionUi {
     this.updateControls();
   }
 
-  private onSnapshot(snapshot: RealtimeSnapshot): void {
+  private onSnapshot(snapshot: AnyRealtimeSnapshot): void {
+    this.catalog = new Map((snapshot.schemaVersion === 2 ? snapshot.actionCatalog : BASE_ACTIONS)
+      .map(action => [action.id, action]));
+    if (this.selected && this.selected !== 'fish' && !this.catalog.has(this.selected))
+      this.cancelSelection();
+    this.renderActionChoices();
     this.renderer?.applySnapshot(snapshot);
     this.activeActions = snapshot.activeActions;
     this.renderActiveActions();
@@ -318,14 +346,15 @@ export class WorldInteractionUi {
     }
   }
 
-  private onDelta(delta: RealtimeDelta): void {
+  private onDelta(delta: AnyRealtimeDelta): void {
     this.renderer?.applyDelta(delta);
     if (delta.event.type !== 'interaction_state') return;
     this.activeActions = delta.event.activeActions;
     this.renderActiveActions();
     if (this.pending && delta.event.appliedCommandIds.includes(this.pending.id)) {
+      const effect = this.catalog.get(this.pending.action)?.effect;
       this.setStatus(this.pending.targetActionId ? 'Событие отменено.' :
-        this.pending.action === 'feed' ? 'Корм появился в мире.' : 'Лодка появилась в мире.');
+        effect === 'attraction' ? 'Корм появился в мире.' : 'Лодка появилась в мире.');
       this.pending = null;
       this.updateControls();
     }
@@ -357,9 +386,41 @@ export class WorldInteractionUi {
     return this.opened && this.state === 'ready' && this.options.interactive && !this.pending;
   }
 
+  private renderActionChoices(): void {
+    for (const button of this.extraActionButtons) button.remove();
+    this.extraActionButtons = [];
+    this.actionButtons.clear();
+    const actions = [...this.catalog.values()];
+    const attraction = actions.find(action => action.effect === 'attraction');
+    const threat = actions.find(action => action.effect === 'threat');
+    const { feed, boat, cancel } = this.options.elements;
+    for (const [button, entry] of [[feed, attraction], [boat, threat]] as const) {
+      button.dataset.interactionId = entry?.id ?? '';
+      button.textContent = entry?.label ?? '';
+      if (entry) this.actionButtons.set(entry.id, button);
+    }
+    const panel = this.options.elements.actionChoices ?? feed.parentElement;
+    for (const action of actions) {
+      if (action.id === attraction?.id || action.id === threat?.id || !panel) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.interactionId = action.id;
+      button.textContent = action.label;
+      button.addEventListener('click', () => this.choose(action.id));
+      if (cancel.parentElement === panel) panel.insertBefore(button, cancel);
+      else panel.append(button);
+      this.extraActionButtons.push(button);
+      this.actionButtons.set(action.id, button);
+    }
+    this.updateControls();
+  }
+
   private updateControls(): void {
     const { feed, boat, cancel, crosshair, placeFish } = this.options.elements;
-    feed.disabled = boat.disabled = !this.canInteract();
+    for (const button of this.actionButtons.values()) {
+      button.disabled = !this.canInteract();
+      button.setAttribute('aria-pressed', String(this.selected === button.dataset.interactionId));
+    }
     if (placeFish) {
       placeFish.disabled = !this.canInteract();
       placeFish.setAttribute('aria-pressed', String(this.selected === 'fish'));
@@ -368,8 +429,8 @@ export class WorldInteractionUi {
     this.options.elements.activeActions?.querySelectorAll('button').forEach(button => {
       button.disabled = !this.canInteract();
     });
-    feed.setAttribute('aria-pressed', String(this.selected === 'feed'));
-    boat.setAttribute('aria-pressed', String(this.selected === 'boat'));
+    feed.hidden = !feed.dataset.interactionId;
+    boat.hidden = !boat.dataset.interactionId;
     if (!this.selected) crosshair.hidden = true;
   }
 

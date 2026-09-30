@@ -7,6 +7,12 @@ import { WebSocketServer, WebSocket } from 'ws';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(root, 'dist');
 const port = Number(process.env.LDW_LIVE_PORT ?? 4188);
+const schemaVersion = process.env.LDW_LIVE_SCHEMA === '2' ? 2 : 1;
+const actionCatalog = [
+  { id: 'feed', effect: 'attraction', label: 'Корм', allowedZoneId: 'water' },
+  { id: 'boat', effect: 'threat', label: 'Подводная лодка', allowedZoneId: 'water' },
+  { id: 'feed-slow', effect: 'attraction', label: 'Медленный корм', allowedZoneId: 'water' },
+];
 const origin = `http://127.0.0.1:${port}`;
 const sessionId = '00000000-0000-4000-8000-000000000001';
 const sceneId = '00000000-0000-4000-8000-000000000002';
@@ -94,7 +100,7 @@ const broadcast = payload => {
   const message = JSON.stringify(payload);
   for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(message);
 };
-const delta = event => ({ type: 'delta', schemaVersion: 1, sceneId, sceneEpoch: 1,
+const delta = event => ({ type: 'delta', schemaVersion, sceneId, sceneEpoch: 1,
   revision: ++state.revision, simulationTick: 0, upsert: [], remove: [], event });
 
 wss.on('connection', socket => {
@@ -102,10 +108,11 @@ wss.on('connection', socket => {
     let message;
     try { message = JSON.parse(raw.toString('utf8')); } catch { socket.close(); return; }
     if (message.type === 'hello') {
-      send(socket, { type: 'snapshot', schemaVersion: 1, sceneId, sceneEpoch: 1,
+      send(socket, { type: 'snapshot', schemaVersion, sceneId, sceneEpoch: 1,
         revision: state.revision, simulationTick: 0, simulationVersion: 1,
         worldId: 'underwater', worldVersion: 1, entities: [], activeActions: state.actions,
-        pendingInteractions: [], resources: {}, reservations: [], serverTime: Date.now() });
+        pendingInteractions: [], resources: {}, reservations: [], serverTime: Date.now(),
+        ...(schemaVersion === 2 ? { actionCatalog } : {}) });
       return;
     }
     if (message.type === 'status') {
@@ -118,7 +125,8 @@ wss.on('connection', socket => {
       send(socket, state.outcomes.get(message.commandId)); return;
     }
     const point = message.point;
-    const accepted = ['feed', 'boat'].includes(message.interactionId) &&
+    const accepted = (schemaVersion === 2 ? actionCatalog.some(entry => entry.id === message.interactionId)
+      : ['feed', 'boat'].includes(message.interactionId)) &&
       Number.isFinite(point?.x) && Number.isFinite(point?.y) &&
       Math.abs(point.x) <= 7.5 && Math.abs(point.y) <= 4 &&
       !(message.interactionId === 'boat' && point.y > 2.5);
@@ -132,11 +140,13 @@ wss.on('connection', socket => {
     send(socket, ack);
     broadcast(delta({ type: 'interaction_requested', commandId: message.commandId,
       interactionId: message.interactionId, point }));
-    const id = `${message.interactionId}-${message.commandId.replace(/-/g, '')}`;
-    const action = message.interactionId === 'feed'
-      ? { id, interactionId: 'feed', point, remaining: 10, expiresAtTick: 300 }
-      : { id, interactionId: 'boat', point, position: { x: -7.05, y: point.y },
+    const effect = message.interactionId === 'boat' ? 'threat' : 'attraction';
+    const id = `${effect === 'attraction' ? 'feed' : 'boat'}-${message.commandId.replace(/-/g, '')}`;
+    const action = effect === 'attraction'
+      ? { id, interactionId: message.interactionId, point, remaining: 10, expiresAtTick: 300 }
+      : { id, interactionId: message.interactionId, point, position: { x: -7.05, y: point.y },
           entry: { x: -7.05, y: point.y }, exit: { x: 7.05, y: point.y }, expiresAtTick: 600 };
+    if (schemaVersion === 2) action.effect = effect;
     state.actions.push(action);
     setTimeout(() => broadcast(delta({ type: 'interaction_state', activeActions: state.actions,
       appliedCommandIds: [message.commandId], simulationTick: 0 })), 20);

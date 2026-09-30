@@ -116,4 +116,33 @@ assert.equal(fourth.sent.filter(item => item.type === 'command').length, 0);
 connection.stop();
 assert.equal(connection.connectionState, 'offline');
 assert(states.includes('syncing') && states.includes('ready'));
+connection.start();
+const v2socket = sockets.at(-1).socket;
+v2socket.open();
+const catalog = [
+  { id: 'feed', effect: 'attraction', label: 'Корм', allowedZoneId: 'water' },
+  { id: 'boat', effect: 'threat', label: 'Лодка', allowedZoneId: 'water' },
+  { id: 'feed-slow', effect: 'attraction', label: 'Медленный корм', allowedZoneId: 'water' },
+];
+const extraAction = { id: 'feed-123', interactionId: 'feed-slow', effect: 'attraction',
+  point: { x: 0, y: 0 }, remaining: 8, expiresAtTick: 50 };
+v2socket.receive({ ...snapshot(0, 2), schemaVersion: 2, actionCatalog: catalog,
+  activeActions: [extraAction] });
+assert.equal(connection.connectionState, 'ready');
+assert.equal(snapshots.at(-1).actionCatalog[2].id, 'feed-slow');
+const extraCommand = connection.sendInteraction('feed-slow', { x: 1, y: 0 });
+assert.equal(v2socket.sent.at(-1).interactionId, 'feed-slow');
+assert.equal(typeof extraCommand, 'string');
+v2socket.receive({ ...delta(1), schemaVersion: 2, sceneEpoch: 2,
+  event: { type: 'interaction_state', activeActions: [extraAction],
+    appliedCommandIds: [extraCommand], simulationTick: 1 } });
+assert.equal(deltas.at(-1).event.activeActions[0].interactionId, 'feed-slow');
+v2socket.receive({ ...delta(2), schemaVersion: 1, sceneEpoch: 2 });
+assert(v2socket.closed, 'a v1 delta must not enter a v2 scene');
+const invalid = sockets.at(-1).socket;
+invalid.open();
+invalid.receive({ ...snapshot(0, 3), schemaVersion: 2, actionCatalog: catalog,
+  activeActions: [{ ...extraAction, effect: 'threat' }] });
+assert(invalid.closed, 'an action with the wrong catalog effect is rejected');
+connection.stop();
 console.log('Realtime transport reconnect, dedup, gap and expiry: PASS');

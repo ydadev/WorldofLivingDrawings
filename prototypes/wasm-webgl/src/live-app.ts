@@ -275,6 +275,7 @@ function mount(): void {
       toggle: document.querySelector<HTMLButtonElement>('#view-toggle') ?? undefined,
       placeFish: document.querySelector<HTMLButtonElement>('#fish-place') ?? undefined,
       activeActions: document.querySelector<HTMLElement>('#active-actions') ?? undefined,
+      actionChoices: document.querySelector<HTMLElement>('#action-panel') ?? undefined,
     },
     onPlaceFish: role === 'viewer' ? undefined : placeFish,
     rendererFactory: canvas => {

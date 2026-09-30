@@ -159,6 +159,7 @@ export interface InteractionStateV2 {
   appliedCommandIds: string[];
   simulationTick: number;
 }
+export type AnyActiveAction = ActiveAction | ActiveActionV2;
 /** A scene with actions supplied by its checkpointed package registry. */
 export type RealtimeSnapshotV2 = Omit<RealtimeSnapshot, 'schemaVersion' | 'activeActions'> & {
   schemaVersion: 2;
@@ -169,6 +170,12 @@ export type RealtimeDeltaV2 = Omit<RealtimeDelta, 'schemaVersion' | 'event'> & {
   schemaVersion: 2;
   event: InteractionRequested | EntityPublished | InteractionStateV2;
 };
+export type SceneSnapshotV2 = Omit<SceneSnapshot, 'schemaVersion' | 'activeActions'> &
+  Pick<RealtimeSnapshotV2, 'schemaVersion' | 'actionCatalog' | 'activeActions'>;
+export type SceneDeltaV2 = Omit<SceneDelta, 'schemaVersion' | 'event'> &
+  Pick<RealtimeDeltaV2, 'schemaVersion' | 'event'>;
+export type AnyRealtimeSnapshot = RealtimeSnapshot | RealtimeSnapshotV2;
+export type AnyRealtimeDelta = RealtimeDelta | RealtimeDeltaV2;
 export interface ScenePositions {
   type: 'positions';
   schemaVersion: 1;

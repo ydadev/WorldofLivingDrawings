@@ -19,7 +19,7 @@ import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { Scene } from '@babylonjs/core/scene';
-import type { ActiveAction, Point2, SceneDelta, SceneEntity, ScenePositions, SceneSnapshot, WorldDefinition } from '@ldw/contracts';
+import type { AnyActiveAction, Point2, SceneDelta, SceneDeltaV2, SceneEntity, ScenePositions, SceneSnapshot, SceneSnapshotV2, WorldDefinition } from '@ldw/contracts';
 import type { RendererAdapter } from '@ldw/renderer';
 import { addAquarium } from './aquarium';
 import { createFishPaintMaterial } from './fish-paint-material';
@@ -105,8 +105,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
     }
   }
 
-  applySnapshot(snapshot: SceneSnapshot): void {
-    if (!this.world || snapshot.schemaVersion !== 1 || snapshot.worldId !== this.world.id ||
+  applySnapshot(snapshot: SceneSnapshot | SceneSnapshotV2): void {
+    if (!this.world || ![1, 2].includes(snapshot.schemaVersion) || snapshot.worldId !== this.world.id ||
         snapshot.worldVersion !== this.world.version) throw new Error('WORLD_VERSION_MISMATCH');
     for (const id of this.markers.keys()) this.removeMarker(id);
     this.movement.clear();
@@ -117,8 +117,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.syncActions(snapshot.activeActions ?? []);
   }
 
-  applyDelta(delta: SceneDelta): void {
-    if (delta.schemaVersion !== 1 || delta.sceneEpoch !== this.sceneEpoch ||
+  applyDelta(delta: SceneDelta | SceneDeltaV2): void {
+    if (![1, 2].includes(delta.schemaVersion) || delta.sceneEpoch !== this.sceneEpoch ||
         delta.revision !== this.revision + 1) throw new Error('REVISION_GAP');
     for (const id of delta.remove) this.removeMarker(id);
     for (const entity of delta.upsert) this.upsert(entity);
@@ -247,10 +247,12 @@ export class BabylonRendererAdapter implements RendererAdapter {
     this.markers.delete(id);
   }
 
-  private syncFeed(actions: ActiveAction[]): void {
+  private syncFeed(actions: AnyActiveAction[]): void {
     const active = new Set<string>();
     for (const action of actions) {
-      if (action.interactionId !== 'feed' || !Number.isFinite(action.point.x) ||
+      const effect = 'effect' in action ? action.effect :
+        (action.interactionId === 'feed' ? 'attraction' : 'threat');
+      if (effect !== 'attraction' || !('remaining' in action) || !Number.isFinite(action.point.x) ||
           !Number.isFinite(action.point.y) || !Number.isInteger(action.remaining) ||
           action.remaining < 1 || action.remaining > 10 || active.has(action.id)) continue;
       active.add(action.id);
@@ -273,11 +275,13 @@ export class BabylonRendererAdapter implements RendererAdapter {
     }
   }
 
-  private syncActions(actions: ActiveAction[]): void {
+  private syncActions(actions: AnyActiveAction[]): void {
     this.syncFeed(actions);
     const active = new Set<string>();
     for (const action of actions) {
-      if (action.interactionId !== 'boat' || !Number.isFinite(action.position.x) ||
+      const effect = 'effect' in action ? action.effect :
+        (action.interactionId === 'boat' ? 'threat' : 'attraction');
+      if (effect !== 'threat' || !('position' in action) || !Number.isFinite(action.position.x) ||
           !Number.isFinite(action.position.y) || active.has(action.id)) continue;
       active.add(action.id);
       let root = this.boatMarkers.get(action.id);
