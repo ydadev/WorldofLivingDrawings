@@ -488,14 +488,18 @@ impl AccessStore {
             session_id: Uuid::new_v4(),
             scene_id: Uuid::new_v4(),
         };
+        let initial =
+            crate::simulation::initial_world(ids.scene_id).map_err(|_| AccessError::SceneState)?;
+        let initial_state = serde_json::json!({"initialSimulation": initial.checkpoint()});
         let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
             .bind(ids.session_id)
             .bind(owner_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version) VALUES ($1, $2, 'underwater', 1)")
-            .bind(ids.scene_id).bind(ids.session_id).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO scenes (id, session_id, world_id, world_version, state) VALUES ($1, $2, 'underwater', 1, $3::jsonb)")
+            .bind(ids.scene_id).bind(ids.session_id).bind(initial_state)
+            .execute(&mut *tx).await?;
         sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
             .bind(ids.scene_id)
             .bind(ids.session_id)

@@ -476,6 +476,19 @@ pub(crate) fn initial_world(scene_id: Uuid) -> Result<World, SimulationError> {
         .map_err(|_| SimulationError::InvalidPackage)
 }
 
+/// A new scene freezes its package before its first fish or command. Legacy
+/// scenes without this field retain the historical lazy-initialization path.
+pub(crate) fn unstarted_world(scene_id: Uuid, state: &Value) -> Result<World, SimulationError> {
+    let Some(value) = state.get("initialSimulation") else {
+        return initial_world(scene_id);
+    };
+    let checkpoint: WorldCheckpoint = serde_json::from_value(value.clone())?;
+    if checkpoint.tick != 0 || checkpoint.bounds != underwater_bounds()? {
+        return Err(SimulationError::InvalidScene);
+    }
+    World::restore(checkpoint).map_err(|_| SimulationError::InvalidScene)
+}
+
 fn active_actions(world: &World) -> Value {
     let mut actions: Vec<Value> = world
         .feed_sources()
@@ -584,7 +597,7 @@ pub(crate) async fn publish_first_fish_tx(
     if !simulation_slot_available(tx).await? {
         return Err(SimulationError::SessionLimit);
     }
-    let mut world = initial_world(scene_id)?;
+    let mut world = unstarted_world(scene_id, &state)?;
     world
         .spawn_fish_with_capabilities(fish_id.as_u128(), position, 1.2, definition.capabilities)
         .map_err(|_| SimulationError::InvalidPublication)?;
@@ -764,7 +777,7 @@ pub async fn load_scene(pool: &PgPool, scene_id: Uuid) -> Result<LoadedScene, Si
         {
             return Err(SimulationError::InvalidScene);
         }
-        initial_world(scene_id)?
+        unstarted_world(scene_id, &state)?
     };
     Ok(LoadedScene {
         epoch,

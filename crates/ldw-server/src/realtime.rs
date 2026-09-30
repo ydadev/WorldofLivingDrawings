@@ -12,7 +12,7 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
-use ldw_sim::{Point as SimPoint, TICKS_PER_SECOND, World, WorldCheckpoint};
+use ldw_sim::{InteractionEffect, Point as SimPoint, TICKS_PER_SECOND, World, WorldCheckpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -62,6 +62,7 @@ static UNDERWATER_RULES: LazyLock<(WorldRules, Vec<InteractionRules>)> = LazyLoc
 fn validate_interaction(
     access: &SceneAccess,
     command: &InteractionCommand,
+    scene_world: &World,
 ) -> Option<&'static str> {
     let (world, interactions) = &*UNDERWATER_RULES;
     if access.scene.world_id != world.id || access.scene.world_version != world.version {
@@ -83,17 +84,24 @@ fn validate_interaction(
     if command.target_action_id.is_some() {
         return Some("INVALID_ACTION_TARGET");
     }
-    let Some(definition) = interactions
+    if scene_world.action_rule(&command.interaction_id).is_none() {
+        return Some("UNKNOWN_INTERACTION");
+    }
+    let allowed_zone_id = scene_world
+        .action_definitions()
         .iter()
         .find(|item| item.id == command.interaction_id)
-    else {
-        return Some("UNKNOWN_INTERACTION");
+        .map(|item| item.allowed_zone_id.as_str())
+        .or_else(|| {
+            interactions
+                .iter()
+                .find(|item| item.id == command.interaction_id)
+                .map(|item| item.allowed_zone_id.as_str())
+        });
+    let Some(allowed_zone_id) = allowed_zone_id else {
+        return Some("INVALID_WORLD_PACKAGE");
     };
-    let Some(zone) = world
-        .zones
-        .iter()
-        .find(|item| item.id == definition.allowed_zone_id)
-    else {
+    let Some(zone) = world.zones.iter().find(|item| item.id == allowed_zone_id) else {
         return Some("INVALID_WORLD_PACKAGE");
     };
     if !command.point.x.is_finite()
@@ -127,18 +135,39 @@ fn cancellation_target(command: &InteractionCommand) -> Option<&str> {
 fn feed_limit_code(
     state: &Value,
     world: &World,
+    interaction_id: &str,
     actor_id: Uuid,
     now_ms: i64,
 ) -> Result<Option<&'static str>, AccessError> {
-    let pending = match state.get("pendingInteractions") {
-        None => 0,
+    let (pending, same_pending) = match state.get("pendingInteractions") {
+        None => (0, 0),
         Some(Value::Array(entries)) => entries
             .iter()
-            .filter(|entry| entry.get("interactionId").and_then(Value::as_str) == Some("feed"))
-            .count(),
+            .filter_map(|entry| entry.get("interactionId").and_then(Value::as_str))
+            .filter(|id| {
+                world
+                    .action_rule(id)
+                    .is_some_and(|(effect, _)| effect == InteractionEffect::Attraction)
+            })
+            .fold((0, 0), |(total, same), id| {
+                (total + 1, same + if id == interaction_id { 1 } else { 0 })
+            }),
         _ => return Err(AccessError::SceneState),
     };
+    let (_, rule) = world
+        .action_rule(interaction_id)
+        .ok_or(AccessError::SceneState)?;
     if world.feed_sources().len() + pending >= world.interaction_rules().feed.max_active {
+        return Ok(Some("FEED_LIMIT"));
+    }
+    if world
+        .feed_sources()
+        .iter()
+        .filter(|source| source.interaction_id == interaction_id)
+        .count()
+        + same_pending
+        >= rule.max_active
+    {
         return Ok(Some("FEED_LIMIT"));
     }
     let limits = state.get("interactionLimits");
@@ -151,7 +180,7 @@ fn feed_limit_code(
             .and_then(Value::as_i64)
             .is_some_and(|last| {
                 now_ms.saturating_sub(last)
-                    < cooldown_ms(world.interaction_rules().feed.cooldown_ticks)
+                    < cooldown_ms(category_cooldown(world, InteractionEffect::Attraction))
             })
         {
             return Ok(Some("FEED_SCENE_COOLDOWN"));
@@ -202,9 +231,16 @@ fn boat_limit_code(
 ) -> Result<Option<&'static str>, AccessError> {
     let pending = match state.get("pendingInteractions") {
         None => false,
-        Some(Value::Array(entries)) => entries
-            .iter()
-            .any(|entry| entry.get("interactionId").and_then(Value::as_str) == Some("boat")),
+        Some(Value::Array(entries)) => entries.iter().any(|entry| {
+            entry
+                .get("interactionId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    world
+                        .action_rule(id)
+                        .is_some_and(|(effect, _)| effect == InteractionEffect::Threat)
+                })
+        }),
         _ => return Err(AccessError::SceneState),
     };
     if world.boat().is_some() || pending {
@@ -219,7 +255,7 @@ fn boat_limit_code(
             .and_then(Value::as_i64)
             .is_some_and(|last| {
                 now_ms.saturating_sub(last)
-                    < cooldown_ms(world.interaction_rules().boat.cooldown_ticks)
+                    < cooldown_ms(category_cooldown(world, InteractionEffect::Threat))
             })
         {
             return Ok(Some("BOAT_SCENE_COOLDOWN"));
@@ -242,6 +278,44 @@ fn record_boat_acceptance(state: &mut Value, now_ms: i64) -> Result<(), AccessEr
 
 fn cooldown_ms(ticks: u64) -> i64 {
     (ticks * 1000 / TICKS_PER_SECOND) as i64
+}
+
+fn category_cooldown(world: &World, effect: InteractionEffect) -> u64 {
+    let baseline = match effect {
+        InteractionEffect::Attraction => world.interaction_rules().feed.cooldown_ticks,
+        InteractionEffect::Threat => world.interaction_rules().boat.cooldown_ticks,
+    };
+    world
+        .action_definitions()
+        .iter()
+        .filter(|item| item.effect == effect)
+        .map(|item| item.rule.cooldown_ticks)
+        .max()
+        .unwrap_or(baseline)
+        .max(baseline)
+}
+
+fn restored_scene_world(scene_id: Uuid, tick: i64, state: &Value) -> Result<World, AccessError> {
+    if tick < 0 {
+        return Err(AccessError::SceneState);
+    }
+    if let Some(value) = state.get("simulation") {
+        let checkpoint: WorldCheckpoint =
+            serde_json::from_value(value.clone()).map_err(|_| AccessError::SceneState)?;
+        if checkpoint.tick != tick as u64 {
+            return Err(AccessError::SceneState);
+        }
+        return World::restore(checkpoint).map_err(|_| AccessError::SceneState);
+    }
+    if tick != 0
+        || state
+            .get("entities")
+            .and_then(Value::as_array)
+            .is_some_and(|entities| !entities.is_empty())
+    {
+        return Err(AccessError::SceneState);
+    }
+    simulation::unstarted_world(scene_id, state).map_err(|_| AccessError::SceneState)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +435,7 @@ async fn serve(
     let Ok((snapshot, mut cursor)) = load_snapshot(store.pool(), &access).await else {
         return;
     };
+    let mut wire_catalog = snapshot.get("actionCatalog").cloned();
     if send_json(&mut socket, &snapshot).await.is_err() {
         return;
     }
@@ -428,6 +503,7 @@ async fn serve(
                     || current.scene.scene_epoch != access.scene.scene_epoch {
                     let Ok((snapshot, new_cursor)) = load_snapshot(store.pool(), &current).await else { break };
                     if send_json(&mut socket, &snapshot).await.is_err() { break; }
+                    wire_catalog = snapshot.get("actionCatalog").cloned();
                     access = current;
                     cursor = new_cursor;
                     continue;
@@ -444,8 +520,13 @@ async fn serve(
                     } else {
                         json!([])
                     };
+                    let event = if let Some(catalog) = &wire_catalog {
+                        let Ok(event) = public_event(&event, catalog) else { return };
+                        event
+                    } else { event };
                     let delta = json!({"type":"delta", "sceneId":access.scene.scene_id,
-                        "schemaVersion":1, "sceneEpoch":epoch, "revision":revision,
+                        "schemaVersion":if wire_catalog.is_some() { 2 } else { 1 },
+                        "sceneEpoch":epoch, "revision":revision,
                         "simulationTick":event.get("simulationTick").and_then(Value::as_u64).unwrap_or(0),
                         "upsert":upsert, "remove":[], "event":event});
                     if send_json(&mut socket, &delta).await.is_err() { return; }
@@ -454,6 +535,7 @@ async fn serve(
                 if gap {
                     let Ok((snapshot, new_cursor)) = load_snapshot(store.pool(), &current).await else { break };
                     if send_json(&mut socket, &snapshot).await.is_err() { break; }
+                    wire_catalog = snapshot.get("actionCatalog").cloned();
                     cursor = new_cursor;
                 }
                 access = current;
@@ -512,7 +594,61 @@ async fn handle_message(
     }
 }
 
-async fn load_snapshot(pool: &PgPool, access: &SceneAccess) -> Result<(Value, i64), sqlx::Error> {
+fn public_catalog(world: &World) -> Option<Value> {
+    (world.action_definitions().len() > 2).then(|| {
+        json!(
+            world
+                .action_definitions()
+                .iter()
+                .map(
+                    |definition| json!({"id":definition.id, "effect":definition.effect,
+            "label":definition.label, "allowedZoneId":definition.allowed_zone_id})
+                )
+                .collect::<Vec<_>>()
+        )
+    })
+}
+
+fn public_actions(actions: &Value, catalog: &Value) -> Result<Value, AccessError> {
+    let entries = actions.as_array().ok_or(AccessError::SceneState)?;
+    let definitions = catalog.as_array().ok_or(AccessError::SceneState)?;
+    let mut result = Vec::with_capacity(entries.len());
+    for action in entries {
+        let id = action
+            .get("interactionId")
+            .and_then(Value::as_str)
+            .ok_or(AccessError::SceneState)?;
+        let effect = definitions
+            .iter()
+            .find(|definition| definition.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|definition| definition.get("effect"))
+            .ok_or(AccessError::SceneState)?;
+        let mut action = action.clone();
+        action
+            .as_object_mut()
+            .ok_or(AccessError::SceneState)?
+            .insert("effect".into(), effect.clone());
+        result.push(action);
+    }
+    Ok(json!(result))
+}
+
+fn public_event(event: &Value, catalog: &Value) -> Result<Value, AccessError> {
+    let mut event = event.clone();
+    if event.get("type").and_then(Value::as_str) == Some("interaction_state") {
+        let actions = public_actions(
+            event.get("activeActions").ok_or(AccessError::SceneState)?,
+            catalog,
+        )?;
+        event
+            .as_object_mut()
+            .ok_or(AccessError::SceneState)?
+            .insert("activeActions".into(), actions);
+    }
+    Ok(event)
+}
+
+async fn load_snapshot(pool: &PgPool, access: &SceneAccess) -> Result<(Value, i64), AccessError> {
     let (world_id, world_version, epoch, revision, tick, state): (
         String,
         i32,
@@ -528,21 +664,31 @@ async fn load_snapshot(pool: &PgPool, access: &SceneAccess) -> Result<(Value, i6
     .bind(access.scene.session_id)
     .fetch_one(pool)
     .await?;
-    Ok((
-        json!({
-            "type":"snapshot", "schemaVersion":1, "sceneId":access.scene.scene_id,
-            "sceneEpoch":epoch, "revision":revision, "simulationTick":tick,
-            "serverTime":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
-            "worldId":world_id, "worldVersion":world_version,
-            "simulationVersion":1,
-            "entities":state.get("entities").cloned().unwrap_or(json!([])),
-            "activeActions":state.get("activeActions").cloned().unwrap_or(json!([])),
-            "pendingInteractions":state.get("pendingInteractions").cloned().unwrap_or(json!([])),
-            "resources":state.get("resources").cloned().unwrap_or(json!({})),
-            "reservations":state.get("reservations").cloned().unwrap_or(json!([]))
-        }),
-        revision,
-    ))
+    let world = restored_scene_world(access.scene.scene_id, tick, &state)?;
+    let catalog = public_catalog(&world);
+    let actions = state.get("activeActions").cloned().unwrap_or(json!([]));
+    let actions = if let Some(catalog) = &catalog {
+        public_actions(&actions, catalog)?
+    } else {
+        actions
+    };
+    let mut snapshot = json!({
+        "type":"snapshot", "schemaVersion":if catalog.is_some() { 2 } else { 1 },
+        "sceneId":access.scene.scene_id,
+        "sceneEpoch":epoch, "revision":revision, "simulationTick":tick,
+        "serverTime":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64,
+        "worldId":world_id, "worldVersion":world_version,
+        "simulationVersion":1,
+        "entities":state.get("entities").cloned().unwrap_or(json!([])),
+        "activeActions":actions,
+        "pendingInteractions":state.get("pendingInteractions").cloned().unwrap_or(json!([])),
+        "resources":state.get("resources").cloned().unwrap_or(json!({})),
+        "reservations":state.get("reservations").cloned().unwrap_or(json!([]))
+    });
+    if let Some(catalog) = catalog {
+        snapshot["actionCatalog"] = catalog;
+    }
+    Ok((snapshot, revision))
 }
 
 async fn load_events(
@@ -637,6 +783,7 @@ pub async fn process_command(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AccessError::Crypto)?
         .as_millis() as i64;
+    let world = restored_scene_world(access.scene.scene_id, persisted_tick, &state)?;
     let mut initial_checkpoint = None;
     let cancelling = matches!(
         command.interaction_id.as_str(),
@@ -654,7 +801,7 @@ pub async fn process_command(
         Some("OWNER_REQUIRED")
     } else if status != "running" {
         Some("SCENE_NOT_RUNNING")
-    } else if let Some(reason) = validate_interaction(&access, command) {
+    } else if let Some(reason) = validate_interaction(&access, command, &world) {
         Some(reason)
     } else {
         None
@@ -665,33 +812,30 @@ pub async fn process_command(
             .target_action_id
             .as_deref()
             .ok_or(AccessError::SceneState)?;
-        let active = if let Some(value) = state.get("simulation") {
-            let checkpoint: WorldCheckpoint =
-                serde_json::from_value(value.clone()).map_err(|_| AccessError::SceneState)?;
-            if checkpoint.tick != persisted_tick as u64 {
-                return Err(AccessError::SceneState);
-            }
-            let world = World::restore(checkpoint).map_err(|_| AccessError::SceneState)?;
-            if command.interaction_id == "cancel_feed" {
-                world.feed_sources().iter().any(|source| source.id == id)
-            } else {
-                world.boat().is_some_and(|boat| boat.id == id)
-            }
+        let active = if command.interaction_id == "cancel_feed" {
+            world.feed_sources().iter().any(|source| source.id == id)
         } else {
-            false
+            world.boat().is_some_and(|boat| boat.id == id)
         };
         let pending = match state.get("pendingInteractions") {
             None => &[][..],
             Some(Value::Array(entries)) => entries.as_slice(),
             _ => return Err(AccessError::SceneState),
         };
-        let start_kind = if command.interaction_id == "cancel_feed" {
-            "feed"
+        let start_effect = if command.interaction_id == "cancel_feed" {
+            InteractionEffect::Attraction
         } else {
-            "boat"
+            InteractionEffect::Threat
         };
         let awaiting_start = pending.iter().any(|entry| {
-            entry.get("interactionId").and_then(Value::as_str) == Some(start_kind)
+            entry
+                .get("interactionId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    world
+                        .action_rule(id)
+                        .is_some_and(|(effect, _)| effect == start_effect)
+                })
                 && entry
                     .get("commandId")
                     .and_then(Value::as_str)
@@ -707,57 +851,37 @@ pub async fn process_command(
             code = Some("ACTION_NOT_ACTIVE");
         }
     }
-    if code.is_none() && matches!(command.interaction_id.as_str(), "feed" | "boat") {
-        let mut world = if let Some(value) = state.get("simulation") {
-            let checkpoint: WorldCheckpoint =
-                serde_json::from_value(value.clone()).map_err(|_| AccessError::SceneState)?;
-            if checkpoint.tick != persisted_tick as u64 {
-                return Err(AccessError::SceneState);
+    if code.is_none() && !cancelling {
+        let mut candidate = world.clone();
+        let (effect, _) = world
+            .action_rule(&command.interaction_id)
+            .ok_or(AccessError::SceneState)?;
+        code = match effect {
+            InteractionEffect::Attraction => {
+                feed_limit_code(&state, &world, &command.interaction_id, actor_id, now_ms)?
             }
-            World::restore(checkpoint).map_err(|_| AccessError::SceneState)?
-        } else {
-            if persisted_tick != 0
-                || state
-                    .get("entities")
-                    .and_then(Value::as_array)
-                    .is_some_and(|entities| !entities.is_empty())
-            {
-                return Err(AccessError::SceneState);
-            }
-            simulation::initial_world(access.scene.scene_id).map_err(|_| AccessError::SceneState)?
-        };
-        code = if command.interaction_id == "feed" {
-            feed_limit_code(&state, &world, actor_id, now_ms)?
-        } else {
-            boat_limit_code(&state, &world, now_ms)?
+            InteractionEffect::Threat => boat_limit_code(&state, &world, now_ms)?,
         };
         if code.is_none() {
             let point = SimPoint {
                 x: command.point.x as f32,
                 y: command.point.y as f32,
             };
-            code = if command.interaction_id == "feed" {
-                match world.start_feed(&command.command_id.simple().to_string(), point) {
-                    Ok(()) => None,
-                    Err(ldw_sim::SimError::InvalidPosition) => Some("OUTSIDE_WATER"),
-                    Err(ldw_sim::SimError::FeedLimit) => Some("FEED_LIMIT"),
-                    Err(_) => return Err(AccessError::SceneState),
-                }
-            } else {
-                match world.start_boat(&command.command_id.simple().to_string(), point) {
-                    Ok(()) => None,
-                    Err(ldw_sim::SimError::InvalidBoatRoute) => Some("INVALID_BOAT_ROUTE"),
-                    Err(ldw_sim::SimError::BoatLimit) => Some("BOAT_LIMIT"),
-                    Err(_) => return Err(AccessError::SceneState),
-                }
+            code = match candidate.start_action(
+                &command.interaction_id,
+                &command.command_id.simple().to_string(),
+                point,
+            ) {
+                Ok(()) => None,
+                Err(ldw_sim::SimError::InvalidPosition) => Some("OUTSIDE_WATER"),
+                Err(ldw_sim::SimError::FeedLimit) => Some("FEED_LIMIT"),
+                Err(ldw_sim::SimError::InvalidBoatRoute) => Some("INVALID_BOAT_ROUTE"),
+                Err(ldw_sim::SimError::BoatLimit) => Some("BOAT_LIMIT"),
+                Err(_) => return Err(AccessError::SceneState),
             };
             if code.is_none() && state.get("simulation").is_none() {
                 if simulation::simulation_slot_available(&mut tx).await? {
-                    initial_checkpoint = Some(
-                        simulation::initial_world(access.scene.scene_id)
-                            .map_err(|_| AccessError::SceneState)?
-                            .checkpoint(),
-                    );
+                    initial_checkpoint = Some(world.checkpoint());
                 } else {
                     code = Some("SIMULATED_SESSION_LIMIT");
                 }
@@ -792,10 +916,17 @@ pub async fn process_command(
             );
             object.entry("entities").or_insert_with(|| json!([]));
         }
-        if command.interaction_id == "feed" {
-            record_feed_acceptance(&mut state, actor_id, now_ms)?;
-        } else if command.interaction_id == "boat" {
-            record_boat_acceptance(&mut state, now_ms)?;
+        if !cancelling {
+            match world
+                .action_rule(&command.interaction_id)
+                .ok_or(AccessError::SceneState)?
+                .0
+            {
+                InteractionEffect::Attraction => {
+                    record_feed_acceptance(&mut state, actor_id, now_ms)?
+                }
+                InteractionEffect::Threat => record_boat_acceptance(&mut state, now_ms)?,
+            }
         }
         sqlx::query(
             "UPDATE scenes SET revision = $1, updated_at = now(), state = $3::jsonb WHERE id = $2",
@@ -822,6 +953,119 @@ mod rule_tests {
     use super::*;
     use ldw_sim::{Bounds, WorldInteractionRules};
 
+    #[tokio::test]
+    async fn frozen_catalog_accepts_extra_action_and_emits_v2() {
+        let pool = crate::test_pool().await;
+        let store = AccessStore::new(pool.clone(), [7u8; 32]);
+        let owner = Uuid::new_v4();
+        let token = format!("catalog-owner-{owner}");
+        let csrf = "catalog-owner-csrf";
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("catalog-{owner}"))
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+            VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(crate::access::hash_token(&token).to_vec())
+        .bind(crate::access::hash_token(csrf).to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ids = store.create_session(&token, csrf).await.unwrap();
+        let stored: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(ids.scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut initial: WorldCheckpoint =
+            serde_json::from_value(stored.get("initialSimulation").cloned().unwrap()).unwrap();
+        assert_eq!(initial.action_definitions.len(), 2);
+        let mut extra = initial.action_definitions[0].clone();
+        extra.id = "feed-slow".into();
+        extra.label = "Медленный корм".into();
+        extra.rule.cooldown_ticks = 40;
+        extra.feed_behavior.as_mut().unwrap().target_depth = -0.8;
+        initial.action_definitions.push(extra);
+        World::restore(initial.clone()).unwrap();
+        sqlx::query("UPDATE scenes SET state = $1::jsonb WHERE id = $2")
+            .bind(json!({"initialSimulation":initial}))
+            .bind(ids.scene_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let access = store
+            .scene_access(GrantKind::Owner, &token, ids.session_id)
+            .await
+            .unwrap();
+        let (snapshot, revision) = load_snapshot(&pool, &access).await.unwrap();
+        assert_eq!(revision, 0);
+        assert_eq!(snapshot["schemaVersion"], 2);
+        assert_eq!(snapshot["actionCatalog"][2]["id"], "feed-slow");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let command = InteractionCommand {
+            kind: "command".into(),
+            command_id: Uuid::new_v4(),
+            session_id: ids.session_id,
+            scene_id: ids.scene_id,
+            scene_epoch: 1,
+            interaction_id: "feed-slow".into(),
+            point: Point { x: 0.0, y: 0.0 },
+            target_action_id: None,
+            expires_at: now + 10_000,
+        };
+        let accepted = process_command(&store, GrantKind::Owner, &token, ids.session_id, &command)
+            .await
+            .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(
+            process_command(&store, GrantKind::Owner, &token, ids.session_id, &command)
+                .await
+                .unwrap(),
+            accepted
+        );
+        let (after, _) = load_snapshot(&pool, &access).await.unwrap();
+        assert_eq!(after["schemaVersion"], 2);
+        assert_eq!(
+            after["pendingInteractions"][0]["interactionId"],
+            "feed-slow"
+        );
+        let mut second = InteractionCommand {
+            command_id: Uuid::new_v4(),
+            interaction_id: "feed".into(),
+            ..command.clone()
+        };
+        let cooldown = process_command(&store, GrantKind::Owner, &token, ids.session_id, &second)
+            .await
+            .unwrap();
+        assert_eq!(cooldown["code"], "FEED_SCENE_COOLDOWN");
+        second.command_id = Uuid::new_v4();
+        second.interaction_id = "unknown".into();
+        let unknown = process_command(&store, GrantKind::Owner, &token, ids.session_id, &second)
+            .await
+            .unwrap();
+        assert_eq!(unknown["code"], "UNKNOWN_INTERACTION");
+        let target = format!("feed-{}", command.command_id.simple());
+        second.command_id = Uuid::new_v4();
+        second.interaction_id = "cancel_feed".into();
+        second.target_action_id = Some(target.clone());
+        let cancelled = process_command(&store, GrantKind::Owner, &token, ids.session_id, &second)
+            .await
+            .unwrap();
+        assert_eq!(cancelled["accepted"], true);
+        let event = json!({"type":"interaction_state","activeActions":[{
+            "id":target,"interactionId":"feed-slow","point":{"x":0,"y":0},
+            "remaining":10,"expiresAtTick":300}],"appliedCommandIds":[],"simulationTick":0});
+        let wire = public_event(&event, &snapshot["actionCatalog"]).unwrap();
+        assert_eq!(wire["activeActions"][0]["effect"], "attraction");
+        assert!(event["activeActions"][0].get("effect").is_none());
+    }
+
     #[test]
     fn scene_limits_follow_checkpointed_rules() {
         let mut rules = WorldInteractionRules::default();
@@ -843,10 +1087,13 @@ mod rule_tests {
         let state = json!({"interactionLimits": {"lastSceneFeedMs": 1000,
             "lastSceneBoatMs": 1000}});
         assert_eq!(
-            feed_limit_code(&state, &world, actor, 1199).unwrap(),
+            feed_limit_code(&state, &world, "feed", actor, 1199).unwrap(),
             Some("FEED_SCENE_COOLDOWN")
         );
-        assert_eq!(feed_limit_code(&state, &world, actor, 1200).unwrap(), None);
+        assert_eq!(
+            feed_limit_code(&state, &world, "feed", actor, 1200).unwrap(),
+            None
+        );
         assert_eq!(
             boat_limit_code(&state, &world, 2999).unwrap(),
             Some("BOAT_SCENE_COOLDOWN")
@@ -859,12 +1106,12 @@ mod rule_tests {
             )
             .unwrap();
         assert_eq!(
-            feed_limit_code(&state, &world, actor, 3000).unwrap(),
+            feed_limit_code(&state, &world, "feed", actor, 3000).unwrap(),
             Some("FEED_LIMIT")
         );
         let restored = World::restore(world.checkpoint()).unwrap();
         assert_eq!(
-            feed_limit_code(&state, &restored, actor, 3000).unwrap(),
+            feed_limit_code(&state, &restored, "feed", actor, 3000).unwrap(),
             Some("FEED_LIMIT")
         );
     }
