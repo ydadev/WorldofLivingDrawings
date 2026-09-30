@@ -29,6 +29,15 @@ const modelByDefinition: Record<string, string> = {
   'stream-fish': 'stream.glb',
 };
 
+const lengthByDefinition: Record<string, number> = {
+  'coral-fish': 2.9,
+  'stream-fish': 3.4,
+};
+
+type FishMotion = { yaw: number; targetYaw: number; pitch: number; targetPitch: number;
+  phase: number; speed: number; targetSpeed: number; length: number; lastAnimatedAt: number;
+  lastPositionAt: number; traveling: boolean; hasPositionFrame: boolean; tail?: TransformNode };
+
 /** Fixed side-view renderer. Each Entity receives its own material and paint texture. */
 export class BabylonRendererAdapter implements RendererAdapter {
   readonly engine: Engine;
@@ -48,8 +57,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly entityVersions = new Map<string, string>();
   private readonly movement = new Map<string, { from: Point2 & { depth: number };
     to: Point2 & { depth: number }; started: number }>();
-  private readonly fishMotion = new Map<string, { yaw: number; pitch: number;
-    phase: number; hasPositionFrame: boolean; tail?: TransformNode }>();
+  private readonly fishMotion = new Map<string, FishMotion>();
   private readonly boatMovement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
@@ -134,6 +142,8 @@ export class BabylonRendererAdapter implements RendererAdapter {
         frame.simulationTick <= this.simulationTick) return;
     const now = performance.now();
     this.interpolate(now);
+    const elapsedSeconds = Math.max(.05, Math.min(1,
+      (frame.simulationTick - this.simulationTick) / 20));
     this.simulationTick = frame.simulationTick;
     for (const item of frame.positions) {
       const marker = this.markers.get(item.id);
@@ -167,9 +177,13 @@ export class BabylonRendererAdapter implements RendererAdapter {
           const forwardY = moving ? dy : item.heading.y;
           const forwardZ = moving ? dz : headingDepth;
           const horizontal = Math.hypot(forwardX, forwardZ);
-          if (horizontal > .01) visual.yaw = Math.atan2(-forwardZ, forwardX);
-          visual.pitch = Math.max(-.32, Math.min(.32,
+          if (horizontal > .01) visual.targetYaw = Math.atan2(-forwardZ, forwardX);
+          visual.targetPitch = Math.max(-.32, Math.min(.32,
             Math.atan2(forwardY, Math.max(.3, horizontal)) * .28));
+          visual.targetSpeed = moving ? Math.min(2.5,
+            Math.hypot(dx, dy, dz) / elapsedSeconds) : 0;
+          visual.lastPositionAt = now;
+          visual.traveling = moving;
         }
       }
     }
@@ -220,7 +234,11 @@ export class BabylonRendererAdapter implements RendererAdapter {
       loading.material = this.fallbackMaterial;
       this.loadingMarkers.set(entity.id, loading);
       this.markers.set(entity.id, marker);
-      this.fishMotion.set(entity.id, { yaw: 0, pitch: 0, hasPositionFrame: false,
+      this.fishMotion.set(entity.id, { yaw: 0, targetYaw: 0, pitch: 0,
+        targetPitch: 0, speed: 0, targetSpeed: 0,
+        length: lengthByDefinition[entity.definitionId] ?? 3,
+        lastAnimatedAt: performance.now(), lastPositionAt: 0,
+        traveling: false, hasPositionFrame: false,
         phase: [...entity.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) * .31 });
       this.entityVersions.set(entity.id, version);
       if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])
@@ -379,22 +397,22 @@ export class BabylonRendererAdapter implements RendererAdapter {
         if (node instanceof TransformNode && node.name.endsWith('/tail-pivot')) visual.tail = node;
       }
     }
-    if (entity.paintBlobId) {
-      const texture = new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true);
-      this.paintTextures.set(entity.id, texture);
-      let material: ShaderMaterial | undefined;
-      for (const root of entries.rootNodes) {
-        for (const node of root.getDescendants(false)) {
-          if (node instanceof AbstractMesh && node.material instanceof PBRMaterial &&
-              node.material.name === 'paint') {
-            material ??= createFishPaintMaterial(this.scene, `${entity.id}/paint`, texture);
-            node.material = material;
-          }
-        }
+    const paintedTexture = entity.paintBlobId ?
+      new Texture(this.paintUrl(entity.paintBlobId), this.scene, false, true) : undefined;
+    if (paintedTexture) this.paintTextures.set(entity.id, paintedTexture);
+    let material: ShaderMaterial | undefined;
+    for (const root of entries.rootNodes) {
+      for (const node of root.getDescendants(false)) {
+        if (!(node instanceof AbstractMesh) || !(node.material instanceof PBRMaterial) ||
+            node.material.name !== 'paint') continue;
+        const texture = paintedTexture ?? node.material.albedoTexture;
+        if (!(texture instanceof Texture)) continue;
+        material ??= createFishPaintMaterial(this.scene, `${entity.id}/paint`, texture);
+        node.material = material;
       }
-      if (!material) throw new Error('PAINT_MESH_MISSING');
-      this.paintMaterials.set(entity.id, [material]);
     }
+    if (entity.paintBlobId && !material) throw new Error('PAINT_MESH_MISSING');
+    if (material) this.paintMaterials.set(entity.id, [material]);
     this.loadingMarkers.get(entity.id)?.dispose();
     this.loadingMarkers.delete(entity.id);
   }
@@ -425,10 +443,29 @@ export class BabylonRendererAdapter implements RendererAdapter {
     for (const [id, visual] of this.fishMotion) {
       const marker = this.markers.get(id);
       if (!marker) continue;
-      const stroke = Math.sin(now * .007 + visual.phase);
-      marker.rotation.y = visual.yaw + stroke * .035;
+      const dt = Math.max(0, Math.min(.05, (now - visual.lastAnimatedAt) / 1000));
+      visual.lastAnimatedAt = now;
+      const desiredSpeed = now - visual.lastPositionAt > 1200 ? 0 : visual.targetSpeed;
+      visual.speed += (desiredSpeed - visual.speed) * Math.min(1, dt * 4);
+      const speedRatio = Math.min(1, visual.speed / 1.8);
+      visual.phase += dt * Math.PI * 2 * (.18 + .95 * visual.speed / visual.length);
+      let remainingYaw = Math.atan2(Math.sin(visual.targetYaw - visual.yaw),
+        Math.cos(visual.targetYaw - visual.yaw));
+      if (visual.traveling && Math.abs(remainingYaw) > .48) {
+        visual.yaw += remainingYaw - Math.sign(remainingYaw) * .48;
+        remainingYaw = Math.sign(remainingYaw) * .48;
+      }
+      visual.yaw += Math.sign(remainingYaw) * Math.min(Math.abs(remainingYaw),
+        dt * (visual.traveling ? 5.5 : 3));
+      visual.pitch += (visual.targetPitch - visual.pitch) * Math.min(1, dt * 12);
+      const stroke = Math.sin(visual.phase);
+      marker.rotation.y = visual.yaw + stroke * .012;
       marker.rotation.z = visual.pitch;
-      if (visual.tail) visual.tail.rotation.y = stroke * .48;
+      if (visual.tail) visual.tail.rotation.y = stroke * (.08 + .34 * speedRatio);
+      for (const material of this.paintMaterials.get(id) ?? []) {
+        material.setFloat('swimPhase', visual.phase);
+        material.setFloat('swimStrength', .015 + .08 * speedRatio);
+      }
     }
   }
 

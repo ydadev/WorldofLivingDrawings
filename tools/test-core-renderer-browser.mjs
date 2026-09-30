@@ -44,6 +44,8 @@ try {
   for (const page of [desktop, mobile]) {
     await page.waitForFunction(() => window.coreProbe?.ready, null, { timeout: 30000 });
     assert.equal(await page.evaluate(() => window.coreProbe.webglVersion), 2);
+    await page.waitForFunction(() => window.coreAdapter.scene.getTextureByName('aquarium-backdrop')?.isReady(),
+      null, { timeout: 10000 });
   }
   const point = async (page, u, v) => {
     const canvas = page.locator('#core-scene');
@@ -74,6 +76,8 @@ try {
           definitionVersion: 1, position: { x: 2, y: -1 }, paintBlobId: 'red' },
         { id: 'fish-2', definitionId: 'coral-fish',
           definitionVersion: 1, position: { x: -2, y: 1 }, paintBlobId: 'blue' },
+        { id: 'fish-3', definitionId: 'stream-fish',
+          definitionVersion: 1, position: { x: 0, y: 0 } },
       ], remove: [] });
     const mesh = adapter.scene.getTransformNodeByName('fish-1');
     return { gapRejected, wrongWorldRejected, inserted: mesh?.position.asArray() };
@@ -114,6 +118,11 @@ try {
     sharedEyeMaterial: true, texturesReady: true, lightweightPaint: true,
     firstVisible: true, secondVisible: true });
   assert.equal(coralRequests, 1, 'one model download serves two Entity instances');
+  await desktop.waitForFunction(() => window.coreAdapter.scene.meshes.some(mesh =>
+    mesh.name.startsWith('fish-3/') && mesh.material?.name === 'fish-3/paint' &&
+    mesh.material.getClassName() === 'ShaderMaterial' &&
+    mesh.material.getActiveTextures()?.[0]?.isReady()),
+  null, { timeout: 10000 });
   const initialPose = await desktop.evaluate(async () => {
     const adapter = window.coreAdapter;
     adapter.applyPositions({ type: 'positions', schemaVersion: 1,
@@ -294,6 +303,36 @@ try {
   }, previewSamples);
   assert(previewMotion.every(dot => dot > .85),
     `The actual preview behavior must keep the fish head-first: ${JSON.stringify(previewMotion)}`);
+  const swimCadence = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    const marker = adapter.scene.getTransformNodeByName('fish-1');
+    const tail = adapter.scene.getNodeByName('fish-1/tail-pivot');
+    const start = marker.position.clone();
+    const tick = adapter.simulationTick;
+    const rest = { x: start.x + .8, y: start.y };
+    const frame = (simulationTick, position) => adapter.applyPositions({
+      type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
+      revision: 1, simulationTick,
+      positions: [{ id: 'fish-1', position, depth: start.z,
+        heading: { x: 1, y: 0 }, headingDepth: 0 }],
+    });
+    frame(tick + 10, rest);
+    const fast = [];
+    for (let sample = 0; sample < 8; sample++) {
+      await new Promise(resolve => setTimeout(resolve, 70));
+      fast.push(Math.abs(tail.rotation.y));
+    }
+    frame(tick + 20, rest);
+    await new Promise(resolve => setTimeout(resolve, 800));
+    const idle = [];
+    for (let sample = 0; sample < 8; sample++) {
+      await new Promise(resolve => setTimeout(resolve, 70));
+      idle.push(Math.abs(tail.rotation.y));
+    }
+    return { fast: Math.max(...fast), idle: Math.max(...idle) };
+  });
+  assert(swimCadence.fast > .14 && swimCadence.idle < swimCadence.fast * .7,
+    `Tail must settle as the fish slows: ${JSON.stringify(swimCadence)}`);
   mkdirSync(path.join(root, '.local'), { recursive: true });
   const screenshot = PNG.sync.read(await desktop.screenshot({ path: path.join(root, '.local/core01-renderer.png') }));
   let redPixels = 0, bluePixels = 0;
@@ -307,7 +346,7 @@ try {
   const removed = await desktop.evaluate(() => {
     const adapter = window.coreAdapter;
     adapter.applyDelta({ schemaVersion: 1, sceneEpoch: 1, revision: 2,
-      simulationTick: 2, upsert: [], remove: ['fish-1', 'fish-2'] });
+      simulationTick: 2, upsert: [], remove: ['fish-1', 'fish-2', 'fish-3'] });
     return !adapter.scene.getTransformNodeByName('fish-1') && !adapter.scene.getTransformNodeByName('fish-2') &&
       !adapter.scene.meshes.some(mesh => /^fish-[12]\//.test(mesh.name)) &&
       !adapter.scene.materials.some(material => /^fish-[12]\/paint$/.test(material.name));
