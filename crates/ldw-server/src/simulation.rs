@@ -483,14 +483,14 @@ fn active_actions(world: &World) -> Value {
         .map(|source| {
             json!({
                 "id":format!("feed-{}", source.id),
-                "interactionId":"feed", "point":source.position,
+                "interactionId":source.interaction_id, "point":source.position,
                 "remaining":source.remaining, "expiresAtTick":source.expires_at_tick,
             })
         })
         .collect();
     if let Some(boat) = world.boat() {
         actions.push(json!({
-            "id":format!("boat-{}", boat.id), "interactionId":"boat",
+            "id":format!("boat-{}", boat.id), "interactionId":boat.interaction_id,
             "point":boat.via, "position":boat.position,
             "entry":boat.entry, "exit":boat.exit,
             "expiresAtTick":boat.expires_at_tick,
@@ -941,10 +941,9 @@ async fn apply_pending_interactions(
             continue;
         }
         let interaction = entry.get("interactionId").and_then(Value::as_str);
-        if !matches!(
-            interaction,
-            Some("feed" | "boat" | "cancel_feed" | "cancel_boat")
-        ) {
+        if !interaction.is_some_and(|id| {
+            matches!(id, "cancel_feed" | "cancel_boat") || candidate.action_rule(id).is_some()
+        }) {
             remaining.push(entry);
             continue;
         }
@@ -976,15 +975,13 @@ async fn apply_pending_interactions(
                     .cloned()
                     .ok_or(SimulationError::InvalidScene)?,
             )?;
-            if interaction == Some("feed") {
-                candidate
-                    .start_feed(&id.simple().to_string(), point)
-                    .map_err(|_| SimulationError::InvalidScene)?;
-            } else {
-                candidate
-                    .start_boat(&id.simple().to_string(), point)
-                    .map_err(|_| SimulationError::InvalidScene)?;
-            }
+            candidate
+                .start_action(
+                    interaction.ok_or(SimulationError::InvalidScene)?,
+                    &id.simple().to_string(),
+                    point,
+                )
+                .map_err(|_| SimulationError::InvalidScene)?;
         }
         applied.push(id);
     }
@@ -1388,6 +1385,111 @@ mod tests {
         package = original;
         package[2]["priority"] = json!(10);
         assert!(parse_interaction_package(&package.to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn durable_queue_preserves_extra_action_id_through_start_and_cancel() {
+        let pool = crate::test_pool().await;
+        let owner = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scene_id = Uuid::new_v4();
+        let command_id = Uuid::new_v4();
+        let mut package: Value = serde_json::from_str(include_str!(
+            "../../../content/underwater/interactions.json"
+        ))
+        .unwrap();
+        let mut extra = package[0].clone();
+        extra["id"] = json!("feed-slow");
+        extra["label"] = json!("Медленный корм");
+        extra["behavior"][0]["maxCandidates"] = json!(1);
+        extra["behavior"][2]["depth"] = json!(-0.8);
+        package.as_array_mut().unwrap().push(extra);
+        let parsed = parse_interaction_package(&package.to_string()).unwrap();
+        let mut world = World::new_with_catalog(
+            underwater_bounds().unwrap(),
+            9,
+            parsed.rules,
+            parsed.catalog,
+        )
+        .unwrap();
+        world.spawn_fish(1, Point { x: -0.5, y: 0.0 }, 1.0).unwrap();
+        let state = json!({
+            "simulation":world.checkpoint(), "entities":[], "activeActions":[],
+            "pendingInteractions":[{"type":"interaction_requested",
+                "commandId":command_id,"interactionId":"feed-slow",
+                "point":{"x":0.0,"y":0.0}}],
+            "resources":{}, "reservations":[],
+        });
+        sqlx::query(
+            "INSERT INTO accounts (id, login, role, password_hash) \
+                     VALUES ($1, $2, 'owner', 'test-hash')",
+        )
+        .bind(owner)
+        .bind(format!("catalog-{owner}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions (id, owner_id) VALUES ($1, $2)")
+            .bind(session)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO scenes (id, session_id, world_id, world_version, state) \
+                     VALUES ($1, $2, 'underwater', 1, $3::jsonb)",
+        )
+        .bind(scene_id)
+        .bind(session)
+        .bind(state)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE sessions SET active_scene_id = $1 WHERE id = $2")
+            .bind(scene_id)
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut scene = load_scene(&pool, scene_id).await.unwrap();
+        assert!(
+            apply_pending_interactions(&pool, scene_id, &mut scene)
+                .await
+                .unwrap()
+        );
+        assert_eq!(scene.world.feed_sources()[0].interaction_id, "feed-slow");
+        let stored: Value = sqlx::query_scalar("SELECT state FROM scenes WHERE id = $1")
+            .bind(scene_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored["activeActions"][0]["interactionId"], "feed-slow");
+        assert_eq!(stored["pendingInteractions"], json!([]));
+        let mut restored = load_scene(&pool, scene_id).await.unwrap();
+        let mut response = restored.world.clone();
+        response.step();
+        assert_eq!(response.fish()[0].depth_target, -0.8);
+        let cancel_id = Uuid::new_v4();
+        let target = format!("feed-{}", command_id.simple());
+        let mut state = stored;
+        state["pendingInteractions"] = json!([{"type":"interaction_requested",
+            "commandId":cancel_id,"interactionId":"cancel_feed",
+            "point":{"x":0.0,"y":0.0},"targetActionId":target}]);
+        sqlx::query("UPDATE scenes SET state = $1::jsonb WHERE id = $2")
+            .bind(state)
+            .bind(scene_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            apply_pending_interactions(&pool, scene_id, &mut restored)
+                .await
+                .unwrap()
+        );
+        assert!(restored.world.feed_sources().is_empty());
+        let after_cancel = load_scene(&pool, scene_id).await.unwrap();
+        assert!(after_cancel.world.feed_sources().is_empty());
+        assert_eq!(after_cancel.world.action_definitions().len(), 3);
     }
 
     #[test]

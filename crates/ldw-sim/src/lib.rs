@@ -432,6 +432,15 @@ impl World {
         &self.action_definitions
     }
 
+    pub fn action_rule(&self, interaction_id: &str) -> Option<(InteractionEffect, EffectRule)> {
+        self.feed_policy(interaction_id)
+            .map(|(rule, _)| (InteractionEffect::Attraction, rule))
+            .or_else(|| {
+                self.boat_policy(interaction_id)
+                    .map(|(rule, _)| (InteractionEffect::Threat, rule))
+            })
+    }
+
     pub fn checkpoint(&self) -> WorldCheckpoint {
         WorldCheckpoint {
             schema_version: 1,
