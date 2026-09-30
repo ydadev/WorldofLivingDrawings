@@ -207,10 +207,29 @@ try {
   await owner.locator('#fish-place').waitFor({ state: 'visible', timeout: 20000 });
   await owner.waitForFunction(() => !document.querySelector('#fish-place').disabled,
     null, { timeout: 20000 });
+  const ownerIntentRequests = [];
+  owner.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/upload-intents'))
+      ownerIntentRequests.push(request.postDataJSON());
+  });
+  let lostIntentResponse = false;
+  await owner.route('**/upload-intents', async route => {
+    if (lostIntentResponse) return route.continue();
+    lostIntentResponse = true;
+    const committed = await route.fetch();
+    assert(committed.status() === 201, 'First intent was not committed before its response was lost');
+    await route.abort('failed');
+  });
   await owner.locator('#fish-place').click();
   await point(owner, .5, .5);
+  await owner.locator('#publish-retry').waitFor({ state: 'visible', timeout: 20000 });
+  await owner.locator('#publish-retry').click();
   await owner.waitForFunction(() => /Рыбка сохранена/.test(document.querySelector('#publish-status')?.textContent ?? ''),
     null, { timeout: 20000 });
+  assert(lostIntentResponse && ownerIntentRequests.length === 2 &&
+    /^[0-9a-f-]{36}$/.test(ownerIntentRequests[0].requestId) &&
+    ownerIntentRequests[0].requestId === ownerIntentRequests[1].requestId,
+  'Lost intent response must retry with the same requestId');
   const published = await waitFrame(ownerFrames, frame => frame.type === 'delta' &&
     frame.event?.type === 'entity_published', 20000);
   assert(published.event.entity.definitionId === 'coral-fish', 'Wrong fish definition published');

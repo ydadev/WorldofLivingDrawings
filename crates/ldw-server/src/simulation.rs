@@ -2083,6 +2083,7 @@ mod tests {
                     })
                     .unwrap();
                     let request = UploadIntentRequest {
+                        request_id: Uuid::new_v4(),
                         scene_epoch: access.scene.scene_epoch,
                         definition_id: format!("{template}-fish"),
                         template_id: template.into(),
