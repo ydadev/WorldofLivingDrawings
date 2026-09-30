@@ -3,7 +3,7 @@ import { BabylonRendererAdapter } from '@ldw/renderer-babylon';
 import worldData from '../../../content/underwater/world.json';
 import { PaintDocument, type PaintLayout } from './paint-core';
 import { listDrafts, type PaintDraft } from './paint-drafts';
-import { swimPath } from './swim-path';
+import { PreviewSwimWorld } from './swim-path';
 import './style.css';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#swim-scene')!;
@@ -11,14 +11,12 @@ const draftSelect = document.querySelector<HTMLSelectElement>('#swim-draft')!;
 const reloadButton = document.querySelector<HTMLButtonElement>('#swim-reload')!;
 const status = document.querySelector<HTMLParagraphElement>('#swim-status')!;
 const world = worldData as WorldDefinition;
-const entityId = 'local-preview-fish';
 let paintUrl: string | undefined;
 let generation = 0;
 let swimTimer: number | undefined;
 let simulationTick = 0;
-let swimStart = 0;
 
-const adapter = new BabylonRendererAdapter(canvas, '/fish/', () => paintUrl ?? '');
+const adapter = new BabylonRendererAdapter(canvas, '/fish/', () => paintUrl ?? '', 50);
 adapter.setWorld(world);
 
 function stopSwim(): void {
@@ -46,28 +44,32 @@ async function showDraft(draft: PaintDraft): Promise<void> {
   const previousUrl = paintUrl;
   paintUrl = nextUrl;
   simulationTick = 0;
-  swimStart = performance.now();
+  const seed = [...draft.id].reduce((value, char) =>
+    (Math.imul(value, 31) + char.charCodeAt(0)) | 0, 0x4d595df4);
+  const preview = new PreviewSwimWorld(seed);
   const snapshot: SceneSnapshot = { schemaVersion: 1, sceneEpoch: current, revision: 0,
     simulationTick: 0, worldId: world.id, worldVersion: world.version,
-    entities: [{ id: entityId,
-      definitionId: draft.templateId === 'coral' ? 'coral-fish' : 'stream-fish',
-      definitionVersion: 1, position: swimPath(0), paintBlobId: draft.id }] };
+    entities: preview.positions().map((fish, index) => ({ id: fish.id,
+      definitionId: index === 0 ? (draft.templateId === 'coral' ? 'coral-fish' : 'stream-fish') :
+        index === 1 ? 'stream-fish' : 'coral-fish',
+      definitionVersion: 1, position: { x: fish.x, y: fish.y },
+      ...(index === 0 ? { paintBlobId: draft.id } : {}) })) };
   adapter.applySnapshot(snapshot);
   if (previousUrl) window.setTimeout(() => URL.revokeObjectURL(previousUrl), 1000);
   const move = () => {
-    const seconds = (performance.now() - swimStart) / 1000;
-    const point = swimPath(seconds);
+    const positions = preview.step();
+    simulationTick++;
     const frame: ScenePositions = { type: 'positions', schemaVersion: 1,
       sceneId: 'local-preview', sceneEpoch: current, revision: 0,
-      simulationTick: ++simulationTick,
-      positions: [{ id: entityId,
-        position: { x: point.x, y: point.y }, depth: point.depth,
-        heading: point.heading, headingDepth: point.headingDepth }] };
+      simulationTick,
+      positions: positions.map(fish => ({ id: fish.id,
+        position: { x: fish.x, y: fish.y }, depth: fish.depth,
+        heading: fish.heading, headingDepth: fish.headingDepth })) };
     adapter.applyPositions(frame);
   };
   move();
-  swimTimer = window.setInterval(move, 500);
-  status.textContent = 'У стекла рыбка плывёт головой вправо, вдали — головой влево. У краёв она разворачивается через глубину. Раскраска взята из черновика этого браузера.';
+  swimTimer = window.setInterval(move, 50);
+  status.textContent = 'Раскрашенная рыбка плавает среди двух соседей. Они выбирают разные цели и темп, иногда исследуют поверхность или дно и реагируют на сближение. Это локальный просмотр; в общем мире решения принимает сервер.';
 }
 
 async function refreshDrafts(): Promise<void> {

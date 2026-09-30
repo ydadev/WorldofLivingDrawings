@@ -8,6 +8,8 @@ pub const MAX_OBSTACLES: usize = 16;
 pub const MAX_ACTION_DEFINITIONS: usize = 8;
 pub const TICKS_PER_SECOND: u64 = 20;
 const FISH_RADIUS: f32 = 0.18;
+const BODY_HALF_LENGTH: f32 = 1.05;
+const BODY_CLEARANCE: f32 = 0.88;
 pub const MIN_DEPTH: f32 = -1.5;
 pub const MAX_DEPTH: f32 = 1.5;
 const DEPTH_SPEED: f32 = 0.55;
@@ -265,6 +267,60 @@ pub struct Fish {
     pub fleeing: bool,
     #[serde(default)]
     threat_hold_until_tick: u64,
+    #[serde(default)]
+    pub ambient: Option<AmbientBehavior>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AmbientBehavior {
+    Explore {
+        until_tick: u64,
+        rest_until_tick: u64,
+        resume_target: Point,
+        resume_depth: f32,
+    },
+    Approach {
+        until_tick: u64,
+        peer_id: String,
+        resume_target: Point,
+        resume_depth: f32,
+    },
+    Startled {
+        until_tick: u64,
+        resume_target: Point,
+        resume_depth: f32,
+    },
+}
+
+impl AmbientBehavior {
+    fn until_tick(&self) -> u64 {
+        match self {
+            Self::Explore { until_tick, .. }
+            | Self::Approach { until_tick, .. }
+            | Self::Startled { until_tick, .. } => *until_tick,
+        }
+    }
+
+    fn resume(&self) -> (Point, f32) {
+        match self {
+            Self::Explore {
+                resume_target,
+                resume_depth,
+                ..
+            }
+            | Self::Approach {
+                resume_target,
+                resume_depth,
+                ..
+            }
+            | Self::Startled {
+                resume_target,
+                resume_depth,
+                ..
+            } => (*resume_target, *resume_depth),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -542,6 +598,19 @@ impl World {
                 || (fish.feeding.is_some() && !fish.capabilities.consume_food)
                 || (fish.fleeing && checkpoint.boat.is_none())
                 || (fish.fleeing && !fish.capabilities.avoid_threat)
+                || fish.ambient.as_ref().is_some_and(|ambient| {
+                    let (resume_target, resume_depth) = ambient.resume();
+                    !valid_point(resume_target, checkpoint.bounds, &checkpoint.obstacles)
+                        || !resume_depth.is_finite()
+                        || !(MIN_DEPTH..=MAX_DEPTH).contains(&resume_depth)
+                        || ambient.until_tick() < checkpoint.tick
+                        || fish.feeding.is_some()
+                        || fish.fleeing
+                        || matches!(ambient, AmbientBehavior::Explore { rest_until_tick, until_tick, .. }
+                            if rest_until_tick > until_tick)
+                        || matches!(ambient, AmbientBehavior::Approach { peer_id, .. }
+                            if peer_id.len() != 32 || u128::from_str_radix(peer_id, 16).is_err())
+                })
             {
                 return Err(SimError::InvalidCheckpoint);
             }
@@ -814,6 +883,7 @@ impl World {
             feeding: None,
             fleeing: false,
             threat_hold_until_tick: 0,
+            ambient: None,
         });
         Ok(())
     }
@@ -830,7 +900,16 @@ impl World {
         // A source's fed_fish is consumed-portion history, not an assignment.
         // Keep it so restoring the same fish during that source cannot eat a
         // second portion. Current feeding/fleeing assignments leave with Fish.
-        Ok(self.fish.remove(index))
+        let removed = self.fish.remove(index);
+        let removed_id = fish_id(id);
+        for fish in &mut self.fish {
+            if matches!(&fish.ambient, Some(AmbientBehavior::Approach { peer_id, .. })
+                if peer_id == &removed_id)
+            {
+                finish_ambient(fish);
+            }
+        }
+        Ok(removed)
     }
 
     pub fn set_target(&mut self, id: u128, target: Point) -> Result<(), SimError> {
@@ -847,9 +926,266 @@ impl World {
             .find(|fish| fish.id == id)
             .ok_or(SimError::UnknownFish)?;
         fish.target = target;
+        fish.ambient = None;
         fish.waypoint = None;
         fish.stuck_ticks = 0;
         Ok(())
+    }
+
+    fn update_ambient_behavior(&mut self) {
+        for fish in &mut self.fish {
+            if fish.feeding.is_some() || fish.fleeing {
+                fish.ambient = None;
+            } else if fish
+                .ambient
+                .as_ref()
+                .is_some_and(|state| state.until_tick() <= self.tick)
+            {
+                finish_ambient(fish);
+            }
+        }
+        let peers: Vec<_> = self
+            .fish
+            .iter()
+            .map(|fish| {
+                (
+                    fish.id,
+                    fish.position,
+                    fish.depth,
+                    fish.feeding.is_none() && !fish.fleeing && fish.ambient.is_none(),
+                )
+            })
+            .collect();
+        for fish in &mut self.fish {
+            let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient else {
+                continue;
+            };
+            let id = u128::from_str_radix(peer_id, 16).expect("validated peer ID");
+            if let Some((_, position, depth, true)) = peers.iter().find(|peer| peer.0 == id) {
+                fish.target = *position;
+                fish.depth_target = *depth;
+                fish.waypoint = None;
+            } else {
+                finish_ambient(fish);
+            }
+        }
+        if self.fish.len() > 1 && self.tick.wrapping_add(self.seed) % 120 == 0 {
+            let available: Vec<_> = self
+                .fish
+                .iter()
+                .enumerate()
+                .filter(|(_, fish)| {
+                    fish.ambient.is_none() && fish.feeding.is_none() && !fish.fleeing
+                })
+                .map(|(index, _)| index)
+                .collect();
+            if !available.is_empty() {
+                let choice = xorshift(self.seed ^ self.tick) as usize % available.len();
+                for step in 0..available.len() {
+                    let initiator = available[(choice + step) % available.len()];
+                    let fish = &self.fish[initiator];
+                    let peer = available
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            *index != initiator
+                                && self.fish[*index].capabilities.avoid_threat
+                                && (self.fish[*index].depth - fish.depth).abs() < 1.0
+                                && self.fish[*index].position.distance_squared(fish.position) < 9.0
+                        })
+                        .min_by(|left, right| {
+                            self.fish[*left]
+                                .position
+                                .distance_squared(fish.position)
+                                .total_cmp(
+                                    &self.fish[*right].position.distance_squared(fish.position),
+                                )
+                                .then(self.fish[*left].id.cmp(&self.fish[*right].id))
+                        });
+                    if let Some(peer) = peer {
+                        let target = self.fish[peer].position;
+                        let target_depth = self.fish[peer].depth;
+                        let peer_id = fish_id(self.fish[peer].id);
+                        let fish = &mut self.fish[initiator];
+                        fish.ambient = Some(AmbientBehavior::Approach {
+                            until_tick: self.tick.saturating_add(100),
+                            peer_id,
+                            resume_target: fish.target,
+                            resume_depth: fish.depth_target,
+                        });
+                        fish.target = target;
+                        fish.depth_target = target_depth;
+                        fish.waypoint = None;
+                        break;
+                    }
+                }
+            }
+        }
+        let pursued: Vec<_> = self
+            .fish
+            .iter()
+            .filter_map(|fish| {
+                if let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient {
+                    u128::from_str_radix(peer_id, 16).ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for fish in &mut self.fish {
+            if fish.ambient.is_some() || fish.feeding.is_some() || fish.fleeing {
+                continue;
+            }
+            if pursued.contains(&fish.id) {
+                continue;
+            }
+            let identity = xorshift(self.seed ^ folded_fish_id(fish.id));
+            let period = 160 + identity % 120;
+            let offset = (identity >> 16) % period;
+            if self.tick.wrapping_add(offset) % period != 0
+                || xorshift(identity ^ self.tick) % 4 != 0
+            {
+                continue;
+            }
+            let surface = xorshift(identity ^ self.tick ^ 0xa0761d6478bd642f) & 1 == 0;
+            if let Some(destination) = exploration_target(
+                fish.position,
+                surface,
+                self.bounds,
+                &self.obstacles,
+                fish.id,
+            ) {
+                fish.ambient = Some(AmbientBehavior::Explore {
+                    until_tick: self.tick.saturating_add(260),
+                    rest_until_tick: self.tick.saturating_add(12),
+                    resume_target: fish.target,
+                    resume_depth: fish.depth_target,
+                });
+                fish.target = destination;
+                fish.depth_target = if surface { -0.7 } else { 0.7 };
+                fish.waypoint = None;
+            }
+        }
+    }
+
+    fn separate_bodies(&mut self) {
+        let bounds = self.bounds;
+        let obstacles = &self.obstacles;
+        let mut order: Vec<_> = (0..self.fish.len()).collect();
+        order.sort_by(|left, right| {
+            self.fish[*left]
+                .position
+                .x
+                .total_cmp(&self.fish[*right].position.x)
+                .then(self.fish[*left].id.cmp(&self.fish[*right].id))
+        });
+        for _ in 0..4 {
+            let mut changed = false;
+            for left_slot in 0..order.len() {
+                for right_slot in left_slot + 1..order.len() {
+                    let a = order[left_slot];
+                    let b = order[right_slot];
+                    if self.fish[b].position.x - self.fish[a].position.x
+                        > 2.0 * BODY_HALF_LENGTH + BODY_CLEARANCE
+                    {
+                        break;
+                    }
+                    if (self.fish[a].position.y - self.fish[b].position.y).abs() > BODY_CLEARANCE {
+                        continue;
+                    }
+                    let (left_index, right_index) = (a.min(b), a.max(b));
+                    let (earlier, later) = self.fish.split_at_mut(right_index);
+                    let left = &mut earlier[left_index];
+                    let right = &mut later[0];
+                    // The fixed side camera also needs a shallow screen-space gap:
+                    // two bodies at different depths may be separate in 3D while
+                    // their complete silhouettes still pass through one another.
+                    let gap = silhouette_gap(BodyPose::from(&*left), BodyPose::from(&*right));
+                    if gap >= -0.15 {
+                        continue;
+                    }
+                    let sign = if left.position.y >= right.position.y {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    let push = ((-0.15 - gap) * 0.5).min(0.12);
+                    let left_next = Point {
+                        x: left.position.x,
+                        y: left.position.y + sign * push,
+                    };
+                    let right_next = Point {
+                        x: right.position.x,
+                        y: right.position.y - sign * push,
+                    };
+                    if bounds.contains(left_next, FISH_RADIUS)
+                        && segment_clear(left.position, left_next, obstacles)
+                    {
+                        left.position = left_next;
+                        changed = true;
+                    }
+                    if bounds.contains(right_next, FISH_RADIUS)
+                        && segment_clear(right.position, right_next, obstacles)
+                    {
+                        right.position = right_next;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn resolve_social_encounter(&mut self) {
+        let encounter = self.fish.iter().enumerate().find_map(|(initiator, fish)| {
+            let Some(AmbientBehavior::Approach { peer_id, .. }) = &fish.ambient else {
+                return None;
+            };
+            let id = u128::from_str_radix(peer_id, 16).ok()?;
+            let peer = self.fish.iter().position(|other| other.id == id)?;
+            let other = &self.fish[peer];
+            let close = body_gap(BodyPose::from(fish), BodyPose::from(other)) < 0.2;
+            close.then_some((initiator, peer))
+        });
+        let Some((initiator, peer)) = encounter else {
+            return;
+        };
+        let source = self.fish[initiator].position;
+        let source_depth = self.fish[initiator].depth;
+        let recipient = &self.fish[peer];
+        let escape = if recipient.ambient.is_none()
+            && recipient.feeding.is_none()
+            && !recipient.fleeing
+            && recipient.capabilities.avoid_threat
+        {
+            escape_target(
+                recipient.position,
+                source,
+                recipient.id,
+                self.bounds,
+                &self.obstacles,
+            )
+        } else {
+            None
+        };
+        finish_ambient(&mut self.fish[initiator]);
+        if let Some(escape) = escape {
+            let fish = &mut self.fish[peer];
+            fish.ambient = Some(AmbientBehavior::Startled {
+                until_tick: self.tick.saturating_add(60),
+                resume_target: fish.target,
+                resume_depth: fish.depth_target,
+            });
+            fish.target = escape;
+            fish.depth_target = if fish.depth <= source_depth {
+                -1.2
+            } else {
+                1.2
+            };
+            fish.waypoint = None;
+        }
     }
 
     pub fn step(&mut self) {
@@ -1025,11 +1361,24 @@ impl World {
                 fish.waypoint = None;
             }
         }
-        for fish in &mut self.fish {
+        self.update_ambient_behavior();
+        let mut bodies: Vec<_> = self.fish.iter().map(BodyPose::from).collect();
+        for (index, fish) in self.fish.iter_mut().enumerate() {
+            if matches!(&fish.ambient, Some(AmbientBehavior::Explore { rest_until_tick, .. })
+                if self.tick < *rest_until_tick)
+            {
+                fish.heading_depth = 0.0;
+                continue;
+            }
+            let identity = xorshift(self.seed ^ folded_fish_id(fish.id));
+            let course_period = 180 + identity % 180;
+            let course_change = self.tick.wrapping_add(identity >> 24) % course_period == 0;
             if fish.feeding.is_none()
                 && !fish.fleeing
-                && ((fish.position.distance_squared(fish.target) < 0.04
-                    && (fish.depth - fish.depth_target).abs() < 0.12)
+                && fish.ambient.is_none()
+                && (course_change
+                    || (fish.position.distance_squared(fish.target) < 0.04
+                        && (fish.depth - fish.depth_target).abs() < 0.12)
                     || fish.stuck_ticks > 80)
             {
                 fish.target_generation = fish.target_generation.wrapping_add(1);
@@ -1069,19 +1418,65 @@ impl World {
                 y: destination.y - fish.position.y,
             };
             let distance = (delta.x * delta.x + delta.y * delta.y).sqrt();
-            let depth_heading = advance_depth(fish);
-            let step_budget = fish.speed / TICKS_PER_SECOND as f32;
+            let cruise = fish.speed * cruise_speed_factor(self.seed, fish.id, self.tick);
+            let swim_speed = if fish.feeding.is_some()
+                || fish.fleeing
+                || matches!(
+                    fish.ambient.as_ref(),
+                    Some(AmbientBehavior::Approach { .. } | AmbientBehavior::Startled { .. })
+                ) {
+                fish.speed
+            } else if fish.ambient.is_some() {
+                cruise.min(fish.speed * 0.65)
+            } else {
+                cruise
+            };
+            let depth_heading = advance_depth(fish, swim_speed);
+            let step_budget = swim_speed / TICKS_PER_SECOND as f32;
             fish.heading_depth = depth_heading;
             if distance <= f32::EPSILON {
                 if depth_heading != 0.0 {
                     fish.heading = Point { x: 0.0, y: 0.0 };
                 }
+                bodies[index] = BodyPose::from(&*fish);
                 continue;
             }
-            let desired = Point {
+            let mut desired = Point {
                 x: delta.x / distance,
                 y: delta.y / distance,
             };
+            for other in &bodies {
+                if other.id == fish.id {
+                    continue;
+                }
+                let toward = Point {
+                    x: other.position.x - fish.position.x,
+                    y: other.position.y - fish.position.y,
+                };
+                let gap = silhouette_gap(bodies[index], *other);
+                if gap >= 1.1 || desired.x * toward.x + desired.y * toward.y <= 0.0 {
+                    continue;
+                }
+                let side = Point {
+                    x: -desired.y,
+                    y: desired.x,
+                };
+                let sign = if fish.position.y + side.y > self.bounds.max_y - 0.5
+                    || fish.position.y + side.y < self.bounds.min_y + 0.5
+                {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let weight = ((1.1 - gap) * 0.8).clamp(0.0, 0.9);
+                let x = desired.x + side.x * sign * weight;
+                let y = desired.y + side.y * sign * weight;
+                let length = x.hypot(y);
+                desired = Point {
+                    x: x / length,
+                    y: y / length,
+                };
+            }
             let step =
                 (step_budget * (1.0 - depth_heading * depth_heading).max(0.0).sqrt()).min(distance);
             let left_first = fish.id & 1 == 0;
@@ -1132,7 +1527,10 @@ impl World {
             if !moved {
                 fish.stuck_ticks = fish.stuck_ticks.saturating_add(1);
             }
+            bodies[index] = BodyPose::from(&*fish);
         }
+        self.separate_bodies();
+        self.resolve_social_encounter();
         for fish in &mut self.fish {
             let Some((source, _)) = self.feed_sources.iter_mut().zip(feed_policies.iter()).find(
                 |(source, (_, behavior))| {
@@ -1168,11 +1566,164 @@ impl World {
     }
 }
 
+#[derive(Clone, Copy)]
+struct BodyPose {
+    id: u128,
+    position: Point,
+    depth: f32,
+    heading: Point,
+    heading_depth: f32,
+}
+
+impl From<&Fish> for BodyPose {
+    fn from(fish: &Fish) -> Self {
+        Self {
+            id: fish.id,
+            position: fish.position,
+            depth: fish.depth,
+            heading: fish.heading,
+            heading_depth: fish.heading_depth,
+        }
+    }
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn body_axis(pose: BodyPose) -> ([f32; 3], [f32; 3]) {
+    let length = pose.heading.x.hypot(pose.heading_depth);
+    let (x, z) = if length > 1e-6 {
+        (pose.heading.x / length, pose.heading_depth / length)
+    } else {
+        (1.0, 0.0)
+    };
+    let offset_x = x * BODY_HALF_LENGTH;
+    let offset_z = z * BODY_HALF_LENGTH;
+    (
+        [
+            pose.position.x - offset_x,
+            pose.position.y,
+            pose.depth - offset_z,
+        ],
+        [
+            pose.position.x + offset_x,
+            pose.position.y,
+            pose.depth + offset_z,
+        ],
+    )
+}
+
+// Closest distance of the two oriented body axes in the 3D water volume.
+fn body_gap(left: BodyPose, right: BodyPose) -> f32 {
+    let axis_lower_bound = ((left.position.x - right.position.x).abs() - 2.0 * BODY_HALF_LENGTH)
+        .max((left.position.y - right.position.y).abs())
+        .max((left.depth - right.depth).abs() - 2.0 * BODY_HALF_LENGTH)
+        - BODY_CLEARANCE;
+    if axis_lower_bound > 1.1 {
+        return axis_lower_bound;
+    }
+    let (a, b) = body_axis(left);
+    let (c, d) = body_axis(right);
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [d[0] - c[0], d[1] - c[1], d[2] - c[2]];
+    let w = [a[0] - c[0], a[1] - c[1], a[2] - c[2]];
+    let aa = dot3(u, u);
+    let bb = dot3(u, v);
+    let cc = dot3(v, v);
+    let dd = dot3(u, w);
+    let ee = dot3(v, w);
+    let denominator = aa * cc - bb * bb;
+    let mut s = if denominator > 1e-8 {
+        ((bb * ee - cc * dd) / denominator).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut t = ((bb * s + ee) / cc).clamp(0.0, 1.0);
+    s = ((bb * t - dd) / aa).clamp(0.0, 1.0);
+    t = ((bb * s + ee) / cc).clamp(0.0, 1.0);
+    let closest = [
+        w[0] + u[0] * s - v[0] * t,
+        w[1] + u[1] * s - v[1] * t,
+        w[2] + u[2] * s - v[2] * t,
+    ];
+    dot3(closest, closest).sqrt() - BODY_CLEARANCE
+}
+
+// Distance between the projected body axes in the fixed side camera. A small
+// negative gap permits a brief overlap, independently of the fishes' depths.
+fn silhouette_gap(left: BodyPose, right: BodyPose) -> f32 {
+    let (a, b) = body_axis(left);
+    let (c, d) = body_axis(right);
+    let horizontal = (a[0].min(b[0]) - c[0].max(d[0]))
+        .max(c[0].min(d[0]) - a[0].max(b[0]))
+        .max(0.0);
+    horizontal.hypot(left.position.y - right.position.y) - BODY_CLEARANCE
+}
+
 fn clear_action_target(fish: &mut Fish) {
+    fish.ambient = None;
     fish.target = fish.position;
     fish.depth_target = fish.depth;
     fish.waypoint = None;
     fish.stuck_ticks = 0;
+}
+
+fn finish_ambient(fish: &mut Fish) {
+    if let Some(state) = fish.ambient.take() {
+        let (target, depth) = state.resume();
+        fish.target = target;
+        fish.depth_target = depth;
+        fish.waypoint = None;
+        fish.stuck_ticks = 0;
+    }
+}
+
+fn folded_fish_id(id: u128) -> u64 {
+    id as u64 ^ ((id >> 64) as u64).rotate_left(29)
+}
+
+fn cruise_speed_factor(seed: u64, id: u128, tick: u64) -> f32 {
+    let identity = xorshift(seed ^ folded_fish_id(id) ^ 0x9e3779b97f4a7c15);
+    let period = 100 + identity % 160;
+    let clock = tick.wrapping_add((identity >> 16) % period);
+    let block = clock / period;
+    let fraction = (clock % period) as f32 / period as f32;
+    let smooth = fraction * fraction * (3.0 - 2.0 * fraction);
+    let level = |index: u64| {
+        let value = xorshift(identity ^ index.wrapping_mul(0xbf58476d1ce4e5b9));
+        (value as u32) as f32 / u32::MAX as f32
+    };
+    0.38 + 0.62 * (level(block) * (1.0 - smooth) + level(block.wrapping_add(1)) * smooth)
+}
+
+fn exploration_target(
+    from: Point,
+    surface: bool,
+    bounds: Bounds,
+    obstacles: &[Circle],
+    id: u128,
+) -> Option<Point> {
+    let y = if surface {
+        bounds.max_y - FISH_RADIUS - 0.3
+    } else {
+        bounds.min_y + FISH_RADIUS + 0.3
+    };
+    let side = if id & 1 == 0 { 1.0 } else { -1.0 };
+    for offset in [0.0, 0.8, -0.8, 1.6, -1.6] {
+        let target = Point {
+            x: (from.x + offset * side)
+                .clamp(bounds.min_x + FISH_RADIUS, bounds.max_x - FISH_RADIUS),
+            y,
+        };
+        if valid_point(target, bounds, obstacles)
+            && (segment_clear(from, target, obstacles)
+                || plan_waypoint(from, target, id, bounds, obstacles).is_some())
+        {
+            return Some(target);
+        }
+    }
+    None
 }
 
 fn default_feed_interaction_id() -> String {
@@ -1504,11 +2055,11 @@ fn choose_depth(seed: u64, id: u128, generation: u32) -> f32 {
     sign * (0.65 + fraction * 0.75)
 }
 
-fn advance_depth(fish: &mut Fish) -> f32 {
-    let step = DEPTH_SPEED.min(fish.speed * 0.6) / TICKS_PER_SECOND as f32;
+fn advance_depth(fish: &mut Fish, swim_speed: f32) -> f32 {
+    let step = DEPTH_SPEED.min(swim_speed * 0.6) / TICKS_PER_SECOND as f32;
     let change = (fish.depth_target - fish.depth).clamp(-step, step);
     fish.depth = (fish.depth + change).clamp(MIN_DEPTH, MAX_DEPTH);
-    change / (fish.speed / TICKS_PER_SECOND as f32)
+    change / (swim_speed / TICKS_PER_SECOND as f32)
 }
 
 fn xorshift(mut value: u64) -> u64 {
@@ -1829,6 +2380,229 @@ mod tests {
             seen_far |= after.depth > 0.5;
         }
         assert!(seen_near && seen_far, "fish should visit both depth layers");
+    }
+
+    #[test]
+    fn idle_pace_varies_independently_and_smoothly() {
+        let speeds: Vec<_> = (0..2000)
+            .map(|tick| cruise_speed_factor(42, 1, tick))
+            .collect();
+        let other: Vec<_> = (0..2000)
+            .map(|tick| cruise_speed_factor(42, 2, tick))
+            .collect();
+        let slow = speeds.iter().copied().fold(f32::INFINITY, f32::min);
+        let fast = speeds.iter().copied().fold(0.0, f32::max);
+        assert!(slow >= 0.38 && fast <= 1.0 && fast - slow > 0.3);
+        assert!(
+            speeds
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() < 0.02)
+        );
+        assert!(
+            speeds
+                .iter()
+                .zip(other)
+                .any(|(one, two)| (one - two).abs() > 0.2)
+        );
+    }
+
+    #[test]
+    fn exploration_pauses_then_resumes_after_checkpoint() {
+        let mut world = World::new(bounds(), 42).unwrap();
+        world.spawn_fish(1, Point { x: 0.0, y: 0.0 }, 1.2).unwrap();
+        for _ in 0..3000 {
+            world.step();
+            if matches!(
+                world.fish()[0].ambient.as_ref(),
+                Some(AmbientBehavior::Explore { .. })
+            ) {
+                break;
+            }
+        }
+        assert!(matches!(
+            world.fish()[0].ambient.as_ref(),
+            Some(AmbientBehavior::Explore { .. })
+        ));
+        let original_until = world.fish()[0].ambient.as_ref().unwrap().until_tick();
+        let resting = world.fish()[0].position;
+        let mut restored = World::restore(world.checkpoint()).unwrap();
+        for _ in 0..10 {
+            world.step();
+            restored.step();
+            assert_eq!(world.fish(), restored.fish());
+            assert_eq!(
+                world.fish()[0].position,
+                resting,
+                "fish must pause before exploring"
+            );
+        }
+        let mut moved_vertically = false;
+        let mut resumed = false;
+        for _ in 0..280 {
+            world.step();
+            restored.step();
+            assert_eq!(world.fish(), restored.fish());
+            moved_vertically |= (world.fish()[0].position.y - resting.y).abs() > 0.3;
+            resumed |= world.tick >= original_until
+                && world.fish()[0]
+                    .ambient
+                    .as_ref()
+                    .is_none_or(|state| state.until_tick() != original_until);
+        }
+        assert!(moved_vertically);
+        assert!(
+            resumed,
+            "the original investigation must end and release its goal"
+        );
+    }
+
+    #[test]
+    fn a_close_approach_startles_one_fish_then_expires() {
+        let mut world = World::new(bounds(), 0).unwrap();
+        world
+            .spawn_fish(1, Point { x: -0.35, y: 0.0 }, 1.2)
+            .unwrap();
+        world.spawn_fish(2, Point { x: 0.35, y: 0.0 }, 1.2).unwrap();
+        world.tick = 119;
+        world.step();
+        assert_eq!(
+            world
+                .fish()
+                .iter()
+                .filter(|fish| matches!(
+                    fish.ambient.as_ref(),
+                    Some(AmbientBehavior::Startled { .. })
+                ))
+                .count(),
+            1
+        );
+        let mut restored = World::restore(world.checkpoint()).unwrap();
+        for _ in 0..65 {
+            world.step();
+            restored.step();
+            assert_eq!(world.fish(), restored.fish());
+        }
+        assert!(world.fish().iter().all(|fish| !matches!(
+            fish.ambient.as_ref(),
+            Some(AmbientBehavior::Startled { .. })
+        )));
+    }
+
+    #[test]
+    fn fish_pass_close_without_crossing_through_each_others_bodies() {
+        let mut world = World::new(bounds(), 41).unwrap();
+        world.spawn_fish(1, Point { x: -2.4, y: 0.0 }, 1.8).unwrap();
+        world.spawn_fish(2, Point { x: 2.4, y: 0.0 }, 1.8).unwrap();
+        world.fish[0].target = Point { x: 3.0, y: 0.0 };
+        world.fish[1].target = Point { x: -3.0, y: 0.0 };
+        world.fish[0].depth_target = 0.0;
+        world.fish[1].depth_target = 0.0;
+        world.fish[1].heading = Point { x: -1.0, y: 0.0 };
+        let mut closest = f32::MAX;
+        let mut moving = [0; 2];
+        for _ in 0..160 {
+            let before = [world.fish()[0].position, world.fish()[1].position];
+            world.step();
+            let gap = body_gap(
+                BodyPose::from(&world.fish()[0]),
+                BodyPose::from(&world.fish()[1]),
+            );
+            assert!(gap >= -0.35, "fish bodies deeply overlapped by {gap}");
+            let projected = silhouette_gap(
+                BodyPose::from(&world.fish()[0]),
+                BodyPose::from(&world.fish()[1]),
+            );
+            assert!(
+                projected >= -0.35,
+                "fish silhouettes deeply overlapped by {projected}"
+            );
+            closest = closest.min(gap);
+            for (index, previous) in before.iter().enumerate() {
+                if world.fish()[index].position.distance_squared(*previous) > 0.000025 {
+                    moving[index] += 1;
+                }
+            }
+        }
+        assert!(closest < 0.4, "the fish should pass close to each other");
+        assert!(
+            moving.iter().all(|ticks| *ticks > 80),
+            "neither fish may wait for the other"
+        );
+        assert!(world.fish()[0].position.x > 0.0);
+        assert!(world.fish()[1].position.x < 0.0);
+    }
+
+    #[test]
+    fn fish_at_different_depths_do_not_cross_completely_on_screen() {
+        let mut world = World::new(bounds(), 41).unwrap();
+        world.spawn_fish(1, Point { x: -2.4, y: 0.0 }, 1.8).unwrap();
+        world.spawn_fish(2, Point { x: 2.4, y: 0.0 }, 1.8).unwrap();
+        world.fish[0].target = Point { x: 3.0, y: 0.0 };
+        world.fish[1].target = Point { x: -3.0, y: 0.0 };
+        world.fish[0].depth = -1.0;
+        world.fish[0].depth_target = -1.0;
+        world.fish[1].depth = 1.0;
+        world.fish[1].depth_target = 1.0;
+        world.fish[1].heading = Point { x: -1.0, y: 0.0 };
+        let mut moving = [0; 2];
+        let mut passed = false;
+        for _ in 0..160 {
+            let before = [world.fish()[0].position, world.fish()[1].position];
+            world.step();
+            passed |= world.fish()[0].position.x > world.fish()[1].position.x;
+            let gap = silhouette_gap(
+                BodyPose::from(&world.fish()[0]),
+                BodyPose::from(&world.fish()[1]),
+            );
+            assert!(gap >= -0.35, "fish silhouettes deeply overlapped by {gap}");
+            for (index, previous) in before.iter().enumerate() {
+                if world.fish()[index].position.distance_squared(*previous) > 0.000025 {
+                    moving[index] += 1;
+                }
+            }
+        }
+        assert!(moving.iter().all(|ticks| *ticks > 80));
+        assert!(
+            passed,
+            "fish never passed: {:?} / {:?}",
+            world.fish()[0].position,
+            world.fish()[1].position
+        );
+    }
+
+    #[test]
+    fn feeding_preempts_exploration_and_removing_a_peer_ends_an_approach() {
+        let mut world = World::new(bounds(), 17).unwrap();
+        world.spawn_fish(1, Point { x: 0.0, y: 0.0 }, 1.2).unwrap();
+        world.spawn_fish(2, Point { x: 1.0, y: 0.0 }, 1.2).unwrap();
+        let resume = world.fish()[0].target;
+        let resume_depth = world.fish()[0].depth_target;
+        world.fish[0].ambient = Some(AmbientBehavior::Explore {
+            until_tick: 100,
+            rest_until_tick: 10,
+            resume_target: resume,
+            resume_depth,
+        });
+        world
+            .start_feed("00000000000000000000000000000001", Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        world.step();
+        assert!(
+            world.fish()[0].ambient.is_none(),
+            "food must interrupt exploration"
+        );
+        world.cancel_feed("00000000000000000000000000000001");
+        let resume = world.fish()[0].target;
+        let resume_depth = world.fish()[0].depth_target;
+        world.fish[0].ambient = Some(AmbientBehavior::Approach {
+            until_tick: world.tick + 100,
+            peer_id: fish_id(2),
+            resume_target: resume,
+            resume_depth,
+        });
+        world.remove_fish(2).unwrap();
+        assert!(world.fish()[0].ambient.is_none());
+        World::restore(world.checkpoint()).unwrap();
     }
 
     #[test]
