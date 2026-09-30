@@ -2245,7 +2245,10 @@ mod tests {
                     .is_none_or(|state| state.until_tick() != original_until);
         }
         assert!(moved_vertically);
-        assert!(resumed, "the original investigation must end and release its goal");
+        assert!(
+            resumed,
+            "the original investigation must end and release its goal"
+        );
     }
 
     #[test]

@@ -634,6 +634,8 @@ Owner может закрыть окно PIN/QR отдельным DELETE с Ori
 
 Локальный `swim.html` заменил общий повторяемый маршрут на три рыбы с разными целями, скоростью и короткими реакциями. На сохранённом пользовательском черновике визуально проверен браузерный просмотр. `node tools/test-swim-path.mjs`, `npm run typecheck`, TypeScript проверка прототипа, `npm exec vite build`, Chrome renderer test и `git diff --check` — PASS. Полный `npm run build` на Windows — `NOT_RUN` из-за отсутствующего `cargo`; Ubuntu CI проверит Rust/WASM. Физический TV остаётся `NOT_RUN`.
 
+[Первый CI после предпросмотра](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36674083943) остановился на `cargo fmt --check`: одному утверждению требовался перенос строки. Точный diff применён; повторный CI — `NOT_RUN` до push. [Repository policy](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36674083945) — PASS.
+
 Первый серверный проход по ADR-028: индивидуальный плавно меняющийся темп, пауза и выбор поверхности/дна, редкое сближение одной пары, побег испуганной рыбы и возврат к сохранённой цели. Новое состояние имеет значение по умолчанию для старых checkpoint; корм/лодка его прерывают. Добавлены проверки изменения темпа, восстановления с середины эпизода, сближения и удаления партнёра. Rust toolchain на Windows недоступен (WSL-дистрибутив и Docker daemon отсутствуют), поэтому компиляция и тесты — NOT_RUN до Ubuntu CI; `git diff --check` — PASS.
 
 Первый [Ubuntu CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36672814752) для `b4c5d28` остановился на `rustfmt`, до компиляции и тестов не дошёл. Точный diff форматтера (26 участков) применён без изменения логики; повторная проверка — NOT_RUN до push.
