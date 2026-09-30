@@ -49,7 +49,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
   private readonly movement = new Map<string, { from: Point2 & { depth: number };
     to: Point2 & { depth: number }; started: number }>();
   private readonly fishMotion = new Map<string, { yaw: number; pitch: number;
-    phase: number; tail?: TransformNode }>();
+    phase: number; hasPositionFrame: boolean; tail?: TransformNode }>();
   private readonly boatMovement = new Map<string, { from: Point2; to: Point2; started: number }>();
   private readonly interactionPlane = Plane.FromPositionAndNormal(Vector3.Zero(), new Vector3(0, 0, 1));
   private readonly resizeObserver: ResizeObserver;
@@ -138,6 +138,11 @@ export class BabylonRendererAdapter implements RendererAdapter {
       if (!Number.isFinite(item.position.x) || !Number.isFinite(item.position.y) ||
           (item.depth !== undefined && (!Number.isFinite(item.depth) || Math.abs(item.depth) > 1.5))) continue;
       const depth = item.depth ?? marker.position.z;
+      const visual = this.fishMotion.get(item.id);
+      // A snapshot has no depth. Its first position frame supplies the real Z;
+      // that initial correction is not swimming and must not point the nose at it.
+      const firstFrame = visual && !visual.hasPositionFrame;
+      if (firstFrame) marker.position.z = depth;
       const dx = item.position.x - marker.position.x;
       const dy = item.position.y - marker.position.y;
       const dz = depth - marker.position.z;
@@ -146,7 +151,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
         to: { ...item.position, depth },
         started: now,
       });
-      const visual = this.fishMotion.get(item.id);
+      if (visual) visual.hasPositionFrame = true;
       if (visual && Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y)) {
         const headingDepth = item.headingDepth ?? 0;
         if (Number.isFinite(headingDepth) && Math.abs(headingDepth) <= 1) {
@@ -154,7 +159,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
           // Babylon +X. Follow the visible interpolation segment; a delayed
           // heading frame must never make the fish slide tail-first. When the
           // position is unchanged, keep the server heading for the next turn.
-          const moving = Math.hypot(dx, dy, dz) > .001;
+          const moving = !firstFrame && Math.hypot(dx, dy, dz) > .001;
           const forwardX = moving ? dx : item.heading.x;
           const forwardY = moving ? dy : item.heading.y;
           const forwardZ = moving ? dz : headingDepth;
@@ -212,7 +217,7 @@ export class BabylonRendererAdapter implements RendererAdapter {
       loading.material = this.fallbackMaterial;
       this.loadingMarkers.set(entity.id, loading);
       this.markers.set(entity.id, marker);
-      this.fishMotion.set(entity.id, { yaw: 0, pitch: 0,
+      this.fishMotion.set(entity.id, { yaw: 0, pitch: 0, hasPositionFrame: false,
         phase: [...entity.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) * .31 });
       this.entityVersions.set(entity.id, version);
       if (entity.definitionVersion !== 1 || !modelByDefinition[entity.definitionId])

@@ -113,6 +113,24 @@ try {
     sharedEyeMaterial: true, texturesReady: true, lightweightPaint: true,
     firstVisible: true, secondVisible: true });
   assert.equal(coralRequests, 1, 'one model download serves two Entity instances');
+  const initialPose = await desktop.evaluate(async () => {
+    const adapter = window.coreAdapter;
+    adapter.applyPositions({ type: 'positions', schemaVersion: 1,
+      sceneId: 'scene-1', sceneEpoch: 1, revision: 1, simulationTick: 9,
+      positions: [{ id: 'fish-1', position: { x: 2, y: -1 }, depth: -1.2,
+        heading: { x: 1, y: 0 }, headingDepth: 0 }],
+    });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const eye = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.material?.name === 'eye');
+    const tail = adapter.scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
+      mesh.name.includes('tail-pivot') && mesh.material?.name.endsWith('/paint'));
+    return { depth: adapter.scene.getTransformNodeByName('fish-1').position.z,
+      eyeX: eye?.getBoundingInfo().boundingBox.centerWorld.x,
+      tailX: tail?.getBoundingInfo().boundingBox.centerWorld.x };
+  });
+  assert(Math.abs(initialPose.depth + 1.2) < .01 && initialPose.eyeX > initialPose.tailX,
+    `Initial depth correction must keep the nose forward: ${JSON.stringify(initialPose)}`);
   await desktop.evaluate(() => window.coreAdapter.applyPositions({
     type: 'positions', schemaVersion: 1, sceneId: 'scene-1', sceneEpoch: 1,
     revision: 1, simulationTick: 10,
@@ -129,7 +147,9 @@ try {
     const marker = scene.getTransformNodeByName('fish-1');
     const tail = scene.getNodeByName('fish-1/tail-pivot');
     const first = tail?.rotation.y;
-    await new Promise(resolve => setTimeout(resolve, 170));
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const middle = tail?.rotation.y;
+    await new Promise(resolve => setTimeout(resolve, 120));
     const yaw = marker.rotation.y;
     const eyeMesh = scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') && mesh.material?.name === 'eye');
     const tailMesh = scene.meshes.find(mesh => mesh.name.startsWith('fish-1/') &&
@@ -138,10 +158,11 @@ try {
     const tailCenter = tailMesh?.getBoundingInfo().boundingBox.centerWorld;
     const noseVector = eyeCenter && tailCenter ? eyeCenter.subtract(tailCenter) : null;
     const noseDotMotion = noseVector &&
-      (noseVector.x + noseVector.z * 1.2) /
-      (Math.hypot(noseVector.x, noseVector.z) * Math.hypot(1, 1.2));
+      (noseVector.x + noseVector.z * 2.4) /
+      (Math.hypot(noseVector.x, noseVector.z) * Math.hypot(1, 2.4));
     return { depth: marker.position.z, scale: marker.scaling.x, yaw, noseDotMotion,
-      tailPresent: !!tail, tailMoved: Math.abs(tail?.rotation.y - first) > .02,
+      tailPresent: !!tail, tailMoved: Math.max(Math.abs(middle - first),
+        Math.abs(tail?.rotation.y - middle)) > .02,
       tailNames: scene.meshes.concat(scene.transformNodes).filter(node => node.name.includes('tail')).map(node => node.name) };
   });
   assert(Math.abs(depthVisual.depth - 1.2) < .01 && depthVisual.scale < .9 &&
