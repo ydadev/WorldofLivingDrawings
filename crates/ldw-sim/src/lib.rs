@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FISH: usize = 100;
 pub const MAX_OBSTACLES: usize = 16;
+pub const MAX_ACTION_DEFINITIONS: usize = 8;
 pub const TICKS_PER_SECOND: u64 = 20;
 const FISH_RADIUS: f32 = 0.18;
 pub const MIN_DEPTH: f32 = -1.5;
@@ -33,6 +34,56 @@ pub struct WorldInteractionRules {
     pub boat_behavior: BoatBehavior,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InteractionEffect {
+    Attraction,
+    Threat,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionDefinition {
+    pub id: String,
+    pub label: String,
+    pub allowed_zone_id: String,
+    pub effect: InteractionEffect,
+    pub rule: EffectRule,
+    pub feed_behavior: Option<FeedBehavior>,
+    pub boat_behavior: Option<BoatBehavior>,
+}
+
+impl ActionDefinition {
+    fn valid(&self, bounds: Bounds) -> bool {
+        let width = bounds.max_x - bounds.min_x;
+        let safe_label = !self.label.is_empty()
+            && self.label.chars().count() <= 64
+            && !self.label.chars().any(char::is_control);
+        valid_definition_id(&self.id)
+            && safe_label
+            && self.allowed_zone_id == "water"
+            && self.rule.definition_version > 0
+            && self.rule.radius.is_finite()
+            && self.rule.radius > 0.0
+            && self.rule.radius < width / 2.0
+            && (1..=1200).contains(&self.rule.duration_ticks)
+            && self.rule.cooldown_ticks <= 1200
+            && match self.effect {
+                InteractionEffect::Attraction => {
+                    self.boat_behavior.is_none()
+                        && (1..=3).contains(&self.rule.max_active)
+                        && self.feed_behavior.is_some_and(FeedBehavior::valid)
+                }
+                InteractionEffect::Threat => {
+                    self.feed_behavior.is_none()
+                        && self.rule.max_active == 1
+                        && self
+                            .boat_behavior
+                            .is_some_and(|behavior| behavior.valid(bounds, self.rule.radius))
+                }
+            }
+    }
+}
+
 // The bounded v2 behavior chain is compiled to these parameters before a scene
 // starts. Defaults preserve the exact behavior of v1 checkpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -56,6 +107,19 @@ impl Default for FeedBehavior {
     }
 }
 
+impl FeedBehavior {
+    fn valid(self) -> bool {
+        (1..=MAX_FISH).contains(&self.candidate_limit)
+            && (1..=10).contains(&self.reserve_limit)
+            && self.target_depth.is_finite()
+            && (MIN_DEPTH..=MAX_DEPTH).contains(&self.target_depth)
+            && self.eating_radius.is_finite()
+            && (0.1..=0.6).contains(&self.eating_radius)
+            && self.eating_depth_tolerance.is_finite()
+            && (0.1..=0.6).contains(&self.eating_depth_tolerance)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoatBehavior {
     pub candidate_limit: usize,
@@ -72,6 +136,19 @@ impl Default for BoatBehavior {
             release_radius_factor: 1.25,
             escape_depth: MAX_DEPTH - 0.2,
         }
+    }
+}
+
+impl BoatBehavior {
+    fn valid(self, bounds: Bounds, radius: f32) -> bool {
+        let width = bounds.max_x - bounds.min_x;
+        (1..=MAX_FISH).contains(&self.candidate_limit)
+            && self.hold_ticks <= 120
+            && self.release_radius_factor.is_finite()
+            && (1.0..=2.0).contains(&self.release_radius_factor)
+            && radius * self.release_radius_factor < width / 2.0
+            && self.escape_depth.is_finite()
+            && (MIN_DEPTH..=MAX_DEPTH).contains(&self.escape_depth)
     }
 }
 
@@ -114,21 +191,8 @@ impl WorldInteractionRules {
         }) && (1..=3).contains(&self.feed.max_active)
             && self.boat.max_active == 1
             && self.boat.priority > self.feed.priority
-            && (1..=MAX_FISH).contains(&self.feed_behavior.candidate_limit)
-            && (1..=10).contains(&self.feed_behavior.reserve_limit)
-            && self.feed_behavior.target_depth.is_finite()
-            && (MIN_DEPTH..=MAX_DEPTH).contains(&self.feed_behavior.target_depth)
-            && self.feed_behavior.eating_radius.is_finite()
-            && (0.1..=0.6).contains(&self.feed_behavior.eating_radius)
-            && self.feed_behavior.eating_depth_tolerance.is_finite()
-            && (0.1..=0.6).contains(&self.feed_behavior.eating_depth_tolerance)
-            && (1..=MAX_FISH).contains(&self.boat_behavior.candidate_limit)
-            && self.boat_behavior.hold_ticks <= 120
-            && self.boat_behavior.release_radius_factor.is_finite()
-            && (1.0..=2.0).contains(&self.boat_behavior.release_radius_factor)
-            && self.boat.radius * self.boat_behavior.release_radius_factor < width / 2.0
-            && self.boat_behavior.escape_depth.is_finite()
-            && (MIN_DEPTH..=MAX_DEPTH).contains(&self.boat_behavior.escape_depth)
+            && self.feed_behavior.valid()
+            && self.boat_behavior.valid(bounds, self.boat.radius)
     }
 }
 
@@ -223,6 +287,8 @@ impl Default for FishCapabilities {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedSource {
     pub id: String,
+    #[serde(default = "default_feed_interaction_id")]
+    pub interaction_id: String,
     pub position: Point,
     pub remaining: u8,
     pub expires_at_tick: u64,
@@ -233,6 +299,8 @@ pub struct FeedSource {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Boat {
     pub id: String,
+    #[serde(default = "default_boat_interaction_id")]
+    pub interaction_id: String,
     pub position: Point,
     pub entry: Point,
     pub via: Point,
@@ -275,6 +343,7 @@ pub enum SimError {
     BoatLimit,
     InvalidBoatRoute,
     InvalidInteractionRules,
+    UnknownInteraction,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -287,6 +356,8 @@ pub struct WorldCheckpoint {
     pub seed: u64,
     #[serde(default)]
     pub interaction_rules: WorldInteractionRules,
+    #[serde(default)]
+    pub action_definitions: Vec<ActionDefinition>,
     #[serde(default)]
     pub feed_sources: Vec<FeedSource>,
     #[serde(default)]
@@ -301,6 +372,7 @@ pub struct World {
     tick: u64,
     seed: u64,
     interaction_rules: WorldInteractionRules,
+    action_definitions: Vec<ActionDefinition>,
     feed_sources: Vec<FeedSource>,
     boat: Option<Boat>,
 }
@@ -328,9 +400,24 @@ impl World {
             tick: 0,
             seed,
             interaction_rules,
+            action_definitions: Vec::new(),
             feed_sources: Vec::new(),
             boat: None,
         })
+    }
+
+    pub fn new_with_catalog(
+        bounds: Bounds,
+        seed: u64,
+        interaction_rules: WorldInteractionRules,
+        action_definitions: Vec<ActionDefinition>,
+    ) -> Result<Self, SimError> {
+        let mut world = Self::new_with_rules(bounds, seed, interaction_rules)?;
+        if !valid_action_catalog(&action_definitions, interaction_rules, bounds) {
+            return Err(SimError::InvalidInteractionRules);
+        }
+        world.action_definitions = action_definitions;
+        Ok(world)
     }
 
     pub fn tick_number(&self) -> u64 {
@@ -339,6 +426,10 @@ impl World {
 
     pub fn interaction_rules(&self) -> WorldInteractionRules {
         self.interaction_rules
+    }
+
+    pub fn action_definitions(&self) -> &[ActionDefinition] {
+        &self.action_definitions
     }
 
     pub fn checkpoint(&self) -> WorldCheckpoint {
@@ -350,6 +441,7 @@ impl World {
             tick: self.tick,
             seed: self.seed,
             interaction_rules: self.interaction_rules,
+            action_definitions: self.action_definitions.clone(),
             feed_sources: self.feed_sources.clone(),
             boat: self.boat.clone(),
         }
@@ -359,6 +451,11 @@ impl World {
         if checkpoint.schema_version != 1
             || !checkpoint.bounds.valid()
             || !checkpoint.interaction_rules.valid(checkpoint.bounds)
+            || !valid_action_catalog(
+                &checkpoint.action_definitions,
+                checkpoint.interaction_rules,
+                checkpoint.bounds,
+            )
             || checkpoint.fish.len() > MAX_FISH
             || checkpoint.obstacles.len() > MAX_OBSTACLES
             || checkpoint.feed_sources.len() > checkpoint.interaction_rules.feed.max_active
@@ -378,6 +475,11 @@ impl World {
         for source in &checkpoint.feed_sources {
             let mut fed = std::collections::HashSet::new();
             if !valid_feed_id(&source.id)
+                || !valid_action_for_effect(
+                    &checkpoint.action_definitions,
+                    &source.interaction_id,
+                    InteractionEffect::Attraction,
+                )
                 || !feed_ids.insert(source.id.as_str())
                 || !valid_point(source.position, checkpoint.bounds, &checkpoint.obstacles)
                 || source.remaining == 0
@@ -394,6 +496,11 @@ impl World {
         }
         if let Some(boat) = &checkpoint.boat {
             if !valid_action_id(&boat.id)
+                || !valid_action_for_effect(
+                    &checkpoint.action_definitions,
+                    &boat.interaction_id,
+                    InteractionEffect::Threat,
+                )
                 || boat.phase > 1
                 || boat.expires_at_tick <= checkpoint.tick
                 || !boat_route_valid(boat, checkpoint.bounds, &checkpoint.obstacles)
@@ -437,6 +544,7 @@ impl World {
             tick: checkpoint.tick,
             seed: checkpoint.seed,
             interaction_rules: checkpoint.interaction_rules,
+            action_definitions: checkpoint.action_definitions,
             feed_sources: checkpoint.feed_sources,
             boat: checkpoint.boat,
         })
@@ -455,6 +563,74 @@ impl World {
     }
 
     pub fn start_boat(&mut self, id: &str, via: Point) -> Result<(), SimError> {
+        self.start_action("boat", id, via)
+    }
+
+    pub fn start_feed(&mut self, id: &str, position: Point) -> Result<(), SimError> {
+        self.start_action("feed", id, position)
+    }
+
+    pub fn start_action(
+        &mut self,
+        interaction_id: &str,
+        id: &str,
+        point: Point,
+    ) -> Result<(), SimError> {
+        if let Some((rule, _)) = self.feed_policy(interaction_id) {
+            return self.start_feed_for(interaction_id, id, point, rule);
+        }
+        if let Some((rule, _)) = self.boat_policy(interaction_id) {
+            return self.start_boat_for(interaction_id, id, point, rule);
+        }
+        Err(SimError::UnknownInteraction)
+    }
+
+    fn feed_policy(&self, interaction_id: &str) -> Option<(EffectRule, FeedBehavior)> {
+        if self.action_definitions.is_empty() {
+            return (interaction_id == "feed").then_some((
+                self.interaction_rules.feed,
+                self.interaction_rules.feed_behavior,
+            ));
+        }
+        self.action_definitions
+            .iter()
+            .find(|definition| {
+                definition.id == interaction_id
+                    && definition.effect == InteractionEffect::Attraction
+            })
+            .and_then(|definition| {
+                definition
+                    .feed_behavior
+                    .map(|behavior| (definition.rule, behavior))
+            })
+    }
+
+    fn boat_policy(&self, interaction_id: &str) -> Option<(EffectRule, BoatBehavior)> {
+        if self.action_definitions.is_empty() {
+            return (interaction_id == "boat").then_some((
+                self.interaction_rules.boat,
+                self.interaction_rules.boat_behavior,
+            ));
+        }
+        self.action_definitions
+            .iter()
+            .find(|definition| {
+                definition.id == interaction_id && definition.effect == InteractionEffect::Threat
+            })
+            .and_then(|definition| {
+                definition
+                    .boat_behavior
+                    .map(|behavior| (definition.rule, behavior))
+            })
+    }
+
+    fn start_boat_for(
+        &mut self,
+        interaction_id: &str,
+        id: &str,
+        via: Point,
+        rule: EffectRule,
+    ) -> Result<(), SimError> {
         if !valid_action_id(id) {
             return Err(SimError::InvalidBoatId);
         }
@@ -479,13 +655,12 @@ impl World {
         };
         let boat = Boat {
             id: id.to_owned(),
+            interaction_id: interaction_id.to_owned(),
             position: entry,
             entry,
             via,
             exit,
-            expires_at_tick: self
-                .tick
-                .saturating_add(self.interaction_rules.boat.duration_ticks),
+            expires_at_tick: self.tick.saturating_add(rule.duration_ticks),
             phase: 0,
         };
         if !boat_route_valid(&boat, self.bounds, &self.obstacles) {
@@ -510,7 +685,13 @@ impl World {
         true
     }
 
-    pub fn start_feed(&mut self, id: &str, position: Point) -> Result<(), SimError> {
+    fn start_feed_for(
+        &mut self,
+        interaction_id: &str,
+        id: &str,
+        position: Point,
+        rule: EffectRule,
+    ) -> Result<(), SimError> {
         if !valid_feed_id(id) {
             return Err(SimError::InvalidFeedId);
         }
@@ -520,16 +701,22 @@ impl World {
         if self.feed_sources.iter().any(|source| source.id == id) {
             return Err(SimError::DuplicateFeed);
         }
-        if self.feed_sources.len() >= self.interaction_rules.feed.max_active {
+        if self.feed_sources.len() >= self.interaction_rules.feed.max_active
+            || self
+                .feed_sources
+                .iter()
+                .filter(|source| source.interaction_id == interaction_id)
+                .count()
+                >= rule.max_active
+        {
             return Err(SimError::FeedLimit);
         }
         self.feed_sources.push(FeedSource {
             id: id.to_owned(),
+            interaction_id: interaction_id.to_owned(),
             position,
             remaining: 10,
-            expires_at_tick: self
-                .tick
-                .saturating_add(self.interaction_rules.feed.duration_ticks),
+            expires_at_tick: self.tick.saturating_add(rule.duration_ticks),
             fed_fish: Vec::new(),
         });
         Ok(())
@@ -668,6 +855,17 @@ impl World {
         {
             self.boat = None;
         }
+        let (boat_rule, boat_behavior) = self
+            .boat
+            .as_ref()
+            .map(|boat| {
+                self.boat_policy(&boat.interaction_id)
+                    .expect("active boat has a validated definition")
+            })
+            .unwrap_or((
+                self.interaction_rules.boat,
+                self.interaction_rules.boat_behavior,
+            ));
         let threatened_ids = self.boat.as_ref().map(|boat| {
             let mut candidates: Vec<_> = self
                 .fish
@@ -675,15 +873,14 @@ impl World {
                 .filter(|fish| {
                     fish.capabilities.avoid_threat
                         && !fish.fleeing
-                        && fish.position.distance_squared(boat.position)
-                            <= self.interaction_rules.boat.radius.powi(2)
+                        && fish.position.distance_squared(boat.position) <= boat_rule.radius.powi(2)
                 })
                 .map(|fish| (fish.position.distance_squared(boat.position), fish.id))
                 .collect();
             candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
             candidates
                 .into_iter()
-                .take(self.interaction_rules.boat_behavior.candidate_limit)
+                .take(boat_behavior.candidate_limit)
                 .map(|(_, id)| id)
                 .collect::<Vec<_>>()
         });
@@ -704,15 +901,10 @@ impl World {
             {
                 fish.fleeing = true;
                 newly_fleeing = true;
-                fish.threat_hold_until_tick = self
-                    .tick
-                    .saturating_add(self.interaction_rules.boat_behavior.hold_ticks);
+                fish.threat_hold_until_tick = self.tick.saturating_add(boat_behavior.hold_ticks);
                 fish.waypoint = None;
             } else if fish.fleeing
-                && distance_sq
-                    > (self.interaction_rules.boat.radius
-                        * self.interaction_rules.boat_behavior.release_radius_factor)
-                        .powi(2)
+                && distance_sq > (boat_rule.radius * boat_behavior.release_radius_factor).powi(2)
                 && self.tick >= fish.threat_hold_until_tick
             {
                 fish.fleeing = false;
@@ -733,15 +925,24 @@ impl World {
                 )
             {
                 fish.target = target;
-                fish.depth_target = self.interaction_rules.boat_behavior.escape_depth;
+                fish.depth_target = boat_behavior.escape_depth;
                 fish.waypoint = None;
                 fish.stuck_ticks = 0;
             }
         }
         self.feed_sources
             .retain(|source| source.remaining > 0 && source.expires_at_tick > self.tick);
+        let feed_policies: Vec<_> = self
+            .feed_sources
+            .iter()
+            .map(|source| {
+                self.feed_policy(&source.interaction_id)
+                    .expect("active feed has a validated definition")
+            })
+            .collect();
         let mut assignments = vec![None; self.fish.len()];
         for (source_index, source) in self.feed_sources.iter().enumerate() {
+            let (feed_rule, feed_behavior) = feed_policies[source_index];
             let mut candidates: Vec<_> = self
                 .fish
                 .iter()
@@ -752,7 +953,7 @@ impl World {
                         && !fish.fleeing
                         && !source.fed_fish.contains(&fish_id(fish.id))
                         && fish.position.distance_squared(source.position)
-                            <= self.interaction_rules.feed.radius.powi(2)
+                            <= feed_rule.radius.powi(2)
                         && (segment_clear(fish.position, source.position, &self.obstacles)
                             || plan_waypoint(
                                 fish.position,
@@ -774,8 +975,8 @@ impl World {
             candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)));
             for (index, _, _) in candidates.into_iter().take(
                 (source.remaining as usize)
-                    .min(self.interaction_rules.feed_behavior.reserve_limit)
-                    .min(self.interaction_rules.feed_behavior.candidate_limit),
+                    .min(feed_behavior.reserve_limit)
+                    .min(feed_behavior.candidate_limit),
             ) {
                 assignments[index] = Some(source_index);
             }
@@ -796,7 +997,7 @@ impl World {
                     &self.obstacles,
                 )
                 .unwrap_or(source.position);
-                fish.depth_target = self.interaction_rules.feed_behavior.target_depth;
+                fish.depth_target = feed_policies[*source_index].1.target_depth;
                 fish.waypoint = None;
             }
         }
@@ -909,13 +1110,15 @@ impl World {
             }
         }
         for fish in &mut self.fish {
-            let Some(source) = self.feed_sources.iter_mut().find(|source| {
-                fish.feeding.as_deref() == Some(source.id.as_str())
-                    && fish.position.distance_squared(source.position)
-                        <= self.interaction_rules.feed_behavior.eating_radius.powi(2)
-                    && (fish.depth - self.interaction_rules.feed_behavior.target_depth).abs()
-                        <= self.interaction_rules.feed_behavior.eating_depth_tolerance
-            }) else {
+            let Some((source, _)) = self.feed_sources.iter_mut().zip(feed_policies.iter()).find(
+                |(source, (_, behavior))| {
+                    fish.feeding.as_deref() == Some(source.id.as_str())
+                        && fish.position.distance_squared(source.position)
+                            <= behavior.eating_radius.powi(2)
+                        && (fish.depth - behavior.target_depth).abs()
+                            <= behavior.eating_depth_tolerance
+                },
+            ) else {
                 continue;
             };
             if source.remaining > 0 && !source.fed_fish.contains(&fish_id(fish.id)) {
@@ -946,6 +1149,86 @@ fn clear_action_target(fish: &mut Fish) {
     fish.depth_target = fish.depth;
     fish.waypoint = None;
     fish.stuck_ticks = 0;
+}
+
+fn default_feed_interaction_id() -> String {
+    "feed".into()
+}
+
+fn default_boat_interaction_id() -> String {
+    "boat".into()
+}
+
+fn valid_definition_id(id: &str) -> bool {
+    (2..=64).contains(&id.len())
+        && id.as_bytes()[0].is_ascii_lowercase()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_action_for_effect(
+    definitions: &[ActionDefinition],
+    id: &str,
+    effect: InteractionEffect,
+) -> bool {
+    if definitions.is_empty() {
+        return matches!(
+            (id, effect),
+            ("feed", InteractionEffect::Attraction) | ("boat", InteractionEffect::Threat)
+        );
+    }
+    definitions
+        .iter()
+        .any(|definition| definition.id == id && definition.effect == effect)
+}
+
+fn valid_action_catalog(
+    definitions: &[ActionDefinition],
+    rules: WorldInteractionRules,
+    bounds: Bounds,
+) -> bool {
+    if definitions.is_empty() {
+        return true;
+    }
+    if !(2..=MAX_ACTION_DEFINITIONS).contains(&definitions.len()) {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::with_capacity(definitions.len());
+    if definitions
+        .iter()
+        .any(|definition| !definition.valid(bounds) || !seen.insert(definition.id.as_str()))
+    {
+        return false;
+    }
+    let feed = definitions
+        .iter()
+        .find(|definition| definition.id == "feed");
+    let boat = definitions
+        .iter()
+        .find(|definition| definition.id == "boat");
+    if !feed.is_some_and(|definition| {
+        definition.effect == InteractionEffect::Attraction
+            && definition.rule == rules.feed
+            && definition.feed_behavior == Some(rules.feed_behavior)
+    }) || !boat.is_some_and(|definition| {
+        definition.effect == InteractionEffect::Threat
+            && definition.rule == rules.boat
+            && definition.boat_behavior == Some(rules.boat_behavior)
+    }) {
+        return false;
+    }
+    let strongest_attraction = definitions
+        .iter()
+        .filter(|definition| definition.effect == InteractionEffect::Attraction)
+        .map(|definition| definition.rule.priority)
+        .max();
+    let weakest_threat = definitions
+        .iter()
+        .filter(|definition| definition.effect == InteractionEffect::Threat)
+        .map(|definition| definition.rule.priority)
+        .min();
+    matches!((strongest_attraction, weakest_threat), (Some(a), Some(t)) if t > a)
 }
 
 fn fish_id(id: u128) -> String {
@@ -1225,6 +1508,233 @@ mod tests {
             min_y: -4.0,
             max_y: 4.0,
         }
+    }
+
+    fn action_catalog(rules: WorldInteractionRules) -> Vec<ActionDefinition> {
+        let mut slow_feed = rules.feed;
+        slow_feed.radius = 2.0;
+        slow_feed.duration_ticks = 40;
+        slow_feed.max_active = 2;
+        let mut slow_behavior = rules.feed_behavior;
+        slow_behavior.candidate_limit = 1;
+        slow_behavior.reserve_limit = 1;
+        slow_behavior.target_depth = -0.8;
+        let mut small_boat = rules.boat;
+        small_boat.priority += 1;
+        small_boat.duration_ticks = 80;
+        let mut small_behavior = rules.boat_behavior;
+        small_behavior.candidate_limit = 1;
+        small_behavior.escape_depth = -0.8;
+        vec![
+            ActionDefinition {
+                id: "feed".into(),
+                label: "Корм".into(),
+                allowed_zone_id: "water".into(),
+                effect: InteractionEffect::Attraction,
+                rule: rules.feed,
+                feed_behavior: Some(rules.feed_behavior),
+                boat_behavior: None,
+            },
+            ActionDefinition {
+                id: "boat".into(),
+                label: "Лодка".into(),
+                allowed_zone_id: "water".into(),
+                effect: InteractionEffect::Threat,
+                rule: rules.boat,
+                feed_behavior: None,
+                boat_behavior: Some(rules.boat_behavior),
+            },
+            ActionDefinition {
+                id: "feed-slow".into(),
+                label: "Медленный корм".into(),
+                allowed_zone_id: "water".into(),
+                effect: InteractionEffect::Attraction,
+                rule: slow_feed,
+                feed_behavior: Some(slow_behavior),
+                boat_behavior: None,
+            },
+            ActionDefinition {
+                id: "boat-small".into(),
+                label: "Малая лодка".into(),
+                allowed_zone_id: "water".into(),
+                effect: InteractionEffect::Threat,
+                rule: small_boat,
+                feed_behavior: None,
+                boat_behavior: Some(small_behavior),
+            },
+        ]
+    }
+
+    #[test]
+    fn catalog_feed_uses_own_behavior_and_shared_limit_after_restart() {
+        let rules = WorldInteractionRules::default();
+        let mut world =
+            World::new_with_catalog(bounds(), 77, rules, action_catalog(rules)).unwrap();
+        world.spawn_fish(1, Point { x: -0.5, y: 0.0 }, 1.0).unwrap();
+        world.spawn_fish(2, Point { x: 0.5, y: 0.0 }, 1.0).unwrap();
+        let id = "00000000000000000000000000000001";
+        world
+            .start_action("feed-slow", id, Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        assert_eq!(world.feed_sources()[0].interaction_id, "feed-slow");
+        assert_eq!(world.feed_sources()[0].expires_at_tick, 40);
+        world.step();
+        let assigned: Vec<_> = world
+            .fish()
+            .iter()
+            .filter(|fish| fish.feeding.is_some())
+            .collect();
+        assert_eq!(assigned.len(), 1);
+        assert_eq!(assigned[0].depth_target, -0.8);
+        let mut outside =
+            World::new_with_catalog(bounds(), 78, rules, action_catalog(rules)).unwrap();
+        outside
+            .spawn_fish(3, Point { x: 2.5, y: 0.0 }, 1.0)
+            .unwrap();
+        outside
+            .start_action(
+                "feed-slow",
+                "00000000000000000000000000000005",
+                Point { x: 0.0, y: 0.0 },
+            )
+            .unwrap();
+        outside.step();
+        assert!(outside.fish()[0].feeding.is_none());
+        let mut replay = World::restore(world.checkpoint()).unwrap();
+        assert_eq!(replay.action_definitions(), world.action_definitions());
+        for _ in 0..20 {
+            world.step();
+            replay.step();
+            assert_eq!(world.checkpoint(), replay.checkpoint());
+        }
+        world
+            .start_action(
+                "feed",
+                "00000000000000000000000000000002",
+                Point { x: 2.0, y: 0.0 },
+            )
+            .unwrap();
+        world
+            .start_action(
+                "feed-slow",
+                "00000000000000000000000000000003",
+                Point { x: -2.0, y: 0.0 },
+            )
+            .unwrap();
+        assert_eq!(
+            world.start_action(
+                "feed",
+                "00000000000000000000000000000004",
+                Point { x: 3.0, y: 0.0 }
+            ),
+            Err(SimError::FeedLimit)
+        );
+        assert!(world.cancel_feed(id));
+        assert!(world.feed_sources().iter().all(|source| source.id != id));
+    }
+
+    #[test]
+    fn catalog_threat_uses_own_behavior_and_cancels_after_restart() {
+        let rules = WorldInteractionRules::default();
+        let mut world =
+            World::new_with_catalog(bounds(), 19, rules, action_catalog(rules)).unwrap();
+        world.spawn_fish(1, Point { x: -5.0, y: 0.0 }, 1.0).unwrap();
+        world.spawn_fish(2, Point { x: -4.8, y: 0.0 }, 1.0).unwrap();
+        let id = "00000000000000000000000000000001";
+        world
+            .start_action("boat-small", id, Point { x: 1.0, y: 0.0 })
+            .unwrap();
+        assert_eq!(world.boat().unwrap().interaction_id, "boat-small");
+        assert_eq!(world.boat().unwrap().expires_at_tick, 80);
+        assert_eq!(
+            world.start_action(
+                "boat",
+                "00000000000000000000000000000002",
+                Point { x: 1.0, y: 0.0 }
+            ),
+            Err(SimError::BoatLimit)
+        );
+        world.step();
+        assert_eq!(world.fish().iter().filter(|fish| fish.fleeing).count(), 1);
+        assert_eq!(
+            world
+                .fish()
+                .iter()
+                .find(|fish| fish.fleeing)
+                .unwrap()
+                .depth_target,
+            -0.8
+        );
+        let mut replay = World::restore(world.checkpoint()).unwrap();
+        for _ in 0..20 {
+            world.step();
+            replay.step();
+            assert_eq!(world.checkpoint(), replay.checkpoint());
+        }
+        assert!(replay.cancel_boat(id));
+        assert!(replay.boat().is_none());
+        assert!(replay.fish().iter().all(|fish| !fish.fleeing));
+    }
+
+    #[test]
+    fn catalog_rejects_unknown_or_corrupt_definitions_and_old_checkpoint_restores() {
+        let rules = WorldInteractionRules::default();
+        let catalog = action_catalog(rules);
+        let mut world = World::new_with_catalog(bounds(), 7, rules, catalog.clone()).unwrap();
+        assert_eq!(
+            world.start_action(
+                "feed-other",
+                "00000000000000000000000000000001",
+                Point { x: 0.0, y: 0.0 }
+            ),
+            Err(SimError::UnknownInteraction)
+        );
+        world
+            .start_action(
+                "feed-slow",
+                "00000000000000000000000000000001",
+                Point { x: 0.0, y: 0.0 },
+            )
+            .unwrap();
+        let mut corrupt = world.checkpoint();
+        corrupt.feed_sources[0].interaction_id = "boat".into();
+        assert_eq!(
+            World::restore(corrupt).err(),
+            Some(SimError::InvalidCheckpoint)
+        );
+        let mut corrupt = world.checkpoint();
+        corrupt.action_definitions.push(catalog[2].clone());
+        assert_eq!(
+            World::restore(corrupt).err(),
+            Some(SimError::InvalidCheckpoint)
+        );
+        let mut corrupt = catalog;
+        corrupt[2].rule.priority = rules.boat.priority;
+        assert_eq!(
+            World::new_with_catalog(bounds(), 7, rules, corrupt).err(),
+            Some(SimError::InvalidInteractionRules)
+        );
+        let mut legacy = World::new(bounds(), 7).unwrap();
+        legacy
+            .start_feed("00000000000000000000000000000001", Point { x: 0.0, y: 0.0 })
+            .unwrap();
+        legacy
+            .start_boat("00000000000000000000000000000002", Point { x: 1.0, y: 0.0 })
+            .unwrap();
+        let mut old = serde_json::to_value(legacy.checkpoint()).unwrap();
+        old.as_object_mut().unwrap().remove("action_definitions");
+        old["feed_sources"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("interaction_id");
+        old["boat"]
+            .as_object_mut()
+            .unwrap()
+            .remove("interaction_id");
+        let restored = World::restore(serde_json::from_value(old).unwrap()).unwrap();
+        assert!(restored.action_definitions().is_empty());
+        assert_eq!(restored.feed_sources()[0].interaction_id, "feed");
+        assert_eq!(restored.boat().unwrap().interaction_id, "boat");
     }
 
     #[test]
