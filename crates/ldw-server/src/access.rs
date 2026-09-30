@@ -86,6 +86,13 @@ pub struct ControllerGrant {
     pub csrf: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeviceGrantSummary {
+    pub id: Uuid,
+    pub role: String,
+    pub issued_at_utc: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewerGrant {
     pub session_id: Uuid,
@@ -832,6 +839,68 @@ impl AccessStore {
             .bind(session_id)
             .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_devices(
+        &self,
+        owner_token: &str,
+        session_id: Uuid,
+    ) -> Result<Vec<DeviceGrantSummary>, AccessError> {
+        self.owner_scene(owner_token, session_id).await?;
+        let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id, role, to_char(issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS issued_at_utc \
+             FROM device_grants WHERE session_id = $1 AND revoked_at IS NULL AND expires_at > now() \
+             AND (role != 'controller' OR last_activity_at > now() - interval '2 hours') \
+             ORDER BY issued_at, id",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, role, issued_at_utc)| DeviceGrantSummary {
+                id,
+                role,
+                issued_at_utc,
+            })
+            .collect())
+    }
+
+    pub async fn revoke_device(
+        &self,
+        owner_token: &str,
+        csrf: &str,
+        session_id: Uuid,
+        grant_id: Uuid,
+    ) -> Result<(), AccessError> {
+        self.check_owner_csrf(owner_token, csrf).await?;
+        let (account_id, role) = self.owner_principal(owner_token).await?;
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE id = $1 AND (owner_id = $2 OR $3 = 'admin') FOR UPDATE",
+        )
+        .bind(session_id)
+        .bind(account_id)
+        .bind(role)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        let changed = sqlx::query(
+            "UPDATE device_grants SET revoked_at = coalesce(revoked_at, now()) \
+             WHERE session_id = $1 AND id = $2",
+        )
+        .bind(session_id)
+        .bind(grant_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(AccessError::Forbidden);
+        }
         tx.commit().await?;
         Ok(())
     }

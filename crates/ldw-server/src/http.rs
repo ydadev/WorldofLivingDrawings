@@ -11,7 +11,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}/invitation",
             post(open_invitation).delete(close_invitation),
+        )
+        .route("/api/sessions/{id}/devices", get(list_devices))
+        .route(
+            "/api/sessions/{id}/devices/{grant_id}",
+            delete(revoke_device),
         )
         .route("/api/sessions/{id}/pair", post(pair))
         .layer(middleware::map_response(no_store))
@@ -657,6 +662,37 @@ async fn close_invitation(
             cookie_token(&jar, OWNER_COOKIE)?,
             csrf(&headers)?,
             session_id,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_devices(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    jar: CookieJar,
+) -> Result<Json<Vec<crate::access::DeviceGrantSummary>>, ApiError> {
+    let devices = state
+        .access
+        .list_devices(cookie_token(&jar, OWNER_COOKIE)?, session_id)
+        .await?;
+    Ok(Json(devices))
+}
+
+async fn revoke_device(
+    State(state): State<AppState>,
+    Path((session_id, grant_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    require_origin(&headers, &state)?;
+    state
+        .access
+        .revoke_device(
+            cookie_token(&jar, OWNER_COOKIE)?,
+            csrf(&headers)?,
+            session_id,
+            grant_id,
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)

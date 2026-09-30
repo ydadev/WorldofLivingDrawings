@@ -23,7 +23,7 @@ const csp = ["default-src 'none'", "script-src 'self' 'wasm-unsafe-eval'", "styl
   "img-src 'self' data: blob:", `connect-src 'self' ws://127.0.0.1:${port}`, "worker-src 'self'", "object-src 'none'",
   "base-uri 'none'", "frame-src 'self'", "frame-ancestors 'self'"].join('; ');
 const state = { revision: 0, actions: [], commands: [], outcomes: new Map(), viewerRole: null,
-  invitationOpen: false };
+  invitationOpen: false, devices: [], revokedDevices: [] };
 const json = (response, status, value) => response.writeHead(status,
   { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
 
@@ -38,7 +38,8 @@ const server = createServer(async (request, response) => {
   }
   if (pathname === '/probe') return json(response, 200,
     { revision: state.revision, commands: state.commands, actions: state.actions,
-      invitationOpen: state.invitationOpen });
+      invitationOpen: state.invitationOpen, devices: state.devices,
+      revokedDevices: state.revokedDevices });
   if (pathname.startsWith('/api/')) {
     if (['POST', 'DELETE'].includes(request.method) && request.headers.origin !== origin)
       return json(response, 403, { error: 'ORIGIN_DENIED' });
@@ -48,6 +49,8 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && pathname === `/api/sessions/${sessionId}/pair`) {
       if (!state.invitationOpen) return json(response, 403, { error: 'ACCESS_DENIED' });
+      state.devices.push({ id: '00000000-0000-4000-8000-000000000010', role: 'controller',
+        issued_at_utc: '2026-09-30 03:00' });
       response.setHeader('Set-Cookie', 'fixture-controller=1; Path=/; HttpOnly; SameSite=Strict');
       return json(response, 200, { participant_id: 'fixture-participant', csrf: 'fixture-controller-csrf' });
     }
@@ -68,6 +71,8 @@ const server = createServer(async (request, response) => {
     if (request.method === 'POST' && pathname ===
         `/api/sessions/${sessionId}/viewer-claims/00000000-0000-4000-8000-000000000003/activate`) {
       if (!state.viewerRole) return json(response, 202, { error: 'VIEWER_PENDING' });
+      state.devices.push({ id: `00000000-0000-4000-8000-${String(20 + state.devices.length).padStart(12, '0')}`,
+        role: state.viewerRole, issued_at_utc: '2026-09-30 03:00' });
       response.setHeader('Set-Cookie', 'fixture-viewer=1; Path=/; HttpOnly; SameSite=Strict');
       return json(response, 200, { role: state.viewerRole, csrf: 'fixture-viewer-csrf' });
     }
@@ -81,9 +86,29 @@ const server = createServer(async (request, response) => {
       state.invitationOpen = false;
       response.writeHead(204).end(); return;
     }
-    if (request.method === 'GET' && pathname === `/api/sessions/${sessionId}/scene`)
+    if (request.method === 'GET' && pathname === `/api/sessions/${sessionId}/devices`) {
+      if (!request.headers.cookie?.includes('fixture-owner=1'))
+        return json(response, 403, { error: 'ACCESS_DENIED' });
+      return json(response, 200, state.devices);
+    }
+    if (request.method === 'DELETE' && pathname.startsWith(`/api/sessions/${sessionId}/devices/`)) {
+      if (!request.headers.cookie?.includes('fixture-owner=1') ||
+          request.headers['x-csrf-token'] !== 'fixture-owner-csrf')
+        return json(response, 403, { error: 'ACCESS_DENIED' });
+      const id = pathname.split('/').at(-1);
+      const index = state.devices.findIndex(device => device.id === id);
+      if (index < 0) return json(response, 403, { error: 'ACCESS_DENIED' });
+      state.devices.splice(index, 1);
+      state.revokedDevices.push(id);
+      response.writeHead(204).end(); return;
+    }
+    if (request.method === 'GET' && pathname === `/api/sessions/${sessionId}/scene`) {
+      if (request.headers.cookie?.includes('fixture-controller=1') &&
+          state.revokedDevices.includes('00000000-0000-4000-8000-000000000010'))
+        return json(response, 403, { error: 'ACCESS_DENIED' });
       return json(response, 200, { session_id: sessionId, scene_id: sceneId,
         world_id: 'underwater', world_version: 1, scene_epoch: 1, revision: state.revision });
+    }
     return json(response, 404, { error: 'NOT_FOUND' });
   }
   if (request.method !== 'GET') { response.writeHead(405).end(); return; }
