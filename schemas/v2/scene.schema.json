@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://world.routx.ru/schemas/v2/scene.schema.json",
+  "$defs": {
+    "id": { "$ref": "https://world.routx.ru/schemas/v1/definitions.schema.json#/$defs/id" },
+    "point": { "$ref": "https://world.routx.ru/schemas/v1/definitions.schema.json#/$defs/point" },
+    "sceneEntity": { "$ref": "https://world.routx.ru/schemas/v1/definitions.schema.json#/$defs/sceneEntity" },
+    "catalogEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "effect", "label", "allowedZoneId"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "effect": { "enum": ["attraction", "threat"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "allowedZoneId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "feedAction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "interactionId", "effect", "point", "remaining", "expiresAtTick"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "interactionId": { "$ref": "#/$defs/id" },
+        "effect": { "const": "attraction" },
+        "point": { "$ref": "#/$defs/point" },
+        "remaining": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "expiresAtTick": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "boatAction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "interactionId", "effect", "point", "position", "entry", "exit", "expiresAtTick"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "interactionId": { "$ref": "#/$defs/id" },
+        "effect": { "const": "threat" },
+        "point": { "$ref": "#/$defs/point" },
+        "position": { "$ref": "#/$defs/point" },
+        "entry": { "$ref": "#/$defs/point" },
+        "exit": { "$ref": "#/$defs/point" },
+        "expiresAtTick": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "activeAction": {
+      "oneOf": [{ "$ref": "#/$defs/feedAction" }, { "$ref": "#/$defs/boatAction" }]
+    },
+    "interactionRequested": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "commandId", "interactionId", "point"],
+      "properties": {
+        "type": { "const": "interaction_requested" },
+        "commandId": { "type": "string" },
+        "interactionId": { "$ref": "#/$defs/id" },
+        "point": { "$ref": "#/$defs/point" },
+        "targetActionId": { "$ref": "#/$defs/id" }
+      }
+    },
+    "interactionState": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "activeActions", "appliedCommandIds", "simulationTick"],
+      "properties": {
+        "type": { "const": "interaction_state" },
+        "activeActions": { "type": "array", "items": { "$ref": "#/$defs/activeAction" } },
+        "appliedCommandIds": { "type": "array", "items": { "type": "string" } },
+        "simulationTick": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "sceneSnapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "schemaVersion", "sceneId", "sceneEpoch", "revision", "simulationTick", "simulationVersion", "serverTime", "worldId", "worldVersion", "entities", "actionCatalog", "activeActions", "pendingInteractions", "resources", "reservations"],
+      "properties": {
+        "type": { "const": "snapshot" },
+        "schemaVersion": { "const": 2 },
+        "sceneId": { "type": "string" },
+        "sceneEpoch": { "type": "integer", "minimum": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "simulationTick": { "type": "integer", "minimum": 0 },
+        "simulationVersion": { "type": "integer", "minimum": 1 },
+        "serverTime": { "type": "integer" },
+        "worldId": { "$ref": "#/$defs/id" },
+        "worldVersion": { "type": "integer", "minimum": 1 },
+        "entities": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
+        "actionCatalog": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "$ref": "#/$defs/catalogEntry" } },
+        "activeActions": { "type": "array", "items": { "$ref": "#/$defs/activeAction" } },
+        "pendingInteractions": { "type": "array", "items": { "$ref": "#/$defs/interactionRequested" } },
+        "resources": { "type": "object" },
+        "reservations": { "type": "array" }
+      }
+    },
+    "sceneDelta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "schemaVersion", "sceneId", "sceneEpoch", "revision", "simulationTick", "upsert", "remove", "event"],
+      "properties": {
+        "type": { "const": "delta" },
+        "schemaVersion": { "const": 2 },
+        "sceneId": { "type": "string" },
+        "sceneEpoch": { "type": "integer", "minimum": 1 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "simulationTick": { "type": "integer", "minimum": 0 },
+        "upsert": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
+        "remove": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "event": { "oneOf": [
+          { "$ref": "#/$defs/interactionRequested" },
+          { "$ref": "https://world.routx.ru/schemas/v1/definitions.schema.json#/$defs/entityPublished" },
+          { "$ref": "#/$defs/interactionState" }
+        ] }
+      }
+    }
+  }
+}

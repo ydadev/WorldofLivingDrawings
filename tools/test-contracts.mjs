@@ -10,11 +10,14 @@ const contentRoot = path.join(root, 'content/underwater');
 const readJson = relative => JSON.parse(readFileSync(path.join(root, relative), 'utf8'));
 const schema = readJson('schemas/v1/definitions.schema.json');
 const interactionSchemaV2 = readJson('schemas/v2/interactions.schema.json');
+const sceneSchemaV2 = readJson('schemas/v2/scene.schema.json');
 const ajv = new Ajv2020({ strict: true, allErrors: true });
 ajv.addSchema(schema);
 ajv.addSchema(interactionSchemaV2);
+ajv.addSchema(sceneSchemaV2);
 const validate = name => ajv.getSchema(`${schema.$id}#/$defs/${name}`);
 const validateInteractionV2 = ajv.getSchema(`${interactionSchemaV2.$id}#/$defs/interactionDefinition`);
+const validateSceneV2 = name => ajv.getSchema(`${sceneSchemaV2.$id}#/$defs/${name}`);
 const valid = (name, value) => {
   const run = validate(name);
   assert(run, `Missing schema ${name}`);
@@ -87,6 +90,29 @@ invalid('assetManifest', { ...manifest, assets: [{ ...manifest.assets[0], sha256
 const snapshot = { schemaVersion: 1, sceneEpoch: 1, revision: 0, simulationTick: 0,
   worldId: world.id, worldVersion: world.version, entities: [] };
 valid('sceneSnapshot', snapshot);
+const catalog = [
+  { id: 'feed', effect: 'attraction', label: 'Корм', allowedZoneId: 'water' },
+  { id: 'boat', effect: 'threat', label: 'Подводная лодка', allowedZoneId: 'water' },
+  { id: 'feed-slow', effect: 'attraction', label: 'Медленный корм', allowedZoneId: 'water' },
+];
+const feedV2 = { id: 'feed-00000000000000000000000000000001', interactionId: 'feed-slow',
+  effect: 'attraction', point: { x: 0, y: 0 }, remaining: 10, expiresAtTick: 300 };
+const snapshotV2 = { ...snapshot, type: 'snapshot', schemaVersion: 2,
+  sceneId: 'scene-uuid', simulationVersion: 1, serverTime: 1,
+  actionCatalog: catalog, activeActions: [feedV2], pendingInteractions: [], resources: {}, reservations: [] };
+assert(validateSceneV2('sceneSnapshot')(snapshotV2),
+  ajv.errorsText(validateSceneV2('sceneSnapshot').errors));
+assert(!validate('sceneSnapshot')(snapshotV2), 'v1 snapshot must reject v2 actions');
+assert(!validateSceneV2('sceneSnapshot')({ ...snapshotV2, actionCatalog: undefined }));
+assert(!validateSceneV2('sceneSnapshot')({ ...snapshotV2,
+  activeActions: [{ ...feedV2, effect: 'threat' }] }));
+const stateV2 = { type: 'interaction_state', activeActions: [feedV2],
+  appliedCommandIds: ['00000000-0000-4000-8000-000000000001'], simulationTick: 1 };
+const deltaV2 = { type: 'delta', schemaVersion: 2, sceneId: 'scene-uuid',
+  sceneEpoch: 1, revision: 1, simulationTick: 1, upsert: [], remove: [], event: stateV2 };
+assert(validateSceneV2('sceneDelta')(deltaV2),
+  ajv.errorsText(validateSceneV2('sceneDelta').errors));
+assert(!validate('sceneDelta')(deltaV2), 'v1 delta must reject v2 actions');
 const requested = { type: 'interaction_requested', commandId: '00000000-0000-4000-8000-000000000001',
   interactionId: 'feed', point: { x: 2, y: -1 } };
 valid('sceneSnapshot', { ...snapshot, type: 'snapshot', sceneId: 'scene-uuid', simulationVersion: 1,

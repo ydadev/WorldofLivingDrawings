@@ -142,6 +142,31 @@ export interface RealtimeDelta extends SceneDelta {
   sceneId: string;
   event: InteractionRequested | EntityPublished | InteractionState;
 }
+export interface ActionCatalogEntry {
+  id: string;
+  effect: InteractionEffect;
+  label: string;
+  allowedZoneId: string;
+}
+export type ActiveActionV2 =
+  | (Omit<FeedAction, 'interactionId'> & { interactionId: string; effect: 'attraction' })
+  | (Omit<BoatAction, 'interactionId'> & { interactionId: string; effect: 'threat' });
+export interface InteractionStateV2 {
+  type: 'interaction_state';
+  activeActions: ActiveActionV2[];
+  appliedCommandIds: string[];
+  simulationTick: number;
+}
+/** A scene with actions supplied by its checkpointed package registry. */
+export type RealtimeSnapshotV2 = Omit<RealtimeSnapshot, 'schemaVersion' | 'activeActions'> & {
+  schemaVersion: 2;
+  actionCatalog: ActionCatalogEntry[];
+  activeActions: ActiveActionV2[];
+};
+export type RealtimeDeltaV2 = Omit<RealtimeDelta, 'schemaVersion' | 'event'> & {
+  schemaVersion: 2;
+  event: InteractionRequested | EntityPublished | InteractionStateV2;
+};
 export interface ScenePositions {
   type: 'positions';
   schemaVersion: 1;
