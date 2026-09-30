@@ -210,6 +210,12 @@ pub async fn create_upload_intent(
             .bind(access.scene.scene_id)
             .fetch_one(&mut *tx)
             .await?;
+    let returning: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fish_mutations WHERE scene_id = $1 AND operation = 'restore'",
+    )
+    .bind(access.scene.scene_id)
+    .fetch_one(&mut *tx)
+    .await?;
     let (reserved, session_intents, principal_intents): (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE scene_id = $1), count(*), \
          count(*) FILTER (WHERE principal_kind = 'controller' AND principal_id = $3) \
@@ -221,7 +227,7 @@ pub async fn create_upload_intent(
     .bind(principal)
     .fetch_one(&mut *tx)
     .await?;
-    if entity_count + pending as usize + reserved as usize >= ldw_sim::MAX_FISH {
+    if entity_count + pending as usize + reserved as usize + returning as usize >= ldw_sim::MAX_FISH {
         return Err(UploadError::SceneFull);
     }
     if session_intents >= 10 || (kind == GrantKind::Controller && principal_intents >= 1) {
@@ -359,7 +365,13 @@ pub async fn store_paint(
             .bind(principal)
             .fetch_one(&mut *tx)
             .await?;
-        if entities + pending + reservations >= ldw_sim::MAX_FISH as i64 {
+        let returning: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fish_mutations WHERE scene_id = $1 AND operation = 'restore'",
+        )
+        .bind(access.scene.scene_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if entities + pending + reservations + returning >= ldw_sim::MAX_FISH as i64 {
             return Err(UploadError::SceneFull);
         }
         if session_intents >= 10 || (kind == GrantKind::Controller && controller_intents >= 1) {
@@ -543,7 +555,15 @@ pub async fn finalize_upload(
         .bind(principal)
         .fetch_one(&mut *tx)
         .await?;
-        if entities + queued as usize + scene_intents as usize >= ldw_sim::MAX_FISH {
+        let returning: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM fish_mutations WHERE scene_id = $1 AND operation = 'restore'",
+        )
+        .bind(access.scene.scene_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if entities + queued as usize + scene_intents as usize + returning as usize
+            >= ldw_sim::MAX_FISH
+        {
             return Err(UploadError::SceneFull);
         }
         if session_intents >= 10 || (kind == GrantKind::Controller && controller_intents >= 1) {

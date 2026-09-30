@@ -2,7 +2,7 @@
 //! are separate; this module never writes a frame to PostgreSQL.
 
 use ldw_sim::{
-    ActionDefinition, BoatBehavior, Bounds, EffectRule, FeedBehavior, FishCapabilities,
+    ActionDefinition, BoatBehavior, Bounds, EffectRule, FeedBehavior, Fish, FishCapabilities,
     InteractionEffect, MAX_ACTION_DEFINITIONS, Point, World, WorldCheckpoint,
     WorldInteractionRules,
 };
@@ -723,7 +723,15 @@ pub(crate) async fn queue_fish_tx(
     .bind(scene_id)
     .fetch_one(&mut **tx)
     .await?;
-    if entities.len() + queued as usize + reserved as usize >= ldw_sim::MAX_FISH {
+    let returning: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM fish_mutations WHERE scene_id = $1 AND operation = 'restore'",
+    )
+    .bind(scene_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if entities.len() + queued as usize + reserved as usize + returning as usize
+        >= ldw_sim::MAX_FISH
+    {
         return Err(SimulationError::InvalidPublication);
     }
     world
@@ -907,6 +915,169 @@ async fn apply_pending_fish(
         .bind(scene_id)
         .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    scene.world = candidate;
+    scene.persisted_tick = tick;
+    scene.revision = new_revision;
+    Ok(true)
+}
+
+/// Structural fish changes use the same scene-row lock and checkpoint boundary
+/// as publication. The inbox row disappears only with the committed projection
+/// and event, so a process restart cannot apply the request twice.
+pub(crate) async fn apply_pending_fish_mutations(
+    pool: &PgPool,
+    scene_id: Uuid,
+    scene: &mut LoadedScene,
+) -> Result<bool, SimulationError> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(i64, i64, i64, Value, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.scene_epoch, c.revision, c.simulation_tick, c.state, s.status, s.active_scene_id \
+         FROM scenes c JOIN sessions s ON s.id = c.session_id WHERE c.id = $1 FOR UPDATE OF c",
+    )
+    .bind(scene_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((epoch, revision, persisted_tick, mut state, status, active)) = row else {
+        return Ok(false);
+    };
+    if epoch != scene.epoch
+        || persisted_tick != scene.persisted_tick
+        || !matches!(status.as_str(), "running" | "paused")
+        || active != Some(scene_id)
+    {
+        return Ok(false);
+    }
+    let pending: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT fish_id, command_id, operation FROM fish_mutations \
+         WHERE scene_id = $1 ORDER BY accepted_at, command_id LIMIT 100",
+    )
+    .bind(scene_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if pending.is_empty() {
+        return Ok(true);
+    }
+    let mut candidate = scene.world.clone();
+    let mut entities = state
+        .get("entities")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or(SimulationError::InvalidScene)?;
+    if entities.len() != candidate.fish().len() {
+        return Err(SimulationError::InvalidScene);
+    }
+    let mut new_revision = revision;
+    let mut events = Vec::with_capacity(pending.len());
+    for (fish_id, command_id, operation) in &pending {
+        let id = format!("fish-{:032x}", fish_id.as_u128());
+        let event = match operation.as_str() {
+            "delete" => {
+                let index = entities
+                    .iter()
+                    .position(|entity| entity.get("id").and_then(Value::as_str) == Some(&id))
+                    .ok_or(SimulationError::InvalidScene)?;
+                let removed = candidate
+                    .remove_fish(fish_id.as_u128())
+                    .map_err(|_| SimulationError::InvalidScene)?;
+                let mut entity = entities.remove(index);
+                entity["position"] = serde_json::to_value(removed.position)?;
+                let blob_id = entity
+                    .get("paintBlobId")
+                    .and_then(Value::as_str)
+                    .filter(|value| valid_paint_blob_id(value))
+                    .ok_or(SimulationError::InvalidScene)?;
+                sqlx::query(
+                    "INSERT INTO fish_trash \
+                     (scene_id, fish_id, entity, fish_state, paint_blob_id) VALUES ($1, $2, $3, $4, $5)",
+                )
+                .bind(scene_id)
+                .bind(fish_id)
+                .bind(&entity)
+                .bind(serde_json::to_value(removed)?)
+                .bind(blob_id)
+                .execute(&mut *tx)
+                .await?;
+                json!({"type":"entity_removed", "entityId":id, "commandId":command_id})
+            }
+            "restore" => {
+                let row: Option<(Value, Value)> = sqlx::query_as(
+                    "SELECT entity, fish_state FROM fish_trash WHERE scene_id = $1 AND fish_id = $2 FOR UPDATE",
+                )
+                .bind(scene_id)
+                .bind(fish_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let (entity, fish_state) = row.ok_or(SimulationError::InvalidScene)?;
+                let fish: Fish = serde_json::from_value(fish_state)?;
+                if fish.id != fish_id.as_u128()
+                    || entity.get("id").and_then(Value::as_str) != Some(id.as_str())
+                    || entities.iter().any(|current| {
+                        current.get("id").and_then(Value::as_str) == Some(id.as_str())
+                    })
+                {
+                    return Err(SimulationError::InvalidScene);
+                }
+                candidate
+                    .spawn_fish_with_capabilities(
+                        fish.id,
+                        fish.position,
+                        fish.speed,
+                        fish.capabilities,
+                    )
+                    .map_err(|_| SimulationError::InvalidScene)?;
+                entities.push(entity.clone());
+                sqlx::query("DELETE FROM fish_trash WHERE scene_id = $1 AND fish_id = $2")
+                    .bind(scene_id)
+                    .bind(fish_id)
+                    .execute(&mut *tx)
+                    .await?;
+                json!({"type":"entity_restored", "entity":entity, "commandId":command_id})
+            }
+            _ => return Err(SimulationError::InvalidScene),
+        };
+        new_revision = new_revision
+            .checked_add(1)
+            .ok_or(SimulationError::InvalidScene)?;
+        events.push((new_revision, event));
+    }
+    let tick = i64::try_from(candidate.tick_number()).map_err(|_| SimulationError::InvalidScene)?;
+    let object = state.as_object_mut().ok_or(SimulationError::InvalidScene)?;
+    object.insert("simulation".into(), serde_json::to_value(candidate.checkpoint())?);
+    object.insert("entities".into(), json!(entities));
+    let updated = sqlx::query(
+        "UPDATE scenes SET state = $1::jsonb, simulation_tick = $2, revision = $3, updated_at = now() \
+         WHERE id = $4 AND scene_epoch = $5 AND simulation_tick = $6",
+    )
+    .bind(state)
+    .bind(tick)
+    .bind(new_revision)
+    .bind(scene_id)
+    .bind(scene.epoch)
+    .bind(scene.persisted_tick)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Ok(false);
+    }
+    for (revision, event) in events {
+        sqlx::query(
+            "INSERT INTO scene_events (scene_id, revision, scene_epoch, event) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(scene_id)
+        .bind(revision)
+        .bind(scene.epoch)
+        .bind(event)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (fish_id, _, _) in pending {
+        sqlx::query("DELETE FROM fish_mutations WHERE scene_id = $1 AND fish_id = $2")
+            .bind(scene_id)
+            .bind(fish_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     scene.world = candidate;
     scene.persisted_tick = tick;
@@ -1172,8 +1343,10 @@ pub async fn run(
                 }
                 let scenes: Vec<Uuid> = match sqlx::query_scalar(
                     "SELECT c.id FROM scenes c JOIN sessions s ON s.active_scene_id = c.id \
-                     WHERE s.status = 'running' AND c.state ? 'simulation' \
-                     ORDER BY c.id LIMIT 3",
+                     WHERE (s.status = 'running' AND c.state ? 'simulation') \
+                        OR (s.status = 'paused' AND EXISTS \
+                            (SELECT 1 FROM fish_mutations m WHERE m.scene_id = c.id)) \
+                     ORDER BY c.id LIMIT 10",
                 )
                 .fetch_all(&pool)
                 .await {
@@ -1218,7 +1391,7 @@ async fn run_scene(
 ) -> Result<(), SimulationError> {
     let mut scene = load_scene(&pool, scene_id).await?;
     let mut changes = hub.subscribe_changes();
-    let mut pending_wakeup = false;
+    let mut pending_wakeup = true;
     let mut timer = interval(period);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -1226,16 +1399,23 @@ async fn run_scene(
             _ = timer.tick() => {
                 if scene.world.tick_number() % 20 == 0 || pending_wakeup {
                     pending_wakeup = false;
-                    let running: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM scenes c JOIN sessions s \
-                         ON s.active_scene_id = c.id WHERE c.id = $1 \
-                         AND c.scene_epoch = $2 AND s.status = 'running')",
+                    let status: Option<String> = sqlx::query_scalar(
+                        "SELECT s.status FROM scenes c JOIN sessions s \
+                         ON s.active_scene_id = c.id WHERE c.id = $1 AND c.scene_epoch = $2",
                     )
                     .bind(scene_id)
                     .bind(scene.epoch)
-                    .fetch_one(&pool)
+                    .fetch_optional(&pool)
                     .await?;
-                    if !running { break; }
+                    if !matches!(status.as_deref(), Some("running" | "paused")) { break; }
+                    let prior_revision = scene.revision;
+                    if !apply_pending_fish_mutations(&pool, scene_id, &mut scene).await? {
+                        return Ok(());
+                    }
+                    if scene.revision != prior_revision {
+                        hub.notify_change(scene_id);
+                    }
+                    if status.as_deref() == Some("paused") { break; }
                     if !apply_pending_fish(&pool, scene_id, &mut scene).await? {
                         return Ok(());
                     }

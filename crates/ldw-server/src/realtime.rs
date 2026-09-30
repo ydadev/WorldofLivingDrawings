@@ -515,6 +515,18 @@ async fn serve(
                         gap = true;
                         break;
                     }
+                    // Structural deletion/restore has no event shape in the
+                    // frozen v1/v2 wire contracts. A fresh authoritative
+                    // snapshot carries the changed Entity set without asking
+                    // older clients to understand a new delta variant.
+                    if matches!(event.get("type").and_then(Value::as_str),
+                        Some("entity_removed" | "entity_restored")) {
+                        let Ok((snapshot, new_cursor)) = load_snapshot(store.pool(), &current).await else { return };
+                        if send_json(&mut socket, &snapshot).await.is_err() { return; }
+                        wire_catalog = snapshot.get("actionCatalog").cloned();
+                        cursor = new_cursor;
+                        break;
+                    }
                     let upsert = if event.get("type").and_then(Value::as_str) == Some("entity_published") {
                         event.get("entity").cloned().map(|entity| json!([entity])).unwrap_or(json!([]))
                     } else {

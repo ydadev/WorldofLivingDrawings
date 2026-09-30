@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::{
     access::{AccessError, AccessStore, GrantKind, PairCode},
     blob_store::{BlobStore, BlobStoreError},
+    fish_trash::{self, FishOperation, FishTrashError},
     paint_image::{self, PaintImageError},
     upload::{self, UploadError},
 };
@@ -60,6 +61,19 @@ pub fn router(state: AppState) -> Router {
             post(finalize_upload),
         )
         .route("/api/sessions/{id}/paint/{blob_id}", get(private_paint))
+        .route("/api/sessions/{id}/fish-trash", get(list_fish_trash))
+        .route(
+            "/api/sessions/{id}/fish-trash/{fish_id}/paint",
+            get(private_trash_paint),
+        )
+        .route(
+            "/api/sessions/{id}/fish/{fish_id}/delete",
+            post(delete_fish),
+        )
+        .route(
+            "/api/sessions/{id}/fish/{fish_id}/restore",
+            post(restore_fish),
+        )
         .route("/api/sessions/{id}/scene", get(scene))
         .route("/api/sessions/{id}/ws", get(crate::realtime::websocket))
         .route("/api/sessions/{id}/viewers", post(create_viewer))
@@ -164,6 +178,17 @@ impl From<UploadError> for ApiError {
             | UploadError::Database(_)
             | UploadError::Storage(_)
             | UploadError::Simulation(_) => Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR"),
+        }
+    }
+}
+
+impl From<FishTrashError> for ApiError {
+    fn from(error: FishTrashError) -> Self {
+        match error {
+            FishTrashError::Forbidden => Self(StatusCode::FORBIDDEN, "ACCESS_DENIED"),
+            FishTrashError::InvalidScene | FishTrashError::Database(_) => {
+                Self(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR")
+            }
         }
     }
 }
@@ -446,6 +471,129 @@ async fn private_paint(
     if !authorized {
         return Err(ApiError(StatusCode::NOT_FOUND, "PAINT_NOT_FOUND"));
     }
+    let store = state.blob_store.clone();
+    let bytes = tokio::task::spawn_blocking(move || store.read(&blob_id))
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "PAINT_UNAVAILABLE"))??;
+    Ok((
+        [(header::CONTENT_TYPE, HeaderValue::from_static("image/png"))],
+        Bytes::from(bytes),
+    ))
+}
+
+fn fish_mutator<'a>(jar: &'a CookieJar) -> Result<(GrantKind, &'a str), ApiError> {
+    if let Some(owner) = jar.get(OWNER_COOKIE) {
+        Ok((GrantKind::Owner, owner.value()))
+    } else {
+        Ok((
+            GrantKind::Controller,
+            cookie_token(jar, CONTROLLER_COOKIE)?,
+        ))
+    }
+}
+
+async fn mutate_fish(
+    state: &AppState,
+    session_id: Uuid,
+    fish_id: Uuid,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    operation: FishOperation,
+    input: &fish_trash::FishMutationRequest,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    require_origin(headers, state)?;
+    let (kind, token) = fish_mutator(jar)?;
+    state
+        .access
+        .check_socket_csrf(kind, token, csrf(headers)?, session_id)
+        .await?;
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    let outcome = fish_trash::submit(
+        state.access.pool(),
+        kind,
+        &access,
+        fish_id,
+        operation,
+        input,
+    )
+    .await?;
+    if outcome.get("accepted").and_then(serde_json::Value::as_bool) == Some(true) {
+        state.simulation_hub.notify_change(access.scene.scene_id);
+    }
+    let status = if outcome.get("code").and_then(serde_json::Value::as_str)
+        == Some("NOT_AUTHOR")
+    {
+        StatusCode::FORBIDDEN
+    } else if outcome.get("code").and_then(serde_json::Value::as_str)
+        == Some("FISH_NOT_FOUND")
+    {
+        StatusCode::NOT_FOUND
+    } else if outcome.get("accepted").and_then(serde_json::Value::as_bool) == Some(true) {
+        StatusCode::OK
+    } else {
+        StatusCode::CONFLICT
+    };
+    Ok((status, Json(outcome)))
+}
+
+async fn delete_fish(
+    State(state): State<AppState>,
+    Path((session_id, fish_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<fish_trash::FishMutationRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    mutate_fish(
+        &state,
+        session_id,
+        fish_id,
+        &headers,
+        &jar,
+        FishOperation::Delete,
+        &input,
+    )
+    .await
+}
+
+async fn restore_fish(
+    State(state): State<AppState>,
+    Path((session_id, fish_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(input): Json<fish_trash::FishMutationRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    mutate_fish(
+        &state,
+        session_id,
+        fish_id,
+        &headers,
+        &jar,
+        FishOperation::Restore,
+        &input,
+    )
+    .await
+}
+
+async fn list_fish_trash(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    jar: CookieJar,
+) -> Result<Json<Vec<fish_trash::TrashedFish>>, ApiError> {
+    let (kind, token) = fish_mutator(&jar)?;
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    Ok(Json(fish_trash::list(state.access.pool(), kind, &access).await?))
+}
+
+async fn private_trash_paint(
+    State(state): State<AppState>,
+    Path((session_id, fish_id)): Path<(Uuid, Uuid)>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, ApiError> {
+    let (kind, token) = fish_mutator(&jar)?;
+    let access = state.access.scene_access(kind, token, session_id).await?;
+    let blob_id = fish_trash::paint_blob(state.access.pool(), kind, &access, fish_id)
+        .await?
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "PAINT_NOT_FOUND"))?;
     let store = state.blob_store.clone();
     let bytes = tokio::task::spawn_blocking(move || store.read(&blob_id))
         .await
