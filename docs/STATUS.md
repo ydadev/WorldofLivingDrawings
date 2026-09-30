@@ -13,3 +13,5 @@ Ubuntu, Docker/Compose, nginx, PostgreSQL и внешний NPM подготов
 Следующие шаги и зависимости — в [TASKS.md](TASKS.md), доказательства — в [WORKLOG.md](WORKLOG.md), правила разработки — в [DEVELOPMENT.md](DEVELOPMENT.md).
 
 Независимые части MVP-04-INVITE, MVP-04-REVOKE и MVP-04-UPLOAD-ID — `DONE`: Owner закрывает PIN/QR, отзывает конкретные Controller/Viewer-доступы, а повтор создания intent после потерянного ответа не занимает второй слот. Права, HTTP/WebSocket и браузерный сценарий проверены в [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36667524993). Полный MVP-04 по-прежнему зависит от физических проверок MVP-01/02; пауза, закрытие и корзина ещё не выполнены.
+
+Основа корзины `MVP-04-TRASH-CORE` прошла [Ubuntu CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36668947310): удаление рыбы из симуляции не нарушает checkpoint или активные события. Следом готовы серверное хранение/права/восстановление и интерфейс корзины; пользовательская функция пока не готова.
