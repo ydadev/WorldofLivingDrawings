@@ -80,7 +80,10 @@ pub fn router(state: AppState) -> Router {
             post(open_invitation).delete(close_invitation),
         )
         .route("/api/sessions/{id}/devices", get(list_devices))
-        .route("/api/sessions/{id}/devices/{grant_id}", delete(revoke_device))
+        .route(
+            "/api/sessions/{id}/devices/{grant_id}",
+            delete(revoke_device),
+        )
         .route("/api/sessions/{id}/pair", post(pair))
         .layer(middleware::map_response(no_store))
         .with_state(state)
