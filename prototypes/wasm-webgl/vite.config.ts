@@ -7,14 +7,15 @@ const csp = [
   "img-src 'self' data: blob:",
   "connect-src 'self'",
   "worker-src 'self'",
+  "frame-src 'self'",
   "object-src 'none'",
   "base-uri 'none'",
-  "frame-ancestors 'none'",
+  "frame-ancestors 'self'",
 ].join('; ');
 
 export default defineConfig({
   base: './',
-  build: { target: 'es2020', rolldownOptions: { input: ['index.html', 'fish.html', 'paint.html', 'capture.html', 'interaction.html', 'core.html'] } },
+  build: { target: 'es2020', rolldownOptions: { input: ['index.html', 'fish.html', 'paint.html', 'swim.html', 'capture.html', 'interaction.html', 'core.html', 'world.html', 'controller.html', 'viewer.html'] } },
   server: { headers: { 'Content-Security-Policy': csp } },
   preview: {
     port: 4173,

@@ -52,7 +52,7 @@ try {
       { fish, side }, { timeout: 30000 });
       const result = await page.evaluate(() => window.fishProbe);
       if (result?.status !== 'PASS' || result.species !== fish || result.side !== side ||
-          result.webglVersion !== 2 || result.paintMaterialCount !== 1 || result.protectedEyeMaterialCount !== 2)
+          result.webglVersion !== 2 || result.paintMaterialCount !== 1 || result.protectedEyeMaterialCount !== 1)
         throw new Error(`Fish browser probe failed: ${JSON.stringify(result)}`);
       const isRed = pixel => pixel?.[0] > 100 && pixel[0] > pixel[1] * 1.7 && pixel[0] > pixel[2] * 1.5;
       const isBlue = pixel => pixel?.[2] > 100 && pixel[2] > pixel[0] * 1.4 && pixel[2] > pixel[1] * 1.4;

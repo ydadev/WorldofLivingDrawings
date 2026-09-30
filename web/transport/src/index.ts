@@ -1,10 +1,11 @@
-import type { Point2, RealtimeAck, RealtimeCommand, RealtimeDelta, RealtimeSnapshot } from '@ldw/contracts';
+import type { ActionCatalogEntry, AnyRealtimeDelta, AnyRealtimeSnapshot, Point2, RealtimeAck, RealtimeCommand, ScenePositions } from '@ldw/contracts';
 
 export type ConnectionState = 'offline' | 'connecting' | 'syncing' | 'ready';
 export interface RealtimeCallbacks {
   onState(state: ConnectionState): void;
-  onSnapshot(snapshot: RealtimeSnapshot): void;
-  onDelta(delta: RealtimeDelta): void;
+  onSnapshot(snapshot: AnyRealtimeSnapshot): void;
+  onDelta(delta: AnyRealtimeDelta): void;
+  onPositions(frame: ScenePositions): void;
   /** null means the original action was never confirmed and is now too old to retry. */
   onCommandResult(commandId: string, result: RealtimeAck | null): void;
 }
@@ -26,7 +27,10 @@ export class SceneConnection {
   private retry = 0;
   private sceneId: string | null = null;
   private sceneEpoch = 0;
+  private schemaVersion: 1 | 2 = 1;
+  private actionCatalog = new Map<string, ActionCatalogEntry>();
   private revision = 0;
+  private simulationTick = 0;
   private serverOffsetMs = 0;
   private pending = new Map<string, RealtimeCommand>();
   private readonly createSocket: (url: string) => WebSocket;
@@ -81,13 +85,14 @@ export class SceneConnection {
     this.open();
   }
 
-  sendInteraction(interactionId: string, point: Point2): string | null {
+  sendInteraction(interactionId: string, point: Point2, targetActionId?: string): string | null {
     if (this.state !== 'ready' || !this.socket || !this.sceneId ||
         !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
     const command: RealtimeCommand = {
       type: 'command', commandId: crypto.randomUUID(), sessionId: this.options.sessionId,
       sceneId: this.sceneId, sceneEpoch: this.sceneEpoch,
-      interactionId, point, expiresAt: this.now() + this.serverOffsetMs + 10_000,
+      interactionId, point, ...(targetActionId ? { targetActionId } : {}),
+      expiresAt: this.now() + this.serverOffsetMs + 10_000,
     };
     this.pending.set(command.commandId, command);
     try { this.socket.send(JSON.stringify(command)); }
@@ -128,14 +133,24 @@ export class SceneConnection {
     if (!message || typeof message !== 'object') return;
     const value = message as Record<string, unknown>;
     if (value.type === 'snapshot') {
-      if (value.schemaVersion !== 1 || typeof value.sceneId !== 'string' ||
+      if ((value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
+          typeof value.sceneId !== 'string' ||
           !Number.isSafeInteger(value.sceneEpoch) || !Number.isSafeInteger(value.revision) ||
           typeof value.serverTime !== 'number') { this.reconnectNow(); return; }
-      const snapshot = value as unknown as RealtimeSnapshot;
+      const catalog = value.schemaVersion === 2 ? this.readCatalog(value.actionCatalog) : new Map();
+      if (!catalog || (value.schemaVersion === 2 &&
+          (!Array.isArray(value.activeActions) ||
+            !value.activeActions.every(action => this.validAction(action, catalog))))) {
+        this.reconnectNow(); return;
+      }
+      const snapshot = value as unknown as AnyRealtimeSnapshot;
       this.clearSnapshotTimeout();
       this.sceneId = snapshot.sceneId;
       this.sceneEpoch = snapshot.sceneEpoch;
+      this.schemaVersion = snapshot.schemaVersion;
+      this.actionCatalog = catalog;
       this.revision = snapshot.revision;
+      this.simulationTick = snapshot.simulationTick;
       this.serverOffsetMs = snapshot.serverTime - this.now();
       this.retry = 0;
       this.options.onSnapshot(snapshot);
@@ -144,15 +159,35 @@ export class SceneConnection {
         this.socket?.send(JSON.stringify({ type: 'status', commandId }));
       }
     } else if (value.type === 'delta') {
-      if (this.state !== 'ready' || value.sceneId !== this.sceneId ||
+      if (this.state !== 'ready' || value.schemaVersion !== this.schemaVersion ||
+          value.sceneId !== this.sceneId ||
           value.sceneEpoch !== this.sceneEpoch || !Number.isSafeInteger(value.revision)) {
         this.reconnectNow(); return;
       }
-      const delta = value as unknown as RealtimeDelta;
+      if (this.schemaVersion === 2 && !this.validInteractionState(value.event)) {
+        this.reconnectNow(); return;
+      }
+      const delta = value as unknown as AnyRealtimeDelta;
       if (delta.revision <= this.revision) return;
       if (delta.revision !== this.revision + 1) { this.reconnectNow(); return; }
       this.revision = delta.revision;
       this.options.onDelta(delta);
+    } else if (value.type === 'positions') {
+      if (this.state !== 'ready' || value.schemaVersion !== 1 || value.sceneId !== this.sceneId ||
+          value.sceneEpoch !== this.sceneEpoch || typeof value.revision !== 'number' ||
+          !Number.isSafeInteger(value.revision) || value.revision > this.revision ||
+          typeof value.simulationTick !== 'number' || !Number.isSafeInteger(value.simulationTick) ||
+          value.simulationTick <= this.simulationTick || !Array.isArray(value.positions) ||
+          value.positions.length > 100 || !value.positions.every(item =>
+            item && typeof item.id === 'string' && item.position && item.heading &&
+            Number.isFinite(item.position.x) && Number.isFinite(item.position.y) &&
+            Number.isFinite(item.heading.x) && Number.isFinite(item.heading.y)) ||
+          (value.actionPositions !== undefined && (!Array.isArray(value.actionPositions) ||
+            value.actionPositions.length > 1 || !value.actionPositions.every(item =>
+              item && typeof item.id === 'string' && item.position &&
+              Number.isFinite(item.position.x) && Number.isFinite(item.position.y))))) return;
+      this.simulationTick = value.simulationTick;
+      this.options.onPositions(value as unknown as ScenePositions);
     } else if (value.type === 'ack') {
       const commandId = value.commandId;
       if (typeof commandId !== 'string' || !this.pending.has(commandId)) return;
@@ -172,6 +207,46 @@ export class SceneConnection {
     } else if (value.type === 'error' && value.code === 'ACCESS_DENIED') {
       this.stop();
     }
+  }
+
+  private readCatalog(value: unknown): Map<string, ActionCatalogEntry> | null {
+    if (!Array.isArray(value) || value.length < 2 || value.length > 8) return null;
+    const entries = new Map<string, ActionCatalogEntry>();
+    for (const item of value) {
+      if (!item || typeof item !== 'object') return null;
+      const entry = item as Record<string, unknown>;
+      if (typeof entry.id !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(entry.id) ||
+          (entry.effect !== 'attraction' && entry.effect !== 'threat') ||
+          typeof entry.label !== 'string' || !entry.label || entry.label.length > 64 ||
+          typeof entry.allowedZoneId !== 'string' || entries.has(entry.id)) return null;
+      entries.set(entry.id, entry as unknown as ActionCatalogEntry);
+    }
+    return entries;
+  }
+
+  private validAction(value: unknown, catalog: Map<string, ActionCatalogEntry>): boolean {
+    if (!value || typeof value !== 'object') return false;
+    const action = value as Record<string, unknown>;
+    if (typeof action.id !== 'string' || typeof action.interactionId !== 'string' ||
+        !catalog.has(action.interactionId) ||
+        action.effect !== catalog.get(action.interactionId)?.effect ||
+        !action.point || typeof action.point !== 'object') return false;
+    const point = action.point as Record<string, unknown>;
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+    if (action.effect === 'attraction')
+      return Number.isInteger(action.remaining) && Number.isSafeInteger(action.expiresAtTick);
+    return !!action.position && typeof action.position === 'object' &&
+      Number.isFinite((action.position as Record<string, unknown>).x) &&
+      Number.isFinite((action.position as Record<string, unknown>).y) &&
+      Number.isSafeInteger(action.expiresAtTick);
+  }
+
+  private validInteractionState(value: unknown): boolean {
+    if (!value || typeof value !== 'object') return false;
+    const event = value as Record<string, unknown>;
+    return event.type !== 'interaction_state' ||
+      (Array.isArray(event.activeActions) &&
+        event.activeActions.every(action => this.validAction(action, this.actionCatalog)));
   }
 
   private scheduleReconnect(): void {

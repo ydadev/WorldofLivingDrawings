@@ -99,9 +99,9 @@ async function loadFish(): Promise<void> {
     for (const mesh of imported.meshes) {
       const material = mesh.material;
       if (material instanceof PBRMaterial && material.name === 'paint') paintMaterials.add(material);
-      if (material instanceof PBRMaterial && material.name.startsWith('eye-')) eyeMaterials.add(material);
+      if (material instanceof PBRMaterial && material.name === 'eye') eyeMaterials.add(material);
     }
-    if (paintMaterials.size !== 1 || eyeMaterials.size !== 2)
+    if (paintMaterials.size !== 1 || eyeMaterials.size !== 1)
       throw new Error(`Paint/eye materials: ${paintMaterials.size}/${eyeMaterials.size}`);
     paintTexture = makePaintTexture();
     for (const material of paintMaterials) {

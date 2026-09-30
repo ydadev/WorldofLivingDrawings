@@ -17,5 +17,7 @@ dist/
 prototypes/wasm-webgl/public/sim.wasm
 prototypes/wasm-webgl/public/fish/
 coverage/
+__pycache__/
+*.pyc
 .DS_Store
 Thumbs.db

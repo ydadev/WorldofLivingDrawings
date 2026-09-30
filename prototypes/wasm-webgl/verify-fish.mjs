@@ -26,8 +26,15 @@ for (const fish of species) {
   check(gltf.materials[paint.material].name === 'paint' &&
     gltf.materials[paint.material].pbrMetallicRoughness.baseColorTexture.texCoord === 0,
     `${fish.id}: paint binding is missing`);
-  check(gltf.meshes[0].primitives.slice(1).every(p => !p.attributes.TEXCOORD_0 && gltf.materials[p.material].name.startsWith('eye-')),
+  check(gltf.meshes[0].primitives.length === 2 &&
+    !gltf.meshes[0].primitives[1].attributes.TEXCOORD_0 &&
+    gltf.materials[gltf.meshes[0].primitives[1].material].name === 'eye',
     `${fish.id}: eyes must use protected, unpainted materials`);
+  const tailNode = gltf.nodes.find(node => node.name === 'tail-pivot');
+  check(tailNode && tailNode.mesh === 1 && tailNode.translation?.length === 3 &&
+    gltf.nodes[0].children.includes(gltf.nodes.indexOf(tailNode)) &&
+    gltf.meshes[1]?.primitives.length === 1 && gltf.meshes[1].primitives[0].material === paint.material,
+    `${fish.id}: animated painted tail is missing`);
   const layout = JSON.parse(readFileSync(path.join(assets, `${fish.id}.layout.json`)));
   const { contentHash, ...source } = layout;
   check(contentHash === digest(JSON.stringify(source)) && contentHash === gltf.extras.layoutHash,
@@ -54,8 +61,10 @@ for (const fish of species) {
   }
   const positions = floats(paint.attributes.POSITION, 3);
   const normals = floats(paint.attributes.NORMAL, 3);
+  const colors = floats(paint.attributes.COLOR_0, 3);
   const uvs = floats(paint.attributes.TEXCOORD_0, 2);
-  check(positions.length === uvs.length && positions.length === normals.length,
+  check(positions.length === uvs.length && positions.length === normals.length &&
+    positions.length === colors.length && colors.every(rgb => rgb.every(value => value >= .57 && value <= 1)),
     `${fish.id}: paint attributes have different lengths`);
   const sidePairs = new Map();
   let edges = 0, front = 0, back = 0;
@@ -79,6 +88,23 @@ for (const fish of species) {
   const matched = [...sidePairs.values()].filter(pair => pair.front && pair.back).length;
   check(front > 80 && back > 80 && matched > 80 && edges >= 24,
     `${fish.id}: matching painted sides or colored edges are incomplete`);
+  const tail = gltf.meshes[1].primitives[0];
+  const tailPositions = floats(tail.attributes.POSITION, 3);
+  const tailColors = floats(tail.attributes.COLOR_0, 3);
+  const tailUVs = floats(tail.attributes.TEXCOORD_0, 2);
+  check(tailPositions.length === tailUVs.length && tailPositions.length === tailColors.length &&
+    tailPositions.length >= 24,
+    `${fish.id}: tail paint geometry is incomplete`);
+  for (let i = 0; i < tailPositions.length; i++) {
+    const [x, y] = tailPositions[i];
+    const expected = paintUV(fish, x + tailNode.translation[0], y);
+    check(tailUVs[i].every((value, axis) => Math.abs(value - expected[axis]) < .00001),
+      `${fish.id}: animated tail lost paint alignment at vertex ${i}`);
+  }
+  const eyeColors = floats(gltf.meshes[0].primitives[1].attributes.COLOR_0, 3);
+  check(eyeColors.some(rgb => rgb.every(value => value > .99)) &&
+    eyeColors.some(rgb => rgb.every(value => value < .05)),
+    `${fish.id}: white eye and dark pupil must remain unpainted`);
   console.log(`${fish.id}: glTF valid; ${positions.length} paint vertices; ${matched} mirrored UV pairs; ${edges} edge vertices; template ${contentHash.slice(0, 12)}`);
 }
 console.log('RISK-02 geometry and template validation: PASS');

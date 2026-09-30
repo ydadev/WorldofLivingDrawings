@@ -18,6 +18,7 @@ const sockets = [];
 const states = [];
 const snapshots = [];
 const deltas = [];
+const positions = [];
 const results = [];
 let now = 1_000_000;
 const connection = new SceneConnection({
@@ -27,6 +28,7 @@ const connection = new SceneConnection({
   onState: state => states.push(state),
   onSnapshot: snapshot => snapshots.push(snapshot),
   onDelta: delta => deltas.push(delta),
+  onPositions: frame => positions.push(frame),
   onCommandResult: (id, result) => results.push({ id, result }),
 });
 const snapshot = (revision, epoch = 1) => ({
@@ -48,6 +50,20 @@ first.open();
 assert.deepEqual(first.sent[0], { type: 'hello', csrf: 'csrf-value' });
 first.receive(snapshot(0));
 assert.equal(connection.connectionState, 'ready');
+const frame = (tick, revision = 0, epoch = 1) => ({
+  type: 'positions', schemaVersion: 1, sceneId: 'scene-id', sceneEpoch: epoch, revision,
+  simulationTick: tick, positions: [{ id: 'fish-id', position: { x: 1, y: 2 },
+    heading: { x: 1, y: 0 } }],
+});
+first.receive(frame(10));
+first.receive({ ...frame(11), actionPositions: [
+  { id: 'boat-1', position: { x: Number.POSITIVE_INFINITY, y: 0 } }] });
+first.receive({ ...frame(12), actionPositions: [
+  { id: 'boat-1', position: { x: -6, y: 0 } }] });
+first.receive(frame(10));
+first.receive(frame(9));
+first.receive(frame(20, 2));
+assert.equal(positions.length, 2, 'only valid new ticks based on an applied revision are accepted');
 const firstId = connection.sendInteraction('feed', { x: 1, y: -1 });
 assert.equal(typeof firstId, 'string');
 assert.equal(first.sent.at(-1).commandId, firstId);
@@ -56,6 +72,8 @@ first.receive({ type: 'ack', commandId: firstId, accepted: true, code: 'ACCEPTED
 assert.equal(results.length, 1);
 first.receive(delta(1));
 assert.equal(deltas.length, 1);
+first.receive(frame(20, 1));
+assert.equal(positions.length, 3);
 first.receive(delta(3));
 assert.equal(first.closed, true, 'revision gap discards the socket');
 assert.equal(sockets.length, 2, 'revision gap requests a fresh snapshot');
@@ -65,6 +83,10 @@ const second = sockets[1].socket;
 second.open();
 second.receive(snapshot(3));
 assert.equal(snapshots.at(-1).revision, 3);
+second.receive(frame(5, 3));
+assert.equal(positions.length, 4, 'a fresh snapshot resets the logical tick cursor');
+second.receive(frame(30, 3, 2));
+assert.equal(positions.length, 4, 'old or wrong-epoch frames are ignored');
 const pendingId = connection.sendInteraction('boat', { x: 2, y: 1 });
 const original = second.sent.at(-1);
 second.close();
@@ -94,4 +116,33 @@ assert.equal(fourth.sent.filter(item => item.type === 'command').length, 0);
 connection.stop();
 assert.equal(connection.connectionState, 'offline');
 assert(states.includes('syncing') && states.includes('ready'));
+connection.start();
+const v2socket = sockets.at(-1).socket;
+v2socket.open();
+const catalog = [
+  { id: 'feed', effect: 'attraction', label: 'Корм', allowedZoneId: 'water' },
+  { id: 'boat', effect: 'threat', label: 'Лодка', allowedZoneId: 'water' },
+  { id: 'feed-slow', effect: 'attraction', label: 'Медленный корм', allowedZoneId: 'water' },
+];
+const extraAction = { id: 'feed-123', interactionId: 'feed-slow', effect: 'attraction',
+  point: { x: 0, y: 0 }, remaining: 8, expiresAtTick: 50 };
+v2socket.receive({ ...snapshot(0, 2), schemaVersion: 2, actionCatalog: catalog,
+  activeActions: [extraAction] });
+assert.equal(connection.connectionState, 'ready');
+assert.equal(snapshots.at(-1).actionCatalog[2].id, 'feed-slow');
+const extraCommand = connection.sendInteraction('feed-slow', { x: 1, y: 0 });
+assert.equal(v2socket.sent.at(-1).interactionId, 'feed-slow');
+assert.equal(typeof extraCommand, 'string');
+v2socket.receive({ ...delta(1), schemaVersion: 2, sceneEpoch: 2,
+  event: { type: 'interaction_state', activeActions: [extraAction],
+    appliedCommandIds: [extraCommand], simulationTick: 1 } });
+assert.equal(deltas.at(-1).event.activeActions[0].interactionId, 'feed-slow');
+v2socket.receive({ ...delta(2), schemaVersion: 1, sceneEpoch: 2 });
+assert(v2socket.closed, 'a v1 delta must not enter a v2 scene');
+const invalid = sockets.at(-1).socket;
+invalid.open();
+invalid.receive({ ...snapshot(0, 3), schemaVersion: 2, actionCatalog: catalog,
+  activeActions: [{ ...extraAction, effect: 'threat' }] });
+assert(invalid.closed, 'an action with the wrong catalog effect is rejected');
+connection.stop();
 console.log('Realtime transport reconnect, dedup, gap and expiry: PASS');

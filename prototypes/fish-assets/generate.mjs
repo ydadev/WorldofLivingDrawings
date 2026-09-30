@@ -14,13 +14,16 @@ const sha256 = data => createHash('sha256').update(data).digest('hex');
 const round = x => Math.round(x * 1e6) / 1e6;
 
 function meshData() {
-  return { positions: [], normals: [], uvs: [], indices: [] };
+  return { positions: [], normals: [], colors: [], uvs: [], indices: [] };
 }
 
-function vertex(mesh, position, normal, uv = [0, 0]) {
+function vertex(mesh, position, normal, uv = [0, 0], color) {
   const index = mesh.positions.length / 3;
   mesh.positions.push(...position.map(round));
   mesh.normals.push(...normal.map(round));
+  const shade = Math.max(0.57, Math.min(1,
+    0.75 + normal[1] * 0.12 - normal[0] * 0.07 + Math.abs(normal[2]) * 0.12));
+  mesh.colors.push(...(color ?? [shade, shade, shade]).map(round));
   mesh.uvs.push(...uv.map(round));
   return index;
 }
@@ -34,12 +37,40 @@ function normalized(x, y, z) {
   return [x / length, y / length, z / length];
 }
 
+function smoothBody(fish) {
+  const controls = fish.body;
+  const result = [];
+  for (let i = 0; i < controls.length - 1; i++) {
+    const before = controls[Math.max(0, i - 1)];
+    const start = controls[i], end = controls[i + 1];
+    const after = controls[Math.min(controls.length - 1, i + 2)];
+    const span = end[0] - start[0];
+    for (let part = 0; part < 3; part++) {
+      const t = part / 3, t2 = t * t, t3 = t2 * t;
+      const section = [start[0] + span * t];
+      for (const axis of [1, 2]) {
+        const leftSlope = (end[axis] - before[axis]) / (end[0] - before[0]);
+        const rightSlope = (after[axis] - start[axis]) / (after[0] - start[0]);
+        const value = (2 * t3 - 3 * t2 + 1) * start[axis]
+          + (t3 - 2 * t2 + t) * span * leftSlope
+          + (-2 * t3 + 3 * t2) * end[axis]
+          + (t3 - t2) * span * rightSlope;
+        section.push(Math.max(0.025, value));
+      }
+      result.push(section);
+    }
+  }
+  result.push(controls.at(-1));
+  return result;
+}
+
 function addBody(mesh, fish) {
-  const segments = 24;
-  for (let i = 0; i < fish.body.length; i++) {
-    const [x, height, depth] = fish.body[i];
-    const before = fish.body[Math.max(0, i - 1)];
-    const after = fish.body[Math.min(fish.body.length - 1, i + 1)];
+  const segments = 16;
+  const sections = smoothBody(fish);
+  for (let i = 0; i < sections.length; i++) {
+    const [x, height, depth] = sections[i];
+    const before = sections[Math.max(0, i - 1)];
+    const after = sections[Math.min(sections.length - 1, i + 1)];
     const dh = (after[1] - before[1]) / (after[0] - before[0]);
     const dd = (after[2] - before[2]) / (after[0] - before[0]);
     for (let j = 0; j < segments; j++) {
@@ -53,7 +84,7 @@ function addBody(mesh, fish) {
       vertex(mesh, [x, y, z], normal, paintUV(fish, x, y));
     }
   }
-  for (let i = 0; i < fish.body.length - 1; i++) {
+  for (let i = 0; i < sections.length - 1; i++) {
     for (let j = 0; j < segments; j++) {
       const next = (j + 1) % segments;
       const a = i * segments + j, b = (i + 1) * segments + j;
@@ -62,8 +93,8 @@ function addBody(mesh, fish) {
       triangle(mesh, a, d, c);
     }
   }
-  for (const [end, normalX] of [[0, -1], [fish.body.length - 1, 1]]) {
-    const [x] = fish.body[end];
+  for (const [end, normalX] of [[0, -1], [sections.length - 1, 1]]) {
+    const [x] = sections[end];
     const center = vertex(mesh, [x, 0, 0], [normalX, 0, 0], paintUV(fish, x, 0));
     for (let j = 0; j < segments; j++) {
       const a = end * segments + j, b = end * segments + (j + 1) % segments;
@@ -95,16 +126,16 @@ function addFin(mesh, fish, fin) {
   }
 }
 
-function addEye(mesh, fish, radius, zOffset) {
+function addEye(mesh, fish, radius, zOffset, color) {
   const [x, y] = fish.eye;
   for (const side of [-1, 1]) {
     const z = side * (bodyDepth(fish, x, y) + zOffset);
     const normal = [0, 0, side];
-    const center = vertex(mesh, [x, y, z], normal);
+    const center = vertex(mesh, [x, y, z], normal, [0, 0], color);
     const ring = [];
     for (let j = 0; j < 16; j++) {
       const angle = 2 * Math.PI * j / 16;
-      ring.push(vertex(mesh, [x + radius * Math.cos(angle), y + radius * Math.sin(angle), z], normal));
+      ring.push(vertex(mesh, [x + radius * Math.cos(angle), y + radius * Math.sin(angle), z], normal, [0, 0], color));
     }
     for (let j = 0; j < 16; j++) {
       const a = ring[j], b = ring[(j + 1) % 16];
@@ -157,7 +188,7 @@ function whitePixelPNG() {
   ]);
 }
 
-function glb(fish, meshes, layoutHash) {
+function glb(fish, meshes, tail, tailPivot, layoutHash) {
   const bufferViews = [], accessors = [], parts = [];
   let byteOffset = 0;
   function appendBytes(data, target) {
@@ -181,27 +212,32 @@ function glb(fish, meshes, layoutHash) {
     accessors.push(value);
     return accessors.length - 1;
   }
-  const primitives = meshes.map((mesh, material) => ({
+  const primitive = (mesh, material) => ({
     attributes: {
       POSITION: accessor(mesh.positions, 5126, 'VEC3', 34962, true),
       NORMAL: accessor(mesh.normals, 5126, 'VEC3', 34962),
       ...(material === 0 ? { TEXCOORD_0: accessor(mesh.uvs, 5126, 'VEC2', 34962) } : {}),
+      COLOR_0: accessor(mesh.colors, 5126, 'VEC3', 34962),
     },
     indices: accessor(mesh.indices, 5123, 'SCALAR', 34963),
     material,
     mode: 4,
-  }));
+  });
+  const primitives = meshes.map(primitive);
+  const tailPrimitive = primitive(tail, 0);
   const neutralImageView = appendBytes(whitePixelPNG());
   const json = {
     asset: { version: '2.0', generator: 'World of Living Drawings RISK-02' },
     scene: 0,
     scenes: [{ nodes: [0] }],
-    nodes: [{ name: fish.id, mesh: 0 }],
-    meshes: [{ name: fish.id, primitives }],
+    nodes: [{ name: fish.id, children: [1, 2] },
+      { name: 'body', mesh: 0 },
+      { name: 'tail-pivot', mesh: 1, translation: [tailPivot, 0, 0] }],
+    meshes: [{ name: `${fish.id}-body`, primitives },
+      { name: `${fish.id}-tail`, primitives: [tailPrimitive] }],
     materials: [
       { name: 'paint', pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], baseColorTexture: { index: 0, texCoord: 0 }, metallicFactor: 0, roughnessFactor: 0.9 } },
-      { name: 'eye-white', pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 } },
-      { name: 'eye-black', pbrMetallicRoughness: { baseColorFactor: [0.015, 0.02, 0.04, 1], metallicFactor: 0, roughnessFactor: 0.9 } },
+      { name: 'eye', pbrMetallicRoughness: { baseColorFactor: [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 0.9 } },
     ],
     images: [{ bufferView: neutralImageView, mimeType: 'image/png' }],
     textures: [{ source: 0, sampler: 0 }],
@@ -258,12 +294,14 @@ for (const fish of species) {
   const layoutBase = { templateId: fish.id, templateVersion: fish.templateVersion, projection: 'orthographic-side', textureSize: [512, 512], bounds: fish.bounds, body: fish.body, fins: fish.fins, eye: fish.eye, paintMask: { include: ['body', 'fins'], exclude: ['eye'] }, paintMaterial: 'paint', uvSet: 0, sideMapping: 'same-xy-on-both-sides', edgeMapping: 'project-xy', colorSpace: 'sRGB' };
   const layoutHash = sha256(JSON.stringify(layoutBase));
   const layout = { ...layoutBase, contentHash: layoutHash };
-  const paint = meshData(), white = meshData(), black = meshData();
+  const paint = meshData(), eye = meshData(), tail = meshData();
   addBody(paint, fish);
-  fish.fins.forEach(fin => addFin(paint, fish, fin));
-  addEye(white, fish, fish.eye[2], 0.012);
-  addEye(black, fish, fish.eye[2] * 0.48, 0.017);
-  const model = glb(fish, [paint, white, black], layoutHash);
+  for (const fin of fish.fins) addFin(fin.id.startsWith('tail-') ? tail : paint, fish, fin);
+  const tailPivot = fish.body.at(-1)[0] - .04;
+  for (let i = 0; i < tail.positions.length; i += 3) tail.positions[i] = round(tail.positions[i] - tailPivot);
+  addEye(eye, fish, fish.eye[2], 0.012, [1, 1, 1]);
+  addEye(eye, fish, fish.eye[2] * 0.48, 0.017, [0.015, 0.02, 0.04]);
+  const model = glb(fish, [paint, eye], tail, tailPivot, layoutHash);
   const svg = printableSVG(fish, layoutHash);
   writeFileSync(path.join(output, `${fish.id}.glb`), model);
   writeFileSync(path.join(output, `${fish.id}.svg`), svg);

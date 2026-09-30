@@ -1,11 +1,35 @@
 use sqlx::{PgPool, migrate::MigrateError};
 pub mod access;
+pub mod blob_gc;
+pub mod blob_store;
 pub mod http;
+pub mod paint_image;
 pub mod realtime;
+pub mod simulation;
+pub mod upload;
 
 /// The server uses versioned, embedded migrations; no database credentials live in source.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
+}
+
+#[cfg(test)]
+pub(crate) async fn test_pool() -> PgPool {
+    static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    MIGRATED
+        .get_or_init(|| async {
+            let database_url = std::env::var("DATABASE_URL").expect("isolated test database");
+            let pool = PgPool::connect(&database_url)
+                .await
+                .expect("connect test PostgreSQL");
+            migrate(&pool)
+                .await
+                .expect("apply migrations once before parallel tests");
+        })
+        .await;
+    PgPool::connect(&std::env::var("DATABASE_URL").expect("isolated test database"))
+        .await
+        .expect("connect test PostgreSQL")
 }
 
 #[cfg(test)]
@@ -22,12 +46,7 @@ mod tests {
 
     #[tokio::test]
     async fn migration_keeps_active_scene_inside_its_session() {
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL for isolated test database");
-        let pool = PgPool::connect(&database_url)
-            .await
-            .expect("connect test PostgreSQL");
-        migrate(&pool).await.expect("apply migrations");
+        let pool = test_pool().await;
         migrate(&pool).await.expect("migrations are repeatable");
 
         let owner = Uuid::new_v4();
@@ -84,9 +103,14 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(store.login("ci-admin", "wrong-password").await.is_err());
+        assert!(
+            store
+                .login("ci-admin", "wrong-password", "test-peer")
+                .await
+                .is_err()
+        );
         let admin = store
-            .login("ci-admin", &admin_password)
+            .login("ci-admin", &admin_password, "test-peer")
             .await
             .expect("admin login");
         let first_password = Uuid::new_v4().to_string();
@@ -100,11 +124,11 @@ mod tests {
             .await
             .expect("second owner");
         let first = store
-            .login("ci-owner-one", &first_password)
+            .login("ci-owner-one", &first_password, "test-peer")
             .await
             .expect("first login");
         let second = store
-            .login("ci-owner-two", &second_password)
+            .login("ci-owner-two", &second_password, "test-peer")
             .await
             .expect("second login");
         assert!(
@@ -204,8 +228,9 @@ mod tests {
             session_id: first_scene.session_id,
             scene_id: first_scene.scene_id,
             scene_epoch: 1,
-            interaction_id: "feed".to_owned(),
+            interaction_id: "boat".to_owned(),
             point: realtime::Point { x: 1.0, y: -1.0 },
+            target_action_id: None,
             expires_at: now_ms + 8000,
         };
         let rejected = realtime::process_command(
@@ -557,9 +582,15 @@ mod tests {
             Err(access::AccessError::RateLimited)
         ));
 
+        let simulation_hub = simulation::SimulationHub::default();
         let app = http::router(http::AppState {
             access: store.clone(),
+            blob_store: blob_store::BlobStore::create(
+                std::env::temp_dir().join(format!("ldw-http-blobs-{}", Uuid::new_v4())),
+            )
+            .unwrap(),
             public_origin: Arc::from("https://world.example.test"),
+            simulation_hub: simulation_hub.clone(),
         });
         let readiness = Request::builder()
             .uri("/health/ready")
@@ -953,10 +984,50 @@ mod tests {
         let writer_snapshot: serde_json::Value =
             serde_json::from_str(writer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(writer_snapshot["revision"], reader_snapshot["revision"]);
+        simulation_hub.publish(simulation::PositionFrame {
+            kind: "positions",
+            schema_version: 1,
+            scene_id: first_scene.scene_id,
+            scene_epoch: writer_snapshot["sceneEpoch"].as_i64().unwrap(),
+            revision: 1,
+            simulation_tick: 10,
+            positions: vec![simulation::EntityPosition {
+                id: format!("fish-{:032x}", Uuid::new_v4().as_u128()),
+                position: ldw_sim::Point { x: 1.0, y: -1.0 },
+                heading: ldw_sim::Point { x: 1.0, y: 0.0 },
+                depth: -0.5,
+                heading_depth: -0.25,
+            }],
+            action_positions: vec![],
+        });
+        let writer_positions: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        let reader_positions: serde_json::Value = serde_json::from_str(
+            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(writer_positions, reader_positions);
+        assert_eq!(writer_positions["type"], "positions");
+        assert_eq!(writer_positions["simulationTick"], 10);
+        assert_eq!(writer_positions["revision"], 1);
         let command = realtime::InteractionCommand {
             command_id: Uuid::new_v4(),
             scene_epoch: 2,
-            interaction_id: "boat".to_owned(),
+            interaction_id: "feed".to_owned(),
             expires_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -974,8 +1045,9 @@ mod tests {
             serde_json::from_str(writer.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(ack["accepted"], true);
         assert_eq!(ack["revision"], 2);
+        let acknowledged_at = tokio::time::Instant::now();
         let writer_delta: serde_json::Value = serde_json::from_str(
-            tokio::time::timeout(std::time::Duration::from_secs(3), writer.next())
+            tokio::time::timeout(std::time::Duration::from_millis(500), writer.next())
                 .await
                 .unwrap()
                 .unwrap()
@@ -985,7 +1057,7 @@ mod tests {
         )
         .unwrap();
         let reader_delta: serde_json::Value = serde_json::from_str(
-            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next())
+            tokio::time::timeout(std::time::Duration::from_millis(500), reader.next())
                 .await
                 .unwrap()
                 .unwrap()
@@ -997,6 +1069,61 @@ mod tests {
         assert_eq!(writer_delta, reader_delta);
         assert_eq!(writer_delta["type"], "delta");
         assert_eq!(writer_delta["revision"], 2);
+        assert!(
+            acknowledged_at.elapsed() <= std::time::Duration::from_millis(500),
+            "committed interaction must reach both connected screens promptly"
+        );
+        let publication_scene = store
+            .create_session(&first.token, &first.csrf)
+            .await
+            .unwrap();
+        assert!(
+            simulation::publish_first_fish(
+                store.pool(),
+                publication_scene.scene_id,
+                Uuid::new_v4(),
+                "coral-fish",
+                "paint-invalid",
+                ldw_sim::Point { x: 99.0, y: 0.0 },
+            )
+            .await
+            .is_err()
+        );
+        let first_fish = Uuid::new_v4();
+        let published = simulation::publish_first_fish(
+            store.pool(),
+            publication_scene.scene_id,
+            first_fish,
+            "coral-fish",
+            "paint-first",
+            ldw_sim::Point { x: 0.5, y: -0.5 },
+        )
+        .await
+        .unwrap();
+        let fish_entity = &published["entity"];
+        assert_eq!(
+            fish_entity["id"],
+            format!("fish-{:032x}", first_fish.as_u128())
+        );
+        assert!(
+            simulation::publish_first_fish(
+                store.pool(),
+                publication_scene.scene_id,
+                Uuid::new_v4(),
+                "coral-fish",
+                "paint-second",
+                ldw_sim::Point { x: 0.0, y: 0.0 },
+            )
+            .await
+            .is_err(),
+            "a second first-fish transaction must not overwrite the checkpoint"
+        );
+        let loaded = simulation::load_scene(store.pool(), publication_scene.scene_id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.world.fish().len(), 1);
+        assert_eq!(loaded.world.fish()[0].id, first_fish.as_u128());
+        assert_eq!(loaded.world.tick_number(), 0);
         drop(reader);
         let mut reconnect_request = url.as_str().into_client_request().unwrap();
         reconnect_request
@@ -1028,6 +1155,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovered["revision"], 2);
+        assert!(recovered["entities"].as_array().unwrap().is_empty());
         assert_eq!(
             recovered["pendingInteractions"].as_array().unwrap().len(),
             2

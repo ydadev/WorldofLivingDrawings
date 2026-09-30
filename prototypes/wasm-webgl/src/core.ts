@@ -10,7 +10,17 @@ declare global {
   }
 }
 
-const adapter = new BabylonRendererAdapter(document.querySelector<HTMLCanvasElement>('#core-scene')!);
+const paintUrl = (id: string): string => {
+  const color = id === 'red' ? '#ed4333' : id === 'blue' ? '#328bea' :
+    `hsl(${(Number(id.slice(5)) * 37) % 360} 80% 50%)`;
+  const paint = document.createElement('canvas');
+  paint.width = paint.height = 512;
+  const context = paint.getContext('2d')!;
+  context.fillStyle = color;
+  context.fillRect(0, 0, 512, 512);
+  return paint.toDataURL('image/png');
+};
+const adapter = new BabylonRendererAdapter(document.querySelector<HTMLCanvasElement>('#core-scene')!, '/fish/', paintUrl);
 const world = worldData as WorldDefinition;
 adapter.setWorld(world);
 const snapshot: SceneSnapshot = { schemaVersion: 1, sceneEpoch: 1, revision: 0,

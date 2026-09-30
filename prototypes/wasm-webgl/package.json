@@ -16,7 +16,10 @@
     "test:paint": "node ../../tools/test-paint-browser.mjs",
     "test:capture": "node ../../tools/test-capture-browser.mjs",
     "test:interaction": "node ../../tools/test-interaction-browser.mjs",
-    "test:core-renderer": "node ../../tools/test-core-renderer-browser.mjs"
+    "test:core-renderer": "node ../../tools/test-core-renderer-browser.mjs",
+    "test:swim-path": "node ../../tools/test-swim-path.mjs",
+    "test:live-ui": "node ../../tools/test-live-ui-browser.mjs",
+    "test:real-ui": "node ../../tools/test-real-ui-browser.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "9.28.0",
@@ -26,6 +29,7 @@
   "devDependencies": {
     "gltf-validator": "2.0.0-dev.3.10",
     "playwright-core": "1.63.0",
+    "pngjs": "5.0.0",
     "qrcode": "1.5.4",
     "typescript": "6.0.3",
     "vite": "8.3.1",

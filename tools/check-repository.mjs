@@ -22,7 +22,15 @@ if (args.has('--commit-message')) {
 } else {
   const staged = args.has('--staged');
   const files = git('ls-files', '-z').split('\0').filter(Boolean);
+  const migrationVersions = new Map();
   for (const file of files) {
+    const migration = file.match(/^(crates\/[^/]+\/migrations\/)(\d+)_.*\.sql$/);
+    if (migration) {
+      const version = `${migration[1]}${Number(migration[2])}`;
+      if (migrationVersions.has(version))
+        fail(`Duplicate migration version: ${migrationVersions.get(version)} and ${file}`);
+      else migrationVersions.set(version, file);
+    }
     if (/^(?:\.local|node_modules|target|dist)\//.test(file) || /(?:^|\/)secrets\//.test(file) ||
         /(?:^|\/)\.env(?:\..*)?$/.test(file) && !file.endsWith('.env.example') ||
         /\.(?:pem|key|p12|pfx|dump|log)$/.test(file)) fail(`Forbidden tracked path: ${file}`);

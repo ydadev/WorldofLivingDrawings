@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/ldw-server"]
+members = ["crates/ldw-server", "crates/ldw-sim"]
 resolver = "3"

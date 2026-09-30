@@ -92,7 +92,7 @@
         "serverTime": { "type": "integer" },
         "worldId": { "$ref": "#/$defs/id" }, "worldVersion": { "$ref": "#/$defs/positiveInt" },
         "entities": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
-        "activeActions": { "type": "array" },
+        "activeActions": { "type": "array", "items": { "$ref": "#/$defs/activeAction" } },
         "pendingInteractions": { "type": "array", "items": { "$ref": "#/$defs/interactionRequested" } },
         "resources": { "type": "object" }, "reservations": { "type": "array" }
       }
@@ -106,7 +106,36 @@
         "revision": { "$ref": "#/$defs/positiveInt" }, "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
         "upsert": { "type": "array", "items": { "$ref": "#/$defs/sceneEntity" } },
         "remove": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-        "event": { "$ref": "#/$defs/interactionRequested" }
+        "event": { "oneOf": [
+          { "$ref": "#/$defs/interactionRequested" },
+          { "$ref": "#/$defs/entityPublished" },
+          { "$ref": "#/$defs/interactionState" }
+        ] }
+      }
+    },
+    "scenePositions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "schemaVersion", "sceneId", "sceneEpoch", "revision", "simulationTick", "positions"],
+      "properties": {
+        "type": { "const": "positions" }, "schemaVersion": { "const": 1 },
+        "sceneId": { "type": "string" }, "sceneEpoch": { "$ref": "#/$defs/positiveInt" },
+        "revision": { "$ref": "#/$defs/nonnegativeInt" },
+        "simulationTick": { "$ref": "#/$defs/nonnegativeInt" },
+        "positions": { "type": "array", "maxItems": 100, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "position", "heading"],
+          "properties": { "id": { "$ref": "#/$defs/id" },
+            "position": { "$ref": "#/$defs/point" },
+            "heading": { "$ref": "#/$defs/point" },
+            "depth": { "type": "number", "minimum": -1.5, "maximum": 1.5 },
+            "headingDepth": { "type": "number", "minimum": -1, "maximum": 1 } }
+        } },
+        "actionPositions": { "type": "array", "maxItems": 1, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "position"],
+          "properties": { "id": { "$ref": "#/$defs/id" },
+            "position": { "$ref": "#/$defs/point" } }
+        } }
       }
     },
     "interactionRequested": {
@@ -117,6 +146,47 @@
         "commandId": { "type": "string" },
         "interactionId": { "$ref": "#/$defs/id" },
         "point": { "$ref": "#/$defs/point" }
+      }
+    },
+    "activeAction": {
+      "oneOf": [{ "$ref": "#/$defs/feedAction" }, { "$ref": "#/$defs/boatAction" }]
+    },
+    "feedAction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "interactionId", "point", "remaining", "expiresAtTick"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "interactionId": { "const": "feed" },
+        "point": { "$ref": "#/$defs/point" },
+        "remaining": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "expiresAtTick": { "$ref": "#/$defs/positiveInt" }
+      }
+    },
+    "boatAction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "interactionId", "point", "position", "entry", "exit", "expiresAtTick"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "interactionId": { "const": "boat" },
+        "point": { "$ref": "#/$defs/point" }, "position": { "$ref": "#/$defs/point" },
+        "entry": { "$ref": "#/$defs/point" }, "exit": { "$ref": "#/$defs/point" },
+        "expiresAtTick": { "$ref": "#/$defs/positiveInt" }
+      }
+    },
+    "interactionState": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "activeActions", "appliedCommandIds", "simulationTick"],
+      "properties": {
+        "type": { "const": "interaction_state" },
+        "activeActions": { "type": "array", "items": { "$ref": "#/$defs/activeAction" } },
+        "appliedCommandIds": { "type": "array", "items": { "type": "string" } },
+        "simulationTick": { "$ref": "#/$defs/nonnegativeInt" }
+      }
+    },
+    "entityPublished": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "entity"],
+      "properties": {
+        "type": { "const": "entity_published" },
+        "entity": { "$ref": "#/$defs/sceneEntity" }
       }
     },
     "assetManifest": {

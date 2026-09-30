@@ -23,6 +23,7 @@ on:
       - 'tools/test-paint-browser.mjs'
       - 'tools/test-capture-browser.mjs'
       - 'tools/test-interaction-browser.mjs'
+      - 'tools/test-live-ui-browser.mjs'
   pull_request:
     paths:
       - '.github/workflows/risk-01.yml'
@@ -46,6 +47,7 @@ on:
       - 'tools/test-paint-browser.mjs'
       - 'tools/test-capture-browser.mjs'
       - 'tools/test-interaction-browser.mjs'
+      - 'tools/test-live-ui-browser.mjs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -96,3 +98,9 @@ jobs:
       - name: Run Chrome renderer adapter probe
         working-directory: prototypes/wasm-webgl
         run: npm run test:core-renderer
+      - name: Check near and far swimming path
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:swim-path
+      - name: Run Chrome live world UI probe
+        working-directory: prototypes/wasm-webgl
+        run: npm run test:live-ui
