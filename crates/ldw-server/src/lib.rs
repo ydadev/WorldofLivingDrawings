@@ -1059,6 +1059,83 @@ mod tests {
             "paired Controller keeps scene access after invitation closes"
         );
 
+        let devices_uri = format!("/api/sessions/{}/devices", second_scene.session_id);
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&devices_uri)
+                    .header(header::COOKIE, &second_owner_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let devices: serde_json::Value =
+            serde_json::from_slice(&to_bytes(listed.into_body(), 65536).await.unwrap()).unwrap();
+        let controller_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM device_grants WHERE session_id = $1 AND token_hash = $2",
+        )
+        .bind(second_scene.session_id)
+        .bind(access::hash_token(controller_cookie.split('=').nth(1).unwrap()).to_vec())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(devices.as_array().unwrap().iter().any(|device| {
+            device["id"] == controller_id.to_string() && device["role"] == "controller"
+        }));
+        assert!(!devices.to_string().contains("token_hash"));
+        for cookie in [owner_cookie.as_str(), controller_cookie] {
+            let forbidden = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&devices_uri)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        }
+        let revoke_uri = format!("{devices_uri}/{controller_id}");
+        for (cookie, origin, token) in [
+            (controller_cookie, Some("https://world.example.test"), &second.csrf),
+            (owner_cookie.as_str(), Some("https://world.example.test"), &first.csrf),
+            (second_owner_cookie.as_str(), None, &second.csrf),
+            (second_owner_cookie.as_str(), Some("https://world.example.test"), &first.csrf),
+        ] {
+            let mut request = Request::builder().method("DELETE").uri(&revoke_uri)
+                .header(header::COOKIE, cookie)
+                .header("x-csrf-token", token);
+            if let Some(origin) = origin {
+                request = request.header(header::ORIGIN, origin);
+            }
+            assert_eq!(app.clone().oneshot(request.body(Body::empty()).unwrap())
+                .await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
+        for _ in 0..2 {
+            let revoked = Request::builder()
+                .method("DELETE")
+                .uri(&revoke_uri)
+                .header(header::COOKIE, &second_owner_cookie)
+                .header(header::ORIGIN, "https://world.example.test")
+                .header("x-csrf-token", &second.csrf)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(app.clone().oneshot(revoked).await.unwrap().status(),
+                StatusCode::NO_CONTENT);
+        }
+        assert_eq!(app.clone().oneshot(Request::builder()
+            .uri(format!("/api/sessions/{}/scene", second_scene.session_id))
+            .header(header::COOKIE, controller_cookie)
+            .body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert!(store.scene_access(access::GrantKind::Controller,
+            controller_cookie.split('=').nth(1).unwrap(), second_scene.session_id)
+            .await.is_err());
+
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::{Message as ClientMessage, client::IntoClientRequest};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1265,6 +1342,25 @@ mod tests {
         assert_eq!(loaded.world.fish().len(), 1);
         assert_eq!(loaded.world.fish()[0].id, first_fish.as_u128());
         assert_eq!(loaded.world.tick_number(), 0);
+        let publication_invite = store.open_invitation(&first.token, &first.csrf,
+            publication_scene.session_id).await.unwrap();
+        let publication_controller = store.pair_controller(publication_scene.session_id,
+            "published-fish-device", "test-ip",
+            access::PairCode::Qr(&publication_invite.qr_secret)).await.unwrap();
+        let publication_grant_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM device_grants WHERE session_id = $1 AND token_hash = $2",
+        ).bind(publication_scene.session_id)
+            .bind(access::hash_token(&publication_controller.token).to_vec())
+            .fetch_one(&pool).await.unwrap();
+        store.revoke_device(&first.token, &first.csrf, publication_scene.session_id,
+            publication_grant_id).await.unwrap();
+        assert!(store.controller_scene(&publication_controller.token,
+            publication_scene.session_id).await.is_err());
+        let fish_after_revoke = simulation::load_scene(store.pool(), publication_scene.scene_id)
+            .await.unwrap();
+        assert_eq!(fish_after_revoke.world.fish().len(), 1,
+            "revoking a device must preserve published fish");
+        assert_eq!(fish_after_revoke.world.fish()[0].id, first_fish.as_u128());
         drop(reader);
         let mut reconnect_request = url.as_str().into_client_request().unwrap();
         reconnect_request
@@ -1301,6 +1397,23 @@ mod tests {
             recovered["pendingInteractions"].as_array().unwrap().len(),
             2
         );
+        let viewer_grant_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM device_grants WHERE session_id = $1 AND token_hash = $2",
+        ).bind(first_scene.session_id)
+            .bind(access::hash_token(&read_only.token).to_vec())
+            .fetch_one(&pool).await.unwrap();
+        store.revoke_device(&first.token, &first.csrf, first_scene.session_id,
+            viewer_grant_id).await.unwrap();
+        assert!(store.viewer_scene(&read_only.token, first_scene.session_id)
+            .await.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                match reader_again.next().await {
+                    None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }).await.expect("revoked Viewer WebSocket must disconnect");
         server.abort();
     }
 }

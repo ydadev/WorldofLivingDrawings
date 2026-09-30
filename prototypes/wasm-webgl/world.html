@@ -18,6 +18,12 @@
       <section id="world-shell" hidden>
         <p>Сессия: <code id="session-id"></code> <button type="button" id="invite">Подключить телефон</button> <button type="button" id="invite-close">Закрыть подключение</button></p>
         <p id="invitation" role="status"></p>
+        <section aria-label="Подключённые устройства">
+          <h2>Выданные доступы</h2>
+          <button type="button" id="devices-refresh">Обновить список</button>
+          <p id="devices-status" role="status" aria-live="polite"></p>
+          <ul id="devices-list"></ul>
+        </section>
         <form id="approve-viewer-form" class="live-approve">
           <label>Код с экрана TV <input name="code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" required></label>
           <label><input name="interact" type="checkbox"> Разрешить действия на экране</label>

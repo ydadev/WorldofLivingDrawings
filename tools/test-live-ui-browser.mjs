@@ -198,6 +198,20 @@ try {
     assert(state.commands[7].interactionId === 'feed-slow' && state.commands[7].accepted,
       'Phone must send the same catalog ID');
   }
+  await desktop.locator('#devices-refresh').click();
+  await desktop.waitForFunction(() => document.querySelectorAll('#devices-list li').length >= 2);
+  const phone = desktop.locator('#devices-list li').filter({ hasText: 'Телефон' });
+  assert(await phone.count() === 1, 'Owner must see the paired Controller');
+  await phone.getByRole('button', { name: /Отозвать доступ/ }).click();
+  await desktop.waitForFunction(() => document.querySelector('#devices-status')
+    ?.textContent.includes('Его рисунки остались в мире'));
+  assert(!(await probe()).devices.some(device => device.role === 'controller'),
+    'Owner revocation must remove the Controller grant from the list');
+  const denied = await mobile.evaluate(async () => {
+    const response = await fetch(`/api/sessions/${new URL(location.href).searchParams.get('session')}/scene`);
+    return response.status;
+  });
+  assert(denied === 403, 'Revoked Controller must lose HTTP access');
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
   console.log('CORE-04 live UI: Owner + Viewer + Controller, coordinates, keyboard, rejection and reconnect: PASS');
 } finally {

@@ -30,6 +30,11 @@ interface SceneInfo {
   world_version: number;
   server_time_ms: number;
 }
+interface DeviceGrant {
+  id: string;
+  role: 'controller' | 'viewer' | 'viewer_interact';
+  issued_at_utc: string;
+}
 interface Publication {
   paint: PaintResult;
   point: Point2;
@@ -286,6 +291,49 @@ function mount(): void {
     },
   });
   setupPublication();
+  if (role === 'owner') void refreshDevices();
+}
+
+async function refreshDevices(): Promise<void> {
+  const list = document.querySelector<HTMLUListElement>('#devices-list');
+  const status = document.querySelector<HTMLElement>('#devices-status');
+  const refresh = document.querySelector<HTMLButtonElement>('#devices-refresh');
+  if (!list || !status || !refresh || !sessionId) return;
+  refresh.disabled = true;
+  try {
+    const devices = await request<DeviceGrant[]>(`${sessionPath()}/devices`, 'GET');
+    list.replaceChildren();
+    for (const device of devices) {
+      const item = document.createElement('li');
+      const label = document.createElement('span');
+      const roleName = device.role === 'controller' ? 'Телефон' :
+        device.role === 'viewer_interact' ? 'Экран с управлением' : 'Экран просмотра';
+      label.textContent = `${roleName} · ${device.issued_at_utc} UTC · № ${device.id.slice(0, 8)}`;
+      const revoke = document.createElement('button');
+      revoke.type = 'button';
+      revoke.textContent = 'Отозвать доступ';
+      revoke.setAttribute('aria-label', `Отозвать доступ: ${label.textContent}`);
+      revoke.addEventListener('click', async () => {
+        revoke.disabled = true;
+        try {
+          await request(`${sessionPath()}/devices/${encodeURIComponent(device.id)}`,
+            'DELETE', undefined, csrf);
+          status.textContent = `Доступ устройства № ${device.id.slice(0, 8)} отозван. Его рисунки остались в мире.`;
+          await refreshDevices();
+        } catch (error) {
+          status.textContent = `Не удалось отозвать доступ: ${error instanceof Error ? error.message : 'UNKNOWN_ERROR'}`;
+          revoke.disabled = false;
+        }
+      });
+      item.append(label, ' ', revoke);
+      list.append(item);
+    }
+    if (!devices.length) status.textContent = 'Выданных доступов нет.';
+  } catch (error) {
+    status.textContent = `Не удалось получить список устройств: ${error instanceof Error ? error.message : 'UNKNOWN_ERROR'}`;
+  } finally {
+    refresh.disabled = false;
+  }
 }
 
 form.addEventListener('submit', async event => {
@@ -396,3 +444,5 @@ async function changeInvitation(close: boolean): Promise<void> {
 }
 inviteButton?.addEventListener('click', () => { void changeInvitation(false); });
 closeInviteButton?.addEventListener('click', () => { void changeInvitation(true); });
+document.querySelector<HTMLButtonElement>('#devices-refresh')
+  ?.addEventListener('click', () => { void refreshDevices(); });
