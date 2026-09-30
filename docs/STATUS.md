@@ -12,4 +12,4 @@ Ubuntu, Docker/Compose, nginx, PostgreSQL и внешний NPM подготов
 
 Следующие шаги и зависимости — в [TASKS.md](TASKS.md), доказательства — в [WORKLOG.md](WORKLOG.md), правила разработки — в [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Независимая часть MVP-04-INVITE — `IN_PROGRESS`: Owner может закрыть окно PIN/QR без отключения уже выданных Controller-доступов. Локальный Chrome-тест интерфейса прошёл; проверка PostgreSQL/HTTP и гонки подключения ожидает Ubuntu CI.
+Независимая часть MVP-04-INVITE — `DONE`: Owner закрывает окно PIN/QR без отключения уже выданных Controller-доступов. Права, HTTP, конкуренция закрытия и подключения, браузерный интерфейс проверены в [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36664567107). Следующий шаг — другая независимая часть MVP-04; полный этап по-прежнему зависит от физических проверок MVP-01/02.
