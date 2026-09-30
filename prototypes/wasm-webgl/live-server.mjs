@@ -22,7 +22,8 @@ const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 const csp = ["default-src 'none'", "script-src 'self' 'wasm-unsafe-eval'", "style-src 'self'",
   "img-src 'self' data: blob:", `connect-src 'self' ws://127.0.0.1:${port}`, "worker-src 'self'", "object-src 'none'",
   "base-uri 'none'", "frame-src 'self'", "frame-ancestors 'self'"].join('; ');
-const state = { revision: 0, actions: [], commands: [], outcomes: new Map(), viewerRole: null };
+const state = { revision: 0, actions: [], commands: [], outcomes: new Map(), viewerRole: null,
+  invitationOpen: false };
 const json = (response, status, value) => response.writeHead(status,
   { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
 
@@ -36,15 +37,17 @@ const server = createServer(async (request, response) => {
     return json(response, 200, { dropped: true });
   }
   if (pathname === '/probe') return json(response, 200,
-    { revision: state.revision, commands: state.commands, actions: state.actions });
+    { revision: state.revision, commands: state.commands, actions: state.actions,
+      invitationOpen: state.invitationOpen });
   if (pathname.startsWith('/api/')) {
-    if (request.method === 'POST' && request.headers.origin !== origin)
+    if (['POST', 'DELETE'].includes(request.method) && request.headers.origin !== origin)
       return json(response, 403, { error: 'ORIGIN_DENIED' });
     if (request.method === 'POST' && pathname === '/api/login') {
       response.setHeader('Set-Cookie', 'fixture-owner=1; Path=/; HttpOnly; SameSite=Strict');
       return json(response, 200, { role: 'owner', csrf: 'fixture-owner-csrf' });
     }
     if (request.method === 'POST' && pathname === `/api/sessions/${sessionId}/pair`) {
+      if (!state.invitationOpen) return json(response, 403, { error: 'ACCESS_DENIED' });
       response.setHeader('Set-Cookie', 'fixture-controller=1; Path=/; HttpOnly; SameSite=Strict');
       return json(response, 200, { participant_id: 'fixture-participant', csrf: 'fixture-controller-csrf' });
     }
@@ -70,8 +73,14 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && pathname === '/api/sessions')
       return json(response, 200, { session_id: sessionId, scene_id: sceneId });
-    if (request.method === 'POST' && pathname === `/api/sessions/${sessionId}/invitation`)
+    if (request.method === 'POST' && pathname === `/api/sessions/${sessionId}/invitation`) {
+      state.invitationOpen = true;
       return json(response, 200, { pin: '123456', expires_in_seconds: 300 });
+    }
+    if (request.method === 'DELETE' && pathname === `/api/sessions/${sessionId}/invitation`) {
+      state.invitationOpen = false;
+      response.writeHead(204).end(); return;
+    }
     if (request.method === 'GET' && pathname === `/api/sessions/${sessionId}/scene`)
       return json(response, 200, { session_id: sessionId, scene_id: sceneId,
         world_id: 'underwater', world_version: 1, scene_epoch: 1, revision: state.revision });

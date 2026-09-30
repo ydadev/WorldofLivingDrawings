@@ -48,7 +48,7 @@ if (storedSession) {
   if (input instanceof HTMLInputElement) input.value = storedSession;
 }
 
-async function request<T>(path: string, method: 'GET' | 'POST', body?: unknown, token?: string): Promise<T> {
+async function request<T>(path: string, method: 'GET' | 'POST' | 'DELETE', body?: unknown, token?: string): Promise<T> {
   const response = await fetch(path, {
     method, credentials: 'same-origin',
     headers: { ...(body ? { 'Content-Type': 'application/json' } : {}),
@@ -370,13 +370,29 @@ document.querySelector<HTMLFormElement>('#approve-viewer-form')?.addEventListene
   }
 });
 
-document.querySelector<HTMLButtonElement>('#invite')?.addEventListener('click', async () => {
+const inviteButton = document.querySelector<HTMLButtonElement>('#invite');
+const closeInviteButton = document.querySelector<HTMLButtonElement>('#invite-close');
+async function changeInvitation(close: boolean): Promise<void> {
+  if (!inviteButton || !closeInviteButton || inviteButton.disabled) return;
   const invitation = document.querySelector<HTMLElement>('#invitation')!;
+  inviteButton.disabled = true;
+  closeInviteButton.disabled = true;
   try {
-    const result = await request<{ pin: string; expires_in_seconds: number }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/invitation`, 'POST', undefined, csrf);
-    invitation.textContent = `ID сессии: ${sessionId}. Код подключения: ${result.pin}. Действует ${result.expires_in_seconds / 60} минут.`;
+    const path = `/api/sessions/${encodeURIComponent(sessionId)}/invitation`;
+    if (close) {
+      await request(path, 'DELETE', undefined, csrf);
+      invitation.textContent = 'Подключение новых телефонов закрыто. Уже подключённые телефоны продолжают работать.';
+    } else {
+      const result = await request<{ pin: string; expires_in_seconds: number }>(
+        path, 'POST', undefined, csrf);
+      invitation.textContent = `ID сессии: ${sessionId}. Код подключения: ${result.pin}. Действует ${result.expires_in_seconds / 60} минут.`;
+    }
   } catch (error) {
-    invitation.textContent = `Не удалось создать код: ${error instanceof Error ? error.message : 'UNKNOWN_ERROR'}`;
+    invitation.textContent = `Не удалось ${close ? 'закрыть подключение' : 'создать код'}: ${error instanceof Error ? error.message : 'UNKNOWN_ERROR'}`;
+  } finally {
+    inviteButton.disabled = false;
+    closeInviteButton.disabled = false;
   }
-});
+}
+inviteButton?.addEventListener('click', () => { void changeInvitation(false); });
+closeInviteButton?.addEventListener('click', () => { void changeInvitation(true); });

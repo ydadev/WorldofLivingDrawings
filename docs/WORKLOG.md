@@ -581,3 +581,9 @@ PostgreSQL-тест frozen-каталога расширен до настоящ
 Проверка §5.4 усилена: тест теперь формирует третье определение в JSON-пакете, пропускает его через тот же парсер, что используется при создании сцены, замораживает полученный checkpoint и только затем выполняет WebSocket-сценарий. Это убирает ручное конструирование ActionDefinition внутри теста. `cargo fmt --all -- --check` и `git diff --check` — PASS локально; обновлённый PostgreSQL/WebSocket-тест — NOT_RUN до Ubuntu CI.
 
 Для `d63b159` [Ubuntu/PostgreSQL/Chrome CI](https://github.com/ydadev/WorldofLivingDrawings/actions/runs/36663145745) — PASS: дополнительное определение из JSON-пакета прошло рабочий парсер, checkpoint и реальный WebSocket. Аудит [MVP-03-ACCEPTANCE.md](MVP-03-ACCEPTANCE.md) сопоставил это с уже проверенными очередью, реакцией, отменой, replay, выбором точки и рендером. Критерии MVP-03-DATA и программной части MVP-03 выполнены; статусы переведены в DONE. Физические устройства, бумажный Capture и production deploy остаются отдельными задачами.
+
+## 2026-09-30 — закрытие окна подключения (MVP-04-INVITE)
+
+После завершения MVP-03 открыт [черновой PR #1](https://github.com/ydadev/WorldofLivingDrawings/pull/1) для ревью накопленного подводного MVP. Следующая независимая часть MVP-04 выделена отдельно, поскольку полный MVP-04 зависит от реальных фото и проверки редактора на устройстве.
+
+Owner может закрыть окно PIN/QR отдельным DELETE с Origin/CSRF. Закрытие и pairing сериализуются блокировкой строки сессии; закрытие идемпотентно и не отзывает уже выданные Controller-grant. В UI добавлена кнопка и сообщение о сохранении доступа подключённых телефонов. PostgreSQL-тесты проверяют закрытый PIN/QR, чужого Owner, Controller, Origin/CSRF и конкурентные попытки. Локально `cargo fmt --all -- --check`, `npm run typecheck`, TypeScript прототипа, Vite build, Chrome `test:live-ui` для v1 и v2, `git diff --check` — PASS. Ubuntu/PostgreSQL CI — NOT_RUN до push.

@@ -75,7 +75,10 @@ pub fn router(state: AppState) -> Router {
             "/api/sessions/{id}/viewer-claims/{claim_id}/activate",
             post(activate_viewer_claim),
         )
-        .route("/api/sessions/{id}/invitation", post(open_invitation))
+        .route(
+            "/api/sessions/{id}/invitation",
+            post(open_invitation).delete(close_invitation),
+        )
         .route("/api/sessions/{id}/pair", post(pair))
         .layer(middleware::map_response(no_store))
         .with_state(state)
@@ -639,6 +642,24 @@ async fn open_invitation(
         qr_secret: invitation.qr_secret,
         expires_in_seconds: 300,
     }))
+}
+
+async fn close_invitation(
+    State(state): State<AppState>,
+    Path(session_id): Path<Uuid>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    require_origin(&headers, &state)?;
+    state
+        .access
+        .close_invitation(
+            cookie_token(&jar, OWNER_COOKIE)?,
+            csrf(&headers)?,
+            session_id,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

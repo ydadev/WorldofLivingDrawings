@@ -11,3 +11,5 @@
 Ubuntu, Docker/Compose, nginx, PostgreSQL и внешний NPM подготовлены; HTTPS/WSS проверены. Приложение ещё не развёрнуто на публичном домене — это MVP-05. DB/blob backup с manifest, retention и restore проверен и хранится только в исключённой из Git папке `.local/backups/`; отдельное хранилище отложено пользователем. Ubuntu после reboot показывает около 4,9 GiB RAM вместо заявленных 8 ГБ — требуется проверить гипервизор. Защита Owner-входа от перебора выполнена, а доверенную цепочку forwarded IP от NPM нужно настроить при развёртывании.
 
 Следующие шаги и зависимости — в [TASKS.md](TASKS.md), доказательства — в [WORKLOG.md](WORKLOG.md), правила разработки — в [DEVELOPMENT.md](DEVELOPMENT.md).
+
+Независимая часть MVP-04-INVITE — `IN_PROGRESS`: Owner может закрыть окно PIN/QR без отключения уже выданных Controller-доступов. Локальный Chrome-тест интерфейса прошёл; проверка PostgreSQL/HTTP и гонки подключения ожидает Ubuntu CI.

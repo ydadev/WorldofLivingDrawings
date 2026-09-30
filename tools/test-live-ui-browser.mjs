@@ -87,6 +87,13 @@ try {
   assert(await mobile.locator('#world-stage').isHidden(), 'Controller should open view on demand');
   await mobile.locator('#view-toggle').click();
   await mobile.waitForFunction(() => !document.querySelector('#action-boat').disabled);
+  await desktop.locator('#invite-close').click();
+  await desktop.waitForFunction(() => document.querySelector('#invitation')
+    ?.textContent.includes('Подключение новых телефонов закрыто'));
+  assert((await probe()).invitationOpen === false,
+    'Owner must close the invitation without disconnecting paired phones');
+  assert(await mobile.locator('#action-boat').isEnabled(),
+    'Closing the invitation must preserve an existing Controller');
 
   await desktop.locator('#action-feed').click();
   await point(desktop, .5, .5);
