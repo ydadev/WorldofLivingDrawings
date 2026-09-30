@@ -1097,7 +1097,10 @@ impl World {
                     let (earlier, later) = self.fish.split_at_mut(right_index);
                     let left = &mut earlier[left_index];
                     let right = &mut later[0];
-                    let gap = body_gap(BodyPose::from(&*left), BodyPose::from(&*right));
+                    // The fixed side camera also needs a shallow screen-space gap:
+                    // two bodies at different depths may be separate in 3D while
+                    // their complete silhouettes still pass through one another.
+                    let gap = silhouette_gap(BodyPose::from(&*left), BodyPose::from(&*right));
                     if gap >= -0.15 {
                         continue;
                     }
@@ -1450,7 +1453,7 @@ impl World {
                     x: other.position.x - fish.position.x,
                     y: other.position.y - fish.position.y,
                 };
-                let gap = body_gap(bodies[index], *other);
+                let gap = silhouette_gap(bodies[index], *other);
                 if gap >= 1.1 || desired.x * toward.x + desired.y * toward.y <= 0.0 {
                     continue;
                 }
@@ -1645,6 +1648,17 @@ fn body_gap(left: BodyPose, right: BodyPose) -> f32 {
         w[2] + u[2] * s - v[2] * t,
     ];
     dot3(closest, closest).sqrt() - BODY_CLEARANCE
+}
+
+// Distance between the projected body axes in the fixed side camera. A small
+// negative gap permits a brief overlap, independently of the fishes' depths.
+fn silhouette_gap(left: BodyPose, right: BodyPose) -> f32 {
+    let (a, b) = body_axis(left);
+    let (c, d) = body_axis(right);
+    let horizontal = (a[0].min(b[0]) - c[0].max(d[0]))
+        .max(c[0].min(d[0]) - a[0].max(b[0]))
+        .max(0.0);
+    horizontal.hypot(left.position.y - right.position.y) - BODY_CLEARANCE
 }
 
 fn clear_action_target(fish: &mut Fish) {
@@ -2494,6 +2508,14 @@ mod tests {
                 BodyPose::from(&world.fish()[1]),
             );
             assert!(gap >= -0.35, "fish bodies deeply overlapped by {gap}");
+            let projected = silhouette_gap(
+                BodyPose::from(&world.fish()[0]),
+                BodyPose::from(&world.fish()[1]),
+            );
+            assert!(
+                projected >= -0.35,
+                "fish silhouettes deeply overlapped by {projected}"
+            );
             closest = closest.min(gap);
             for (index, previous) in before.iter().enumerate() {
                 if world.fish()[index].position.distance_squared(*previous) > 0.000025 {
@@ -2506,6 +2528,38 @@ mod tests {
             moving.iter().all(|ticks| *ticks > 80),
             "neither fish may wait for the other"
         );
+        assert!(world.fish()[0].position.x > 0.0);
+        assert!(world.fish()[1].position.x < 0.0);
+    }
+
+    #[test]
+    fn fish_at_different_depths_do_not_cross_completely_on_screen() {
+        let mut world = World::new(bounds(), 41).unwrap();
+        world.spawn_fish(1, Point { x: -2.4, y: 0.0 }, 1.8).unwrap();
+        world.spawn_fish(2, Point { x: 2.4, y: 0.0 }, 1.8).unwrap();
+        world.fish[0].target = Point { x: 3.0, y: 0.0 };
+        world.fish[1].target = Point { x: -3.0, y: 0.0 };
+        world.fish[0].depth = -1.0;
+        world.fish[0].depth_target = -1.0;
+        world.fish[1].depth = 1.0;
+        world.fish[1].depth_target = 1.0;
+        world.fish[1].heading = Point { x: -1.0, y: 0.0 };
+        let mut moving = [0; 2];
+        for _ in 0..160 {
+            let before = [world.fish()[0].position, world.fish()[1].position];
+            world.step();
+            let gap = silhouette_gap(
+                BodyPose::from(&world.fish()[0]),
+                BodyPose::from(&world.fish()[1]),
+            );
+            assert!(gap >= -0.35, "fish silhouettes deeply overlapped by {gap}");
+            for (index, previous) in before.iter().enumerate() {
+                if world.fish()[index].position.distance_squared(*previous) > 0.000025 {
+                    moving[index] += 1;
+                }
+            }
+        }
+        assert!(moving.iter().all(|ticks| *ticks > 80));
         assert!(world.fish()[0].position.x > 0.0);
         assert!(world.fish()[1].position.x < 0.0);
     }

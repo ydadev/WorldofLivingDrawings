@@ -65,6 +65,18 @@ export function bodyGap(position: Point3, heading: Point3,
   return Math.hypot(closest.x, closest.y, closest.depth) - BODY_CLEARANCE;
 }
 
+// Side-camera projection: depth may separate real bodies while their visible
+// silhouettes still overlap completely. Allow contact, but limit that overlap.
+export function silhouetteGap(position: Point3, heading: Point3,
+  otherPosition: Point3, otherHeading: Point3): number {
+  const [a, b] = bodyEndpoints(position, heading);
+  const [c, d] = bodyEndpoints(otherPosition, otherHeading);
+  const horizontal = Math.max(0,
+    Math.min(a.x, b.x) - Math.max(c.x, d.x),
+    Math.min(c.x, d.x) - Math.max(a.x, b.x));
+  return Math.hypot(horizontal, position.y - otherPosition.y) - BODY_CLEARANCE;
+}
+
 export class PreviewSwimWorld {
   private readonly fish: FishState[];
   private readonly seed: number;
@@ -163,7 +175,19 @@ export class PreviewSwimWorld {
       depth: fish.target.depth - fish.position.depth };
     const remaining = Math.hypot(delta.x, delta.y, delta.depth);
     if (remaining < .12) return;
-    const desired = normalize(delta);
+    let desired = normalize(delta);
+    for (const other of this.fish) {
+      if (other === fish) continue;
+      const gap = silhouetteGap(fish.position, fish.heading,
+        other.position, other.heading);
+      const toward = subtract(other.position, fish.position);
+      if (gap >= 1.1 || desired.x * toward.x + desired.y * toward.y <= 0) continue;
+      const sign = fish.position.y === other.position.y ?
+        (fish.index < other.index ? 1 : -1) :
+        (fish.position.y > other.position.y ? 1 : -1);
+      desired = normalize({ ...desired,
+        y: desired.y + sign * Math.min(2.2, (1.1 - gap) * 1.8) });
+    }
     const currentYaw = Math.atan2(fish.heading.depth, fish.heading.x);
     const wantedYaw = Math.atan2(desired.depth, desired.x);
     const yaw = currentYaw + Math.max(-.09, Math.min(.09,
@@ -199,17 +223,18 @@ export class PreviewSwimWorld {
       for (let left = 0; left < this.fish.length; left++) for (let right = left + 1;
         right < this.fish.length; right++) {
         const a = this.fish[left], b = this.fish[right];
-        const gap = bodyGap(a.position, a.heading, b.position, b.heading);
-        if (gap >= -.08) continue;
+        const gap = silhouetteGap(a.position, a.heading,
+          b.position, b.heading);
+        if (gap >= -.18) continue;
         const sign = a.position.y >= b.position.y ? 1 : -1;
         const roomA = sign > 0 ? limits.y - a.position.y : a.position.y + limits.y;
         const roomB = sign > 0 ? b.position.y + limits.y : limits.y - b.position.y;
-        const needed = Math.min(.2, -.08 - gap);
+        const needed = Math.min(.16, -.18 - gap);
         const moveA = Math.min(roomA, needed / 2);
         const moveB = Math.min(roomB, needed - moveA);
         a.position = { ...a.position, y: a.position.y + sign * moveA };
         b.position = { ...b.position, y: b.position.y - sign * moveB };
-        changed = true;
+        changed ||= moveA + moveB > 1e-6;
       }
       if (!changed) break;
     }

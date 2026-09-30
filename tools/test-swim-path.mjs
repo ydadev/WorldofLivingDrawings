@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { PreviewSwimWorld, bodyGap } from '../prototypes/wasm-webgl/src/swim-path.ts';
+import { PreviewSwimWorld, bodyGap, silhouetteGap } from '../prototypes/wasm-webgl/src/swim-path.ts';
+
+assert(silhouetteGap({ x: 0, y: 0, depth: -1 }, { x: 1, y: 0, depth: 0 },
+  { x: 0, y: 0, depth: 1 }, { x: -1, y: 0, depth: 0 }) < -.8,
+  'different depth must not hide complete projected overlap');
 
 const world = new PreviewSwimWorld(12345);
 const replay = new PreviewSwimWorld(12345);
@@ -51,6 +55,10 @@ for (let tick = 0; tick < 3600; tick++) {
     const gap = bodyGap(a, { ...a.heading, depth: a.headingDepth },
       b, { ...b.heading, depth: b.headingDepth });
     assert(gap >= -.35, `fish bodies passed through each other: ${JSON.stringify({ tick, gap, a, b })}`);
+    const projected = silhouetteGap(a, { ...a.heading, depth: a.headingDepth },
+      b, { ...b.heading, depth: b.headingDepth });
+    assert(projected >= -.35,
+      `fish silhouettes crossed completely: ${JSON.stringify({ tick, projected, a, b })}`);
     nearby ||= gap < .5;
   }
 }
@@ -81,6 +89,10 @@ for (let seed = 1; seed <= 12; seed++) {
         b, { ...b.heading, depth: b.headingDepth });
       assert(gap >= -.35,
         `seed ${seed}, tick ${tick}: fish bodies passed through each other (${gap}): ${JSON.stringify({ a, b })}`);
+      const projected = silhouetteGap(a, { ...a.heading, depth: a.headingDepth },
+        b, { ...b.heading, depth: b.headingDepth });
+      assert(projected >= -.35,
+        `seed ${seed}, tick ${tick}: silhouettes crossed (${projected}): ${JSON.stringify({ a, b })}`);
     }
     if (tick % 1 === 0) {
       for (const fraction of [.25, .5, .75, 1]) {
@@ -101,6 +113,9 @@ for (let seed = 1; seed <= 12; seed++) {
           const gap = bodyGap(a, a.heading, b, b.heading);
           assert(gap >= -.35,
             `seed ${seed}, tick ${tick}, interpolation ${fraction}: bodies cross (${gap}): ${JSON.stringify({ a, b, previousFrame, poses })}`);
+          const projected = silhouetteGap(a, a.heading, b, b.heading);
+          assert(projected >= -.35,
+            `seed ${seed}, tick ${tick}, interpolation ${fraction}: silhouettes cross (${projected}): ${JSON.stringify({ a, b })}`);
         }
       }
       previousFrame = poses;
