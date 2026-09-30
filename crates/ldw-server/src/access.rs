@@ -807,6 +807,35 @@ impl AccessStore {
         })
     }
 
+    pub async fn close_invitation(
+        &self,
+        owner_token: &str,
+        csrf: &str,
+        session_id: Uuid,
+    ) -> Result<(), AccessError> {
+        self.check_owner_csrf(owner_token, csrf).await?;
+        let (account_id, role) = self.owner_principal(owner_token).await?;
+        let mut tx = self.pool.begin().await?;
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE id = $1 AND (owner_id = $2 OR $3 = 'admin') FOR UPDATE",
+        )
+        .bind(session_id)
+        .bind(account_id)
+        .bind(role)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if !matches!(status.as_deref(), Some("running" | "paused")) {
+            return Err(AccessError::Forbidden);
+        }
+        // Pairing takes the same session row lock before reading an invitation.
+        sqlx::query("DELETE FROM pair_invitations WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn pair_controller(
         &self,
         session_id: Uuid,
@@ -1132,5 +1161,91 @@ mod login_tests {
             store.login(&extra, "wrong-password", &peer).await,
             Err(AccessError::InvalidCredentials)
         ));
+    }
+}
+
+#[cfg(test)]
+mod invitation_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    #[tokio::test]
+    async fn closing_invitation_serializes_with_pairing_and_preserves_issued_grants() {
+        let pool = crate::test_pool().await;
+        let store = AccessStore::new(pool.clone(), [83; 32]);
+        let owner = Uuid::new_v4();
+        let token = format!("invite-owner-{owner}");
+        let csrf = format!("invite-csrf-{owner}");
+        sqlx::query("INSERT INTO accounts (id, login, role, password_hash) VALUES ($1, $2, 'owner', 'test-hash')")
+            .bind(owner).bind(format!("invite-{owner}"))
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO owner_grants (id, account_id, token_hash, csrf_hash, expires_at) \
+                     VALUES ($1, $2, $3, $4, now() + interval '1 hour')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(hash_token(&token).to_vec())
+        .bind(hash_token(&csrf).to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let session = store.create_session(&token, &csrf).await.unwrap();
+        let session_id = session.session_id;
+        for round in 0..3 {
+            let invitation = store
+                .open_invitation(&token, &csrf, session_id)
+                .await
+                .unwrap();
+            let barrier = Arc::new(Barrier::new(3));
+            let close_store = store.clone();
+            let close_token = token.clone();
+            let close_csrf = csrf.clone();
+            let close_barrier = barrier.clone();
+            let close = tokio::spawn(async move {
+                close_barrier.wait().await;
+                close_store
+                    .close_invitation(&close_token, &close_csrf, session_id)
+                    .await
+            });
+            let pair_store = store.clone();
+            let pair_barrier = barrier.clone();
+            let code = invitation.qr_secret.clone();
+            let pair = tokio::spawn(async move {
+                pair_barrier.wait().await;
+                pair_store
+                    .pair_controller(
+                        session_id,
+                        &format!("racer-{round}"),
+                        "race-ip",
+                        PairCode::Qr(&code),
+                    )
+                    .await
+            });
+            barrier.wait().await;
+            close.await.unwrap().unwrap();
+            match pair.await.unwrap() {
+                Ok(grant) => {
+                    store
+                        .controller_scene(&grant.token, session_id)
+                        .await
+                        .expect("a Controller paired before close keeps access");
+                }
+                Err(AccessError::InvalidCredentials) => {}
+                other => panic!("unexpected concurrent pairing outcome: {other:?}"),
+            }
+            assert!(matches!(
+                store
+                    .pair_controller(
+                        session_id,
+                        &format!("after-close-{round}"),
+                        "race-ip",
+                        PairCode::Qr(&invitation.qr_secret)
+                    )
+                    .await,
+                Err(AccessError::InvalidCredentials)
+            ));
+        }
     }
 }

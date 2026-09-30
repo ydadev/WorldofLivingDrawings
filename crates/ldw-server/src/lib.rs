@@ -479,6 +479,49 @@ mod tests {
             .check_controller_csrf(&controller.token, &controller.csrf, first_scene.session_id)
             .await
             .expect("own CSRF token");
+        assert!(
+            store
+                .close_invitation(&second.token, &second.csrf, first_scene.session_id)
+                .await
+                .is_err(),
+            "foreign Owner cannot close another session's invitation"
+        );
+        store
+            .close_invitation(&first.token, &first.csrf, first_scene.session_id)
+            .await
+            .expect("Owner closes invitation");
+        store
+            .close_invitation(&first.token, &first.csrf, first_scene.session_id)
+            .await
+            .expect("closing an already closed invitation is idempotent");
+        assert!(
+            store
+                .pair_controller(
+                    first_scene.session_id,
+                    "closed-pin-device",
+                    "test-ip",
+                    access::PairCode::Pin(&invite.pin),
+                )
+                .await
+                .is_err(),
+            "closed PIN cannot pair"
+        );
+        assert!(
+            store
+                .pair_controller(
+                    first_scene.session_id,
+                    "closed-qr-device",
+                    "test-ip",
+                    access::PairCode::Qr(&invite.qr_secret),
+                )
+                .await
+                .is_err(),
+            "closed QR cannot pair"
+        );
+        store
+            .controller_scene(&controller.token, first_scene.session_id)
+            .await
+            .expect("closing an invitation preserves existing Controller");
         let replacement = store
             .open_invitation(&first.token, &first.csrf, first_scene.session_id)
             .await
@@ -869,7 +912,7 @@ mod tests {
             .await
             .expect("owner two opens own invitation");
         let pair_body = serde_json::json!({
-            "client_key": "http-client", "qr_secret": second_invite.qr_secret,
+            "client_key": "http-client", "qr_secret": &second_invite.qr_secret,
         });
         let mut pair_request = Request::builder()
             .method("POST")
@@ -916,6 +959,104 @@ mod tests {
                 .unwrap()
                 .status(),
             StatusCode::FORBIDDEN
+        );
+        let invitation_uri = format!("/api/sessions/{}/invitation", second_scene.session_id);
+        let controller_close = Request::builder()
+            .method("DELETE")
+            .uri(&invitation_uri)
+            .header(header::COOKIE, controller_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", "controller-csrf")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(controller_close)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let foreign_close = Request::builder()
+            .method("DELETE")
+            .uri(&invitation_uri)
+            .header(header::COOKIE, &owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", &first.csrf)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(foreign_close).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let close_without_origin = Request::builder()
+            .method("DELETE")
+            .uri(&invitation_uri)
+            .header(header::COOKIE, &second_owner_cookie)
+            .header("x-csrf-token", &second.csrf)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(close_without_origin)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let close_without_csrf = Request::builder()
+            .method("DELETE")
+            .uri(&invitation_uri)
+            .header(header::COOKIE, &second_owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(close_without_csrf)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let close_invite = Request::builder()
+            .method("DELETE")
+            .uri(&invitation_uri)
+            .header(header::COOKIE, &second_owner_cookie)
+            .header(header::ORIGIN, "https://world.example.test")
+            .header("x-csrf-token", &second.csrf)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(close_invite).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(
+            store
+                .pair_controller(
+                    second_scene.session_id,
+                    "after-http-close",
+                    "test-ip",
+                    access::PairCode::Qr(&second_invite.qr_secret),
+                )
+                .await
+                .is_err(),
+            "HTTP close must invalidate the QR"
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/sessions/{}/scene", second_scene.session_id))
+                        .header(header::COOKIE, controller_cookie)
+                        .body(Body::empty())
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "paired Controller keeps scene access after invitation closes"
         );
 
         use futures_util::{SinkExt, StreamExt};
